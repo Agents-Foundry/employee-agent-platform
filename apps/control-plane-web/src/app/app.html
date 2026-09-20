@@ -1,0 +1,195 @@
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="#" aria-label="Agents Foundry home">
+      <span class="brand-mark">AF</span><span><strong>Agents</strong> Foundry</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a class="active" href="#overview"><span>◇</span> Overview</a>
+      <a href="#employees"><span>♙</span> Employees</a>
+      <a href="#agents"><span>✦</span> Agent catalog</a>
+      <a href="#approvals"
+        ><span>✓</span> Approvals <b>{{ pendingCount() }}</b></a
+      >
+      <a href="#audit"><span>⌁</span> Audit trail</a>
+    </nav>
+    <div class="trust-card">
+      <span class="pulse"></span>
+      <div><strong>Governed runtime</strong><small>Policies are enforced</small></div>
+    </div>
+    <div class="profile">
+      <span>AP</span>
+      <div><strong>Admin</strong><small>Agents Foundry</small></div>
+      <b>•••</b>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <p>CONTROL PLANE</p>
+        <h1>Good morning, Admin</h1>
+        <span>Manage your AI workforce from one secure place.</span>
+      </div>
+      <div class="header-actions">
+        <button class="icon-button" aria-label="Notifications">◌</button
+        ><button class="primary" (click)="refresh()">↻ Refresh</button>
+      </div>
+    </header>
+
+    @if (error()) {
+      <div class="error-banner" role="alert">{{ error() }}</div>
+    }
+
+    <section class="metrics" id="overview" aria-label="Workspace summary">
+      <article>
+        <div class="metric-icon violet">✦</div>
+        <div>
+          <span>Active agents</span><strong>{{ activeAgentCount() }}</strong
+          ><small>Engineering / QA pilot</small>
+        </div>
+      </article>
+      <article>
+        <div class="metric-icon amber">✓</div>
+        <div>
+          <span>Pending approvals</span><strong>{{ pendingCount() }}</strong
+          ><small>Human decision required</small>
+        </div>
+      </article>
+      <article>
+        <div class="metric-icon cyan">⌁</div>
+        <div>
+          <span>Conversation sync</span><strong>Central</strong><small>Organization governed</small>
+        </div>
+      </article>
+      <article>
+        <div class="metric-icon green">◇</div>
+        <div><span>Key modes</span><strong>2</strong><small>BYOK + managed</small></div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel approvals-panel" id="approvals">
+        <div class="panel-heading">
+          <div>
+            <p>ACTION CENTER</p>
+            <h2>Approval queue</h2>
+          </div>
+          <span class="counter">{{ pendingCount() }} pending</span>
+        </div>
+        @if (loading()) {
+          <div class="empty-state">Loading governed actions…</div>
+        } @else if (approvals().length === 0) {
+          <div class="empty-state">
+            <span>✓</span><strong>All clear</strong>
+            <p>No actions are waiting for approval.</p>
+          </div>
+        } @else {
+          <div class="approval-list">
+            @for (approval of approvals(); track approval.id) {
+              <div class="approval-row">
+                <div class="risk" [class.closed]="approval.status !== 'PENDING'">
+                  {{ approval.risk.slice(0, 1) }}
+                </div>
+                <div class="approval-copy">
+                  <div>
+                    <strong>{{ approval.action }}</strong
+                    ><span>{{ approval.status }}</span>
+                  </div>
+                  <p>{{ approval.summary }}</p>
+                  <small
+                    >Run {{ approval.resourceId.slice(0, 8) }} ·
+                    {{ approval.createdAt | date: 'medium' }}</small
+                  >
+                </div>
+                @if (approval.status === 'PENDING') {
+                  <div class="approval-actions">
+                    <button class="reject" (click)="decide(approval, 'REJECTED')">Reject</button
+                    ><button class="approve" (click)="decide(approval, 'APPROVED')">Approve</button>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        }
+      </article>
+
+      <article class="panel policy-panel">
+        <div class="panel-heading">
+          <div>
+            <p>SECURITY POSTURE</p>
+            <h2>Policy status</h2>
+          </div>
+          <span class="live">● Live</span>
+        </div>
+        <div class="policy-score">
+          <div><strong>100</strong><small>/100</small></div>
+          <span>Foundation rules active</span>
+        </div>
+        <ul>
+          <li>
+            <span>✓</span>
+            <div><strong>External writes gated</strong><small>Admin approval required</small></div>
+          </li>
+          <li>
+            <span>✓</span>
+            <div><strong>Production deploy denied</strong><small>QA agent boundary</small></div>
+          </li>
+          <li>
+            <span>✓</span>
+            <div><strong>Secrets reference-only</strong><small>No raw keys in database</small></div>
+          </li>
+        </ul>
+      </article>
+
+      <article class="panel agents-panel" id="agents">
+        <div class="panel-heading">
+          <div>
+            <p>AI WORKFORCE</p>
+            <h2>Agent catalog</h2>
+          </div>
+          <button class="link-button">View all →</button>
+        </div>
+        @for (agent of bootstrap()?.agents ?? []; track agent.id) {
+          <div class="agent-card">
+            <div class="agent-avatar">QA</div>
+            <div class="agent-info">
+              <strong>{{ agent.name }}</strong
+              ><span>{{ agent.department }} · {{ agent.team }}</span>
+              <div>
+                @for (capability of agent.capabilities.slice(0, 3); track capability) {
+                  <small>{{ capability }}</small>
+                }
+              </div>
+            </div>
+            <span class="active-pill">● {{ agent.status }}</span>
+          </div>
+        }
+      </article>
+
+      <article class="panel keys-panel">
+        <div class="panel-heading">
+          <div>
+            <p>MODEL ACCESS</p>
+            <h2>Hybrid key policy</h2>
+          </div>
+        </div>
+        <div class="key-option">
+          <span>⌁</span>
+          <div>
+            <strong>Organization managed</strong
+            ><small>Default · centrally governed vault reference</small>
+          </div>
+          <b>Default</b>
+        </div>
+        <div class="key-option">
+          <span>◇</span>
+          <div>
+            <strong>Employee BYOK</strong><small>Allowed · employee-scoped vault reference</small>
+          </div>
+          <b>Allowed</b>
+        </div>
+        <p class="secret-rule">{{ bootstrap()?.keyPolicy?.secretStorageRule }}</p>
+      </article>
+    </section>
+  </main>
+</div>

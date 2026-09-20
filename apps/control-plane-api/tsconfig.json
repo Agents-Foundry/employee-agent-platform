@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "../..",
+    "types": ["node"],
+    "noEmit": false,
+    "isolatedModules": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../../packages/contracts/src/**/*.ts",
+    "../../packages/policy-engine/src/**/*.ts"
+  ]
+}

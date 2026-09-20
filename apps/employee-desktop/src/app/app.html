@@ -1,0 +1,170 @@
+<div class="desktop-shell">
+  <aside>
+    <div class="brand"><span>AF</span><strong>Agents Foundry</strong><small>Employee</small></div>
+    <button class="new-chat" (click)="startNewConversation()"><span>＋</span> New QA task</button>
+    <p class="section-label">RECENT WORK</p>
+    <div class="history">
+      @for (conversation of conversations(); track conversation.id) {
+        <button
+          [class.selected]="conversation.id === activeConversation()?.id"
+          (click)="selectConversation(conversation)"
+        >
+          <span>◇</span>
+          <div>
+            <strong>{{ conversation.title }}</strong
+            ><small>{{ conversation.updatedAt | date: 'short' }}</small>
+          </div>
+        </button>
+      } @empty {
+        <div class="no-history">Your synced QA conversations will appear here.</div>
+      }
+    </div>
+    <div class="sidebar-footer">
+      <div class="runtime">
+        <span></span>
+        <div><strong>Control plane connected</strong><small>Policies and audit active</small></div>
+      </div>
+      <div class="user">
+        <span>QE</span>
+        <div>
+          <strong>{{ bootstrap()?.employee?.displayName ?? 'QA Engineer' }}</strong
+          ><small>{{ bootstrap()?.employee?.team ?? 'Engineering / QA' }}</small>
+        </div>
+        <b>•••</b>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div class="agent">
+        <span>QA</span>
+        <div>
+          <strong>QA Engineer Agent</strong><small><i></i> Online · governed workspace</small>
+        </div>
+      </div>
+      <div class="header-meta">
+        <span>Organization managed key</span><button aria-label="Conversation details">•••</button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      @if (error()) {
+        <div class="error" role="alert">{{ error() }}</div>
+      }
+      @if (!activeConversation()) {
+        <div class="welcome">
+          <div class="hero-mark"><span>QA</span></div>
+          <p>ENGINEERING · QA PILOT</p>
+          <h1>What should we validate?</h1>
+          <span
+            >I can turn a Jira story into an evidence-ready test plan. Any browser run pauses for
+            human approval.</span
+          >
+          <div class="quick-actions">
+            <button (click)="useExample()">
+              <b>⌁</b>
+              <div>
+                <strong>Analyze a Jira story</strong><small>Impact map + regression plan</small>
+              </div>
+              <span>→</span>
+            </button>
+            <button (click)="useExample()">
+              <b>✓</b>
+              <div>
+                <strong>Plan release sanity</strong><small>Pre/post-production checks</small>
+              </div>
+              <span>→</span>
+            </button>
+            <button (click)="useExample()">
+              <b>◇</b>
+              <div>
+                <strong>Investigate a failure</strong><small>Evidence-backed defect draft</small>
+              </div>
+              <span>→</span>
+            </button>
+          </div>
+        </div>
+      } @else {
+        <div class="thread">
+          <div class="thread-heading">
+            <p>QA WORKSPACE</p>
+            <h1>{{ activeConversation()!.title }}</h1>
+          </div>
+          @for (message of activeConversation()!.messages; track message.id) {
+            <article [class.employee-message]="message.author === 'EMPLOYEE'">
+              <div class="avatar">{{ message.author === 'EMPLOYEE' ? 'You' : 'QA' }}</div>
+              <div>
+                <div class="message-meta">
+                  <strong>{{ message.author === 'EMPLOYEE' ? 'You' : 'QA Engineer Agent' }}</strong
+                  ><small>{{ message.createdAt | date: 'shortTime' }}</small>
+                </div>
+                <p>{{ message.content }}</p>
+              </div>
+            </article>
+          }
+          @if (lastRun(); as result) {
+            <section class="run-card">
+              <div class="run-title">
+                <span>✓</span>
+                <div>
+                  <strong>Test plan prepared</strong
+                  ><small>{{ result.run.storyKey }} · {{ result.run.status }}</small>
+                </div>
+                <b>{{ result.approval.status }}</b>
+              </div>
+              <ol>
+                @for (step of result.run.plan; track step) {
+                  <li>{{ step }}</li>
+                }
+              </ol>
+              <div class="approval-note">
+                <span>!</span>
+                <p>
+                  Browser execution is paused. Approval
+                  <strong>{{ result.approval.id.slice(0, 8) }}</strong> is waiting in the Admin
+                  control plane.
+                </p>
+              </div>
+            </section>
+          }
+        </div>
+      }
+
+      <form class="composer" (ngSubmit)="submit()">
+        <div class="context-fields">
+          <label
+            >Story key<input
+              name="storyKey"
+              [(ngModel)]="storyKey"
+              required
+              pattern="[A-Za-z][A-Za-z0-9]+-[0-9]+"
+          /></label>
+          <label
+            >Target environment<input name="targetUrl" [(ngModel)]="targetUrl" required type="url"
+          /></label>
+        </div>
+        <div class="prompt-box">
+          <textarea
+            name="prompt"
+            [(ngModel)]="prompt"
+            rows="2"
+            required
+            placeholder="Describe the QA task…"
+          ></textarea>
+          <div class="composer-actions">
+            <button type="button" class="attach" aria-label="Attach context">＋</button
+            ><span>External writes require approval</span
+            ><button type="submit" class="send" [disabled]="busy()">
+              {{ busy() ? '…' : '↑' }}
+            </button>
+          </div>
+        </div>
+        <small
+          >Agents Foundry can make mistakes. Review plans and evidence before approving
+          actions.</small
+        >
+      </form>
+    </section>
+  </main>
+</div>

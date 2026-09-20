@@ -1,0 +1,46 @@
+{
+  "name": "agents-foundry",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "ng": "ng",
+    "dev:api": "npm run dev --workspace @agents-foundry/control-plane-api",
+    "start:admin": "ng serve control-plane-web --port 4200",
+    "start:employee": "ng serve employee-desktop --port 4300",
+    "tauri:dev": "tauri dev --config apps/employee-desktop/src-tauri/tauri.conf.json",
+    "tauri:build": "tauri build --config apps/employee-desktop/src-tauri/tauri.conf.json",
+    "build": "npm run build:admin && npm run build:employee && npm run build:api",
+    "build:admin": "ng build control-plane-web",
+    "build:employee": "ng build employee-desktop",
+    "build:api": "npm run build --workspace @agents-foundry/control-plane-api",
+    "test": "npm run test:web && npm run test:api",
+    "test:web": "ng test control-plane-web --watch=false && ng test employee-desktop --watch=false",
+    "test:api": "npm run test --workspace @agents-foundry/control-plane-api",
+    "check": "npm run build && npm run test"
+  },
+  "private": true,
+  "workspaces": [
+    "apps/control-plane-api"
+  ],
+  "packageManager": "npm@11.9.0",
+  "dependencies": {
+    "@angular/common": "^22.1.0",
+    "@angular/compiler": "^22.1.0",
+    "@angular/core": "^22.1.0",
+    "@angular/forms": "^22.1.0",
+    "@angular/platform-browser": "^22.1.0",
+    "@angular/router": "^22.1.0",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^22.1.8",
+    "@angular/cli": "^22.1.7",
+    "@angular/compiler-cli": "^22.1.0",
+    "@tauri-apps/cli": "^2.11.5",
+    "jsdom": "^28.0.0",
+    "prettier": "^3.8.1",
+    "typescript": "~6.0.2",
+    "vitest": "^4.0.8"
+  }
+}
