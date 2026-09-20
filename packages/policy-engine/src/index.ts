@@ -51,6 +51,9 @@ const decisions: Record<GovernedAction, PolicyDecision> = {
   },
 };
 
-export function evaluatePolicy(action: GovernedAction): PolicyDecision {
-  return decisions[action];
+export function evaluatePolicy(action: string): PolicyDecision {
+  if (!Object.hasOwn(decisions, action)) {
+    return { outcome: 'DENY', risk: 'CRITICAL', reason: 'Unknown actions are denied.' };
+  }
+  return { ...decisions[action as GovernedAction] };
 }

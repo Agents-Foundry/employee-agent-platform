@@ -8,6 +8,8 @@
 - Hybrid key-mode policy model
 - Policy decisions, approval workflow, and audit events
 - Build/test CI
+- Versioned QA questionnaire and employee provisioning requests
+- Transactional admin decisions, persistent Ed25519 manifests, client verification, and lifecycle audit view
 
 ## Milestone 2 — Identity and production data
 

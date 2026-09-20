@@ -34,6 +34,7 @@ yarn-error.log
 # Miscellaneous
 /.angular/cache
 /.data
+**/*.signing-key.pem
 /coverage
 **/coverage/
 *.db

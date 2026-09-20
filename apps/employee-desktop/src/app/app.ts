@@ -8,7 +8,13 @@ import type {
   Conversation,
   ConversationDetail,
   QaRunResponse,
+  AgentBlueprint,
+  ProvisioningRequest,
+  KeySource,
+  SignedAgentManifest,
+  ManifestVerificationKey,
 } from '@agents-foundry/contracts';
+import { verifyManifest } from './verify-manifest';
 
 @Component({
   imports: [DatePipe, FormsModule],
@@ -26,6 +32,118 @@ export class App implements OnInit {
   protected readonly busy = signal(false);
   protected readonly error = signal('');
   protected readonly lastRun = signal<QaRunResponse | null>(null);
+  protected readonly blueprint = signal<AgentBlueprint | null>(null);
+  protected readonly provisioning = signal<ProvisioningRequest[]>([]);
+  protected readonly provisioningBusy = signal(false);
+  protected readonly verifiedManifest = signal<SignedAgentManifest | null>(null);
+  protected selectedAgentId = 'agent_qa_engineer';
+  protected answers: Record<string, string | string[]> = {};
+  protected provider = '';
+  protected model = '';
+  protected credentialMode: KeySource = 'ORGANIZATION_MANAGED';
+
+  private actorHeaders() {
+    const employee = this.bootstrap()!.employee;
+    return {
+      'x-actor-id': employee.id,
+      'x-actor-role': 'EMPLOYEE',
+      'x-organization-id': employee.organizationId,
+    };
+  }
+
+  protected toggleAnswer(id: string, option: string, checked: boolean): void {
+    const current = this.answers[id];
+    const values = Array.isArray(current) ? current : [];
+    this.answers[id] = checked ? [...values, option] : values.filter((value) => value !== option);
+  }
+
+  protected async refreshProvisioning(): Promise<void> {
+    if (!this.bootstrap()) return;
+    try {
+      this.provisioning.set(
+        await firstValueFrom(
+          this.http.get<ProvisioningRequest[]>(`${this.apiUrl}/provisioning`, {
+            headers: this.actorHeaders(),
+          }),
+        ),
+      );
+    } catch {
+      this.error.set('Provisioning requests could not be loaded.');
+    }
+  }
+
+  protected async requestAgent(): Promise<void> {
+    if (this.provisioningBusy() || !this.blueprint()) return;
+    this.provisioningBusy.set(true);
+    this.error.set('');
+    try {
+      const blueprint = this.blueprint()!;
+      await firstValueFrom(
+        this.http.post(
+          `${this.apiUrl}/provisioning`,
+          {
+            blueprintId: blueprint.id,
+            blueprintVersion: blueprint.version,
+            provider: this.provider,
+            model: this.model,
+            credentialMode: this.credentialMode,
+            answers: this.answers,
+          },
+          { headers: this.actorHeaders() },
+        ),
+      );
+      await this.refreshProvisioning();
+    } catch {
+      this.error.set(
+        'Agent request failed. Complete every field and use HTTP(S) URLs without credentials.',
+      );
+    } finally {
+      this.provisioningBusy.set(false);
+    }
+  }
+
+  protected async useProvisionedAgent(request: ProvisioningRequest): Promise<void> {
+    if (!request.agentId || this.busy() || this.provisioningBusy()) return;
+    this.provisioningBusy.set(true);
+    this.error.set('');
+    try {
+      const manifest = await this.fetchVerifiedManifest(request.agentId);
+      this.verifiedManifest.set(manifest);
+      this.selectedAgentId = manifest.payload.agentId;
+      this.targetUrl = String(manifest.payload.answers['qaUrl']);
+      await this.startNewConversation();
+    } catch {
+      this.error.set(
+        'The signed agent configuration could not be verified. Agent selection was not changed.',
+      );
+    } finally {
+      this.provisioningBusy.set(false);
+    }
+  }
+
+  private async fetchVerifiedManifest(agentId: string): Promise<SignedAgentManifest> {
+    const headers = this.actorHeaders();
+    const [manifest, key] = await Promise.all([
+      firstValueFrom(
+        this.http.get<SignedAgentManifest>(`${this.apiUrl}/agents/${agentId}/manifest`, {
+          headers,
+        }),
+      ),
+      firstValueFrom(
+        this.http.get<ManifestVerificationKey>(`${this.apiUrl}/manifest-key`, { headers }),
+      ),
+    ]);
+    const employee = this.bootstrap()!.employee;
+    if (
+      !(await verifyManifest(manifest, key, {
+        agentId,
+        employeeId: employee.id,
+        organizationId: employee.organizationId,
+      }))
+    )
+      throw new Error('INVALID_MANIFEST');
+    return manifest;
+  }
   protected prompt =
     'Analyze the story, prepare regression coverage, and request approval before browser execution.';
   protected storyKey = 'STORY-142';
@@ -45,14 +163,22 @@ export class App implements OnInit {
       const detail = await firstValueFrom(
         this.http.get<ConversationDetail>(`${this.apiUrl}/conversations/${conversation.id}`),
       );
+      const manifest =
+        detail.agentId === 'agent_qa_engineer'
+          ? null
+          : await this.fetchVerifiedManifest(detail.agentId);
+      this.verifiedManifest.set(manifest);
+      this.selectedAgentId = detail.agentId;
       this.activeConversation.set(detail);
     } catch {
-      this.error.set('The conversation could not be loaded.');
+      this.error.set(
+        'The conversation could not be loaded or its agent signature could not be verified.',
+      );
     }
   }
 
   protected async submit(): Promise<void> {
-    if (this.busy() || !this.prompt.trim()) return;
+    if (this.busy() || this.provisioningBusy() || !this.prompt.trim()) return;
     this.busy.set(true);
     this.error.set('');
     try {
@@ -63,7 +189,7 @@ export class App implements OnInit {
         const created = await firstValueFrom(
           this.http.post<Conversation>(`${this.apiUrl}/conversations`, {
             employeeId: bootstrap.employee.id,
-            agentId: bootstrap.agents[0].id,
+            agentId: this.selectedAgentId,
             title: `${this.storyKey} QA validation`,
           }),
         );
@@ -107,6 +233,13 @@ export class App implements OnInit {
         this.http.get<BootstrapResponse>(`${this.apiUrl}/bootstrap`),
       );
       this.bootstrap.set(bootstrap);
+      const blueprints = await firstValueFrom(
+        this.http.get<AgentBlueprint[]>(`${this.apiUrl}/blueprints`, {
+          headers: this.actorHeaders(),
+        }),
+      );
+      this.blueprint.set(blueprints[0] ?? null);
+      await this.refreshProvisioning();
       await this.loadConversations();
     } catch {
       this.error.set('The control plane API is offline. Start it with npm run dev:api.');
