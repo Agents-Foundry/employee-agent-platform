@@ -68,6 +68,82 @@
     </section>
 
     <section class="grid">
+      <article class="panel provisioning-panel">
+        <div class="panel-heading">
+          <div>
+            <p>EMPLOYEE ONBOARDING</p>
+            <h2>Agent provisioning</h2>
+          </div>
+        </div>
+        @for (request of provisioning(); track request.id) {
+          <div class="provisioning-request">
+            <h3>{{ request.answers['projectName'] }} · {{ request.status }}</h3>
+            <p>
+              {{ request.employeeId }} · {{ request.blueprintId }} / {{ request.blueprintVersion }}
+            </p>
+            <p>{{ request.provider }} / {{ request.model }} · {{ request.credentialMode }}</p>
+            <details>
+              <summary>Review answers and permissions</summary>
+              <p>Repository: {{ request.answers['repositoryUrl'] }}</p>
+              <p>QA environment: {{ request.answers['qaUrl'] }}</p>
+              <p>Issue tracker: {{ request.answers['issueTracker'] }}</p>
+              <p>Source control: {{ request.answers['sourceControl'] }}</p>
+              <p>Testing: {{ request.answers['testingTechnologies'] }}</p>
+              <ul>
+                @for (capability of request.capabilities; track capability.action) {
+                  <li>{{ capability.action }} — {{ capability.outcome }}</li>
+                }
+              </ul>
+            </details>
+            @if (request.status === 'PENDING') {
+              <label
+                >Decision reason<input
+                  [(ngModel)]="reasons[request.id]"
+                  [name]="request.id"
+                  [attr.name]="request.id"
+                  maxlength="500"
+              /></label>
+              <div class="approval-actions">
+                <button
+                  class="reject"
+                  (click)="decideProvisioning(request, 'REJECTED')"
+                  [disabled]="!!deciding() || !reasons[request.id]?.trim()"
+                >
+                  Reject
+                </button>
+                <button
+                  class="approve"
+                  (click)="decideProvisioning(request, 'APPROVED')"
+                  [disabled]="!!deciding() || !reasons[request.id]?.trim()"
+                >
+                  Approve agent
+                </button>
+              </div>
+            } @else {
+              <p>{{ request.decisionReason }} · {{ request.decidedBy }}</p>
+            }
+          </div>
+        } @empty {
+          <div class="empty-state">No agent provisioning requests.</div>
+        }
+      </article>
+      <article class="panel provisioning-panel" id="audit">
+        <div class="panel-heading">
+          <div>
+            <p>LIFECYCLE</p>
+            <h2>Provisioning audit trail</h2>
+          </div>
+        </div>
+        @for (event of events(); track event.id) {
+          <p class="lifecycle-event">
+            <strong>{{ event.type }}</strong
+            ><br />{{ event.actorId }} · {{ event.occurredAt | date: 'medium' }} ·
+            {{ event.subjectId.slice(0, 8) }}
+          </p>
+        } @empty {
+          <div class="empty-state">No provisioning events yet.</div>
+        }
+      </article>
       <article class="panel approvals-panel" id="approvals">
         <div class="panel-heading">
           <div>

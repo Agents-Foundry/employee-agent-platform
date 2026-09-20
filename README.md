@@ -10,6 +10,7 @@ This clean-slate repository implements the first end-to-end control boundary:
 - an explicit policy engine that gates external writes and browser execution;
 - hybrid model-key metadata for employee BYOK and organization-managed keys;
 - an append-only application audit stream.
+- versioned QA onboarding, admin provisioning decisions, and Ed25519-signed agent manifests.
 
 ## Locked product decisions
 
@@ -62,6 +63,17 @@ npm run check
 
 ## QA POC flow
 
+### Provision an employee agent
+
+1. In the employee app, expand **Request your QA agent** and complete the blueprint questionnaire and model preferences.
+2. Submit the request, then review its answers and fixed permissions in the admin app's **Agent provisioning** panel.
+3. Enter a reason and approve or reject it. Approval atomically creates an assigned agent, immutable signed manifest, and lifecycle audit events.
+4. Refresh requests in the employee app and select **Verify and use agent**. Signature and ownership verification must succeed before selection changes. New QA tasks then use this agent. Existing conversations keep their original agent.
+
+The seeded demo agent remains available for the original QA flow. Model preferences are metadata; neither credentials nor model execution are enabled by provisioning.
+
+### Request a QA plan
+
 1. The employee starts a QA task using a Jira-style story key and target environment.
 2. The central API persists the conversation and request.
 3. The QA agent creates an evidence-oriented test plan.
@@ -76,3 +88,5 @@ No raw provider key is stored. A future vault integration stores secrets and pro
 Foundation Milestone 1 intentionally stops before live Jira/Bitbucket connectors, LLM calls, and Playwright execution. Those integrations will be added behind the existing policy and approval contracts so no external write or browser run can bypass governance.
 
 See [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), and the [security model](docs/security.md).
+
+See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.

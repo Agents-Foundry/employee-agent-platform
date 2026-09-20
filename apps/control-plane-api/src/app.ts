@@ -6,6 +6,28 @@ import { z } from 'zod';
 import type { QaRunRequest, QaRunResponse } from '@agents-foundry/contracts';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { ControlPlaneDatabase } from './database.js';
+import { qaBlueprint, validateAnswers } from './blueprints.js';
+
+const provisioningSchema = z
+  .object({
+    blueprintId: z.literal(qaBlueprint.id),
+    blueprintVersion: z.literal(qaBlueprint.version),
+    provider: z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .regex(/^[a-zA-Z0-9._-]+$/),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .max(160)
+      .regex(/^[a-zA-Z0-9._:/-]+$/),
+    credentialMode: z.enum(['EMPLOYEE_BYOK', 'ORGANIZATION_MANAGED']),
+    answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
+  })
+  .strict();
 
 const createConversationSchema = z.object({
   employeeId: z.string().min(1).max(120),
@@ -73,6 +95,74 @@ export function createApp(database = new ControlPlaneDatabase()) {
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap());
+  });
+
+  function demoActor(request: Request, response: Response, next: NextFunction) {
+    const id = request.header('x-actor-id');
+    const role = request.header('x-actor-role');
+    const organizationId = request.header('x-organization-id');
+    if (!id || !role || !organizationId)
+      return response.status(401).json({ error: 'ACTOR_REQUIRED' });
+    database.resolveActor(id, role, organizationId);
+    response.locals['actor'] = { id, role, organizationId };
+    return next();
+  }
+
+  app.get('/api/blueprints', demoActor, (_request, response) => response.json([qaBlueprint]));
+  app.get('/api/manifest-key', demoActor, (_request, response) =>
+    response.json(database.signer.verificationKey),
+  );
+  app.get('/api/provisioning', demoActor, (_request, response) => {
+    const actor = response.locals['actor'];
+    response.json(
+      database.listProvisioning(
+        actor.organizationId,
+        actor.role === 'EMPLOYEE' ? actor.id : undefined,
+      ),
+    );
+  });
+  app.post('/api/provisioning', demoActor, (request, response) => {
+    const actor = response.locals['actor'];
+    if (actor.role !== 'EMPLOYEE')
+      return response.status(403).json({ error: 'EMPLOYEE_ROLE_REQUIRED' });
+    const input = provisioningSchema.parse(request.body);
+    input.answers = validateAnswers(input.answers);
+    return response.status(201).json(database.requestProvisioning(actor.id, input));
+  });
+  app.post('/api/provisioning/:id/decision', demoActor, (request, response) => {
+    const actor = response.locals['actor'];
+    if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
+    const input = z
+      .object({
+        decision: z.enum(['APPROVED', 'REJECTED']),
+        reason: z.string().trim().min(1).max(500),
+      })
+      .strict()
+      .parse(request.body);
+    return response.json(
+      database.decideProvisioning(
+        String(request.params['id']),
+        actor.organizationId,
+        actor.id,
+        input.decision,
+        input.reason,
+      ),
+    );
+  });
+  app.get('/api/agents/:id/manifest', demoActor, (request, response) => {
+    const actor = response.locals['actor'];
+    response.json(
+      database.getManifest(
+        String(request.params['id']),
+        actor.organizationId,
+        actor.role === 'EMPLOYEE' ? actor.id : undefined,
+      ),
+    );
+  });
+  app.get('/api/lifecycle-events', demoActor, (_request, response) => {
+    const actor = response.locals['actor'];
+    if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
+    return response.json(database.listLifecycleEvents(actor.organizationId));
   });
 
   app.get('/api/conversations', (request, response) => {
@@ -144,6 +234,12 @@ export function createApp(database = new ControlPlaneDatabase()) {
   });
 
   app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+    if (error instanceof Error && error.message.endsWith('_FORBIDDEN')) {
+      return response.status(403).json({ error: error.message });
+    }
+    if (error instanceof Error && error.message === 'MANIFEST_INVALID') {
+      return response.status(409).json({ error: error.message });
+    }
     if (error instanceof z.ZodError) {
       return response.status(400).json({ error: 'VALIDATION_ERROR', details: error.issues });
     }

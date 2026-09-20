@@ -44,13 +44,102 @@
         </div>
       </div>
       <div class="header-meta">
-        <span>Organization managed key</span><button aria-label="Conversation details">•••</button>
+        <span>{{
+          verifiedManifest()?.payload?.model?.credentialMode === 'EMPLOYEE_BYOK'
+            ? 'Employee BYOK preference'
+            : 'Organization managed preference'
+        }}</span
+        ><button aria-label="Conversation details">•••</button>
       </div>
     </header>
 
     <section class="workspace">
       @if (error()) {
         <div class="error" role="alert">{{ error() }}</div>
+      }
+      <details class="provisioning-panel">
+        <summary>Request your QA agent</summary>
+        @if (blueprint(); as definition) {
+          <p>{{ definition.title }} · Blueprint {{ definition.version }}</p>
+          <p>{{ definition.mission }}</p>
+          <form (ngSubmit)="requestAgent()" class="provisioning-form">
+            @for (question of definition.questionnaire; track question.id) {
+              @if (question.type === 'multiselect') {
+                <fieldset>
+                  <legend>{{ question.label }}</legend>
+                  @for (option of question.options ?? []; track option) {
+                    <label class="choice"
+                      ><input
+                        type="checkbox"
+                        [checked]="(answers[question.id] ?? []).includes(option)"
+                        (change)="toggleAnswer(question.id, option, $any($event.target).checked)"
+                      />
+                      {{ option }}</label
+                    >
+                  }
+                </fieldset>
+              } @else {
+                <label
+                  >{{ question.label
+                  }}<input
+                    [name]="question.id"
+                    [attr.name]="question.id"
+                    [type]="question.type === 'url' ? 'url' : 'text'"
+                    [(ngModel)]="answers[question.id]"
+                    [required]="question.required"
+                /></label>
+              }
+            }
+            <label
+              >Model provider<input
+                name="provider"
+                [(ngModel)]="provider"
+                required
+                placeholder="Provider identifier"
+            /></label>
+            <label
+              >Model identifier<input
+                name="model"
+                [(ngModel)]="model"
+                required
+                placeholder="Your provider's model ID"
+            /></label>
+            <label
+              >Credential source<select name="credentialMode" [(ngModel)]="credentialMode">
+                <option value="ORGANIZATION_MANAGED">Organization managed</option>
+                <option value="EMPLOYEE_BYOK">Employee BYOK</option>
+              </select></label
+            >
+            <p>
+              Model preferences only. Credentials and live model execution are not connected yet.
+            </p>
+            <button type="submit" [disabled]="provisioningBusy()">Request admin approval</button>
+          </form>
+        }
+        <h2>Your requests</h2>
+        <button type="button" (click)="refreshProvisioning()">Refresh requests</button>
+        @for (request of provisioning(); track request.id) {
+          <div class="provisioning-request">
+            <strong>{{ request.answers['projectName'] }} · {{ request.status }}</strong>
+            <p>{{ request.decisionReason }}</p>
+            @if (request.status === 'APPROVED') {
+              <button
+                type="button"
+                (click)="useProvisionedAgent(request)"
+                [disabled]="busy() || provisioningBusy()"
+              >
+                Verify and use agent
+              </button>
+            }
+          </div>
+        } @empty {
+          <p>No provisioning requests yet.</p>
+        }
+      </details>
+      @if (verifiedManifest(); as manifest) {
+        <p class="verified-agent" role="status">
+          Signature verified · {{ manifest.payload.answers['projectName'] }} · Used for new QA tasks
+        </p>
       }
       @if (!activeConversation()) {
         <div class="welcome">

@@ -573,3 +573,29 @@ header div > span {
     grid-column: 2;
   }
 }
+.provisioning-panel {
+  grid-column: 1 / -1;
+}
+.provisioning-request,
+.lifecycle-event {
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+  overflow-wrap: anywhere;
+}
+.provisioning-request label {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+.provisioning-request input {
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+}
+.provisioning-request .approval-actions {
+  justify-content: flex-end;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

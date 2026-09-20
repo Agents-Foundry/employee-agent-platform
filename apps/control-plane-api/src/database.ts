@@ -14,7 +14,13 @@ import type {
   Organization,
   QaRun,
   QaRunStatus,
+  ProvisioningInput,
+  ProvisioningRequest,
+  SignedAgentManifest,
+  LifecycleEvent,
 } from '@agents-foundry/contracts';
+import { ManifestSigner } from './manifest-signing.js';
+import { qaBlueprint } from './blueprints.js';
 
 const ORGANIZATION_ID = 'org_agents_foundry';
 const EMPLOYEE_ID = 'employee_qa_demo';
@@ -26,8 +32,15 @@ function now(): string {
 
 export class ControlPlaneDatabase {
   private readonly db: DatabaseSync;
+  readonly signer: ManifestSigner;
 
   constructor(path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db') {
+    this.signer =
+      path === ':memory:'
+        ? new ManifestSigner()
+        : ManifestSigner.fromFile(
+            process.env['MANIFEST_SIGNING_KEY_PATH'] ?? `${path}.signing-key.pem`,
+          );
     if (path !== ':memory:') {
       mkdirSync(dirname(path), { recursive: true });
     }
@@ -35,6 +48,172 @@ export class ControlPlaneDatabase {
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     this.migrate();
     this.seed();
+  }
+
+  resolveActor(id: string, role: string, organizationId: string) {
+    // Explicit local-demo identities only. Replace with verified OIDC claims before deployment.
+    if (organizationId !== ORGANIZATION_ID) throw new Error('ACTOR_FORBIDDEN');
+    if (role === 'ADMIN' && id === 'admin_demo') return;
+    if (role === 'EMPLOYEE' && id === EMPLOYEE_ID) return;
+    throw new Error('ACTOR_FORBIDDEN');
+  }
+
+  requestProvisioning(employeeId: string, input: ProvisioningInput): ProvisioningRequest {
+    if (employeeId !== EMPLOYEE_ID) throw new Error('ACTOR_FORBIDDEN');
+    const request: ProvisioningRequest = {
+      ...input,
+      id: randomUUID(),
+      organizationId: ORGANIZATION_ID,
+      employeeId,
+      status: 'PENDING',
+      capabilities: structuredClone(qaBlueprint.capabilities),
+      createdAt: now(),
+    };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .prepare(
+          'INSERT INTO provisioning_requests (id, organization_id, employee_id, body) VALUES (?, ?, ?, ?)',
+        )
+        .run(request.id, request.organizationId, employeeId, JSON.stringify(request));
+      this.audit(employeeId, 'provisioning.requested', 'provisioning_request', request.id, {
+        blueprintId: input.blueprintId,
+        blueprintVersion: input.blueprintVersion,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return request;
+  }
+
+  listProvisioning(organizationId: string, employeeId?: string): ProvisioningRequest[] {
+    const rows = this.db
+      .prepare(
+        'SELECT body FROM provisioning_requests WHERE organization_id = ? ORDER BY rowid DESC',
+      )
+      .all(organizationId) as { body: string }[];
+    return rows
+      .map((row) => JSON.parse(row.body) as ProvisioningRequest)
+      .filter((item) => !employeeId || item.employeeId === employeeId);
+  }
+
+  decideProvisioning(
+    id: string,
+    organizationId: string,
+    actorId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    reason: string,
+  ) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db
+        .prepare('SELECT body FROM provisioning_requests WHERE id = ? AND organization_id = ?')
+        .get(id, organizationId) as { body: string } | undefined;
+      if (!row) throw new Error('PROVISIONING_NOT_FOUND');
+      const request = JSON.parse(row.body) as ProvisioningRequest;
+      if (request.status !== 'PENDING') throw new Error('APPROVAL_ALREADY_DECIDED');
+      if (request.employeeId === actorId) throw new Error('SELF_APPROVAL_FORBIDDEN');
+      Object.assign(request, {
+        status: decision,
+        decidedBy: actorId,
+        decidedAt: now(),
+        decisionReason: reason,
+      });
+      let manifest: SignedAgentManifest | undefined;
+      if (decision === 'APPROVED') {
+        request.agentId = randomUUID();
+        manifest = this.signer.sign({
+          apiVersion: 'agents-foundry/v1',
+          manifestId: randomUUID(),
+          agentId: request.agentId,
+          organizationId,
+          employeeId: request.employeeId,
+          blueprint: { id: request.blueprintId, version: request.blueprintVersion },
+          model: {
+            provider: request.provider,
+            model: request.model,
+            credentialMode: request.credentialMode,
+          },
+          answers: request.answers,
+          capabilities: request.capabilities,
+          conversationSync: 'REQUIRED',
+          policyVersion: 'foundation-approval-v1',
+          issuedAt: request.decidedAt!,
+        });
+        if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
+        this.db
+          .prepare(
+            'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          )
+          .run(
+            request.agentId,
+            organizationId,
+            `${qaBlueprint.title} · ${request.answers['projectName']}`,
+            qaBlueprint.department,
+            'QA',
+            'ACTIVE',
+            JSON.stringify(
+              request.capabilities.filter((c) => c.outcome !== 'DENY').map((c) => c.action),
+            ),
+          );
+        this.db
+          .prepare(
+            'INSERT INTO agent_manifests (agent_id, organization_id, employee_id, body) VALUES (?, ?, ?, ?)',
+          )
+          .run(request.agentId, organizationId, request.employeeId, JSON.stringify(manifest));
+        this.audit(actorId, 'agent.manifest.issued', 'agent', request.agentId, {
+          manifestId: manifest.payload.manifestId,
+          keyId: manifest.keyId,
+        });
+      }
+      this.db
+        .prepare('UPDATE provisioning_requests SET body = ? WHERE id = ?')
+        .run(JSON.stringify(request), id);
+      this.audit(
+        actorId,
+        decision === 'APPROVED' ? 'provisioning.approved' : 'provisioning.rejected',
+        'provisioning_request',
+        id,
+        { agentId: request.agentId ?? null, reason },
+      );
+      this.db.exec('COMMIT');
+      return { request, ...(manifest ? { manifest } : {}) };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getManifest(agentId: string, organizationId: string, employeeId?: string): SignedAgentManifest {
+    const row = this.db
+      .prepare(
+        'SELECT body, employee_id FROM agent_manifests WHERE agent_id = ? AND organization_id = ?',
+      )
+      .get(agentId, organizationId) as { body: string; employee_id: string } | undefined;
+    if (!row || (employeeId && row.employee_id !== employeeId))
+      throw new Error('MANIFEST_NOT_FOUND');
+    const manifest = JSON.parse(row.body) as SignedAgentManifest;
+    if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
+    return manifest;
+  }
+
+  listLifecycleEvents(organizationId: string): LifecycleEvent[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued') ORDER BY rowid DESC LIMIT 100",
+      )
+      .all(organizationId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row['id']),
+      organizationId,
+      actorId: String(row['actor_id']),
+      type: String(row['event_type']) as LifecycleEvent['type'],
+      subjectId: String(row['resource_id']),
+      occurredAt: String(row['created_at']),
+      data: JSON.parse(String(row['metadata'])),
+    }));
   }
 
   close(): void {
@@ -78,6 +257,7 @@ export class ControlPlaneDatabase {
   }
 
   createConversation(employeeId: string, agentId: string, title: string): Conversation {
+    if (agentId !== AGENT_ID) this.getManifest(agentId, ORGANIZATION_ID, employeeId);
     const id = randomUUID();
     const timestamp = now();
     this.db
@@ -139,6 +319,10 @@ export class ControlPlaneDatabase {
     plan: string[];
     approvalSummary: string;
   }): { run: QaRun; approval: Approval } {
+    const conversation = this.getConversation(input.conversationId);
+    if (conversation.employeeId !== input.employeeId) throw new Error('CONVERSATION_FORBIDDEN');
+    if (conversation.agentId !== AGENT_ID)
+      this.getManifest(conversation.agentId, ORGANIZATION_ID, input.employeeId);
     const runId = randomUUID();
     const approvalId = randomUUID();
     const timestamp = now();
@@ -263,6 +447,17 @@ export class ControlPlaneDatabase {
 
   private migrate(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS provisioning_requests (
+        id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, employee_id TEXT NOT NULL, body TEXT NOT NULL,
+        FOREIGN KEY (organization_id) REFERENCES organizations(id),
+        FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
+      CREATE TABLE IF NOT EXISTS agent_manifests (
+        agent_id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, employee_id TEXT NOT NULL, body TEXT NOT NULL,
+        FOREIGN KEY (agent_id) REFERENCES agents(id),
+        FOREIGN KEY (organization_id) REFERENCES organizations(id),
+        FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
       CREATE TABLE IF NOT EXISTS organizations (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE
       );
@@ -392,7 +587,11 @@ export class ControlPlaneDatabase {
   }
 
   private mapAgent(row: Record<string, unknown>): AgentDefinition {
+    const assignment = this.db
+      .prepare('SELECT employee_id FROM agent_manifests WHERE agent_id = ?')
+      .get(String(row['id'])) as { employee_id: string } | undefined;
     return {
+      ...(assignment ? { employeeId: assignment.employee_id } : {}),
       id: String(row['id']),
       organizationId: String(row['organization_id']),
       name: String(row['name']),
