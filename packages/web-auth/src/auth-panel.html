@@ -1,0 +1,149 @@
+<main class="login-layout">
+  <section class="login-panel" aria-labelledby="login-heading">
+    <header class="brand">
+      <svg class="brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+        <path d="M24 3 43 14v20L24 45 5 34V14L24 3Z" stroke="currentColor" stroke-width="2" />
+        <path
+          d="m14 30 10-17 10 17M18 24h12M24 3v10M5 34l9-4m29 4-9-4"
+          stroke="currentColor"
+          stroke-width="3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <div>
+        <span class="brand-name">Agents<span>Foundry</span></span
+        ><span class="brand-caption">YOUR AGENT WORKSPACE</span>
+      </div>
+    </header>
+    <div class="login-content">
+      <p class="eyebrow">HUMAN AMBITION. AGENT EXECUTION.</p>
+      <h1 id="login-heading">Welcome back.</h1>
+      <p class="intro">Sign in to your workspace. Put your agents to work.</p>
+      @if (auth.error()) {
+        <p class="alert" role="alert">{{ auth.error() }}</p>
+      }
+      @if (auth.config()?.mode === 'google') {
+        <form
+          #loginForm="ngForm"
+          (ngSubmit)="loginForm.valid && submit()"
+          [attr.aria-busy]="auth.signingIn()"
+        >
+          <label for="login-email">Work email</label>
+          <input
+            id="login-email"
+            name="email"
+            type="email"
+            email
+            autocomplete="username"
+            placeholder="you@company.com"
+            required
+            maxlength="254"
+            [(ngModel)]="email"
+            [disabled]="auth.signingIn()"
+          />
+          <div class="password-label">
+            <label for="login-password">Application password</label
+            ><button
+              class="text-button"
+              type="button"
+              (click)="showHelp = !showHelp"
+              [attr.aria-expanded]="showHelp"
+              aria-controls="password-help"
+            >
+              Forgot password?
+            </button>
+          </div>
+          <div class="password-field">
+            <input
+              id="login-password"
+              name="password"
+              [type]="showPassword ? 'text' : 'password'"
+              autocomplete="current-password"
+              placeholder="Enter your password"
+              required
+              maxlength="256"
+              [(ngModel)]="password"
+              [disabled]="auth.signingIn()"
+              aria-describedby="password-note"
+            />
+            <button
+              type="button"
+              class="reveal"
+              (click)="showPassword = !showPassword"
+              [attr.aria-label]="showPassword ? 'Hide password' : 'Show password'"
+              [attr.aria-pressed]="showPassword"
+            >
+              {{ showPassword ? 'Hide' : 'Show' }}
+            </button>
+          </div>
+          @if (showHelp) {
+            <p id="password-help" class="help" role="status">
+              Contact your workspace administrator to set or reset your application password.
+              Self-service reset is not available yet.
+            </p>
+          }
+          <p id="password-note" class="field-note">
+            Use your application password, not your Google password.
+          </p>
+          <button
+            class="primary-button"
+            type="submit"
+            [disabled]="auth.signingIn() || !loginForm.valid"
+          >
+            <span>{{ auth.signingIn() ? 'Signing in…' : 'Sign in with email' }}</span
+            ><span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <div class="divider"><span>or continue with</span></div>
+        <button
+          class="google-button"
+          type="button"
+          (click)="auth.signIn()"
+          [disabled]="auth.signingIn()"
+        >
+          <span class="google-letter" aria-hidden="true">G</span>Sign in with Google
+        </button>
+        <p class="access-note">
+          An assigned workspace account is required.<br />Need access? Contact your administrator.
+        </p>
+        @if (auth.actor()) {
+          <button class="text-button sign-out" type="button" (click)="auth.signOut()">
+            Sign out of this account
+          </button>
+        }
+      } @else if (!auth.config()) {
+        <p class="help" role="status">Connecting to your workspace…</p>
+      }
+    </div>
+    <footer class="login-footer">Your workspace. Your agents. Your control.</footer>
+  </section>
+  <aside class="visual-panel" aria-labelledby="visual-heading">
+    <div class="visual-top">
+      <span class="platform-label">✦ &nbsp; THE AGENTIC WORKSPACE</span
+      ><span class="human-label">Built around you</span>
+    </div>
+    <div class="visual-content">
+      <div class="visual-copy">
+        <p class="eyebrow">A NEW WAY TO WORK</p>
+        <h2 id="visual-heading">Great work.<br />Extraordinary agents.</h2>
+        <p>A shared mission. Specialized agents.<br />You stay in control of what happens next.</p>
+      </div>
+      <img
+        class="agent-art"
+        src="assets/auth/agent-orchestration-transparent.png"
+        width="1536"
+        height="1024"
+        alt="Specialist coding, research, document and approval agents connected to a central coordination hub, supervised by people."
+        fetchpriority="high"
+      />
+      <div class="capabilities">
+        <span>Purpose-built agents</span><span>Connected workflows</span
+        ><span>Human oversight</span>
+      </div>
+    </div>
+    <div class="visual-footer">
+      <span>FROM INTENT TO IMPACT</span><span aria-hidden="true">01 — AF</span>
+    </div>
+  </aside>
+</main>

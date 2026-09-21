@@ -27,6 +27,11 @@
               {
                 "glob": "**/*",
                 "input": "apps/control-plane-web/public"
+              },
+              {
+                "glob": "**/*",
+                "input": "packages/web-auth/public",
+                "output": "assets/auth"
               }
             ],
             "styles": ["apps/control-plane-web/src/styles.scss"]
@@ -93,6 +98,11 @@
               {
                 "glob": "**/*",
                 "input": "apps/employee-desktop/public"
+              },
+              {
+                "glob": "**/*",
+                "input": "packages/web-auth/public",
+                "output": "assets/auth"
               }
             ],
             "styles": ["apps/employee-desktop/src/styles.scss"]
