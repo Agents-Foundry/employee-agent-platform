@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { ControlPlaneDatabase } from './database.js';
+import { passwordHashPattern } from './passwords.js';
 
 const entry = z
   .object({
@@ -15,6 +16,7 @@ const entry = z
       .strict(),
     displayName: z.string().min(1).max(200),
     email: z.email(),
+    passwordHash: z.string().regex(passwordHashPattern).optional(),
     role: z.enum(['ADMIN', 'EMPLOYEE']),
     team: z.string().min(1).max(120),
   })
@@ -32,7 +34,8 @@ export function syncIdentityDirectory(
     .parse(JSON.parse(readFileSync(filename, 'utf8')));
   if (
     new Set(entries.map((item) => item.subject)).size !== entries.length ||
-    new Set(entries.map((item) => item.employeeId)).size !== entries.length
+    new Set(entries.map((item) => item.employeeId)).size !== entries.length ||
+    new Set(entries.map((item) => item.email.toLowerCase())).size !== entries.length
   )
     throw new Error('DUPLICATE_IDENTITY');
   database.syncIdentities(issuer, entries);

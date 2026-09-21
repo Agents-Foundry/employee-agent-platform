@@ -42,13 +42,35 @@ Both `.env` and `.data` are ignored by Git. Never commit actual client secrets o
 
 ## Sessions and access control
 
+### Email/password login
+
+Both browser login pages also accept administrator-provisioned **application passwords**. These are separate from Google passwords: never enter a Google password into Agents Foundry. Existing Google-only memberships remain password-disabled unless an operator adds `passwordHash` to their directory entry. There is no public signup, password-reset email, or automatic email-based Google account linking.
+
+To provision a password, use a unique passphrase of 15–256 characters. In a local PowerShell terminal, run the following from the repository root. Input is hidden; the password is passed via stdin rather than command-line arguments or a file. Only the hash is printed.
+
+```powershell
+$foundryPassword = Read-Host 'New application password' -AsSecureString
+try {
+  [System.Net.NetworkCredential]::new('', $foundryPassword).Password | npx tsx apps/control-plane-api/src/hash-password.ts
+} finally {
+  $foundryPassword.Dispose()
+  Remove-Variable foundryPassword
+}
+```
+
+Add the resulting `scrypt$32768$8$3$...` value as `passwordHash` in the private membership JSON and restart the API. Deliver the password through an approved secure channel, not Git or chat. A password-only account can use an operator-generated unique `local:<UUID>` subject; it will not automatically acquire Google sign-in. Accounts supporting both methods must retain their verified Google subject. Google OAuth server configuration is still required for this combined sign-in deployment.
+
+Passwords use random salts and Node's asynchronous scrypt with [OWASP's N=2^15, r=8, p=3 profile](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). Login failures are generic, absent accounts perform dummy hashing, and requests are capped per source IP and normalized email (10 per 15 minutes), with at most four concurrent password checks. These limits are process-local; multi-instance deployments require a shared limiter. Reverse proxies currently share the loopback source IP, so configure trusted proxy handling and shared edge limits before wider deployment.
+
+Changing or removing `passwordHash` and restarting revokes that account's existing sessions, including Google-issued application sessions. Removing a directory member disables both methods. Password login does **not** consult Google's account suspension or MFA policy: administrators must explicitly approve this alternative and use directory offboarding. Forgotten passwords are reset by the operator replacing the hash; no self-service recovery is available yet. The same browser-only session, CSRF, role, and tenant boundaries apply to both methods.
+
 - Login transactions expire after ten minutes and can be consumed only once. A random HttpOnly browser cookie binds state, nonce, and PKCE verifier to the initiating browser.
 - Application sessions expire after eight hours. Only hashes of random session tokens are stored in SQLite. Production cookies use `__Host-`, Secure, HttpOnly, Path=/, and SameSite=Lax. Local HTTP development omits Secure and the prefix.
 - Signing in rotates the current browser session. Sign-out deletes that application session and clears its cookie; it does not sign the user out of Google globally. The UI destroys the application view when an API call reports an expired session.
 - Every business endpoint requires an application session in Google mode. `x-actor-*` headers have no authority and are stripped by the browser interceptor. Tokens, email domains, and browser-supplied IDs cannot set roles.
 - Mutations additionally require an exact configured UI Origin; missing, `null`, and foreign origins fail. SameSite cookies are an additional defense. State/nonce/PKCE and one-use transactions protect login callbacks.
 - Employees can access their own conversations, manifests, and requests. Admins can review their organization's agents, approvals, provisioning, and lifecycle events, but cannot read other employees' conversations through the conversation API. Self-approval is rejected. Public callers cannot submit AGENT or SYSTEM messages.
-- `/api/health`, `/api/auth/config`, and login/callback routes are public. The configuration endpoint exposes only authentication mode and Workspace domain. Logout is an origin-checked mutation.
+- `/api/health`, `/api/auth/config`, and login/callback routes are public. The password endpoint accepts unauthenticated, origin-checked, throttled login attempts. The configuration endpoint exposes only authentication mode and Workspace domain. Logout is an origin-checked mutation.
 
 ## Explicit demo mode
 

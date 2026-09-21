@@ -98,6 +98,21 @@ export class ControlPlaneDatabase {
             'INSERT INTO identities (issuer, subject, employee_id, enabled) VALUES (?, ?, ?, 1) ON CONFLICT(issuer, subject) DO UPDATE SET enabled = 1',
           )
           .run(issuer, entry.subject, entry.employeeId);
+        const credential = this.db
+          .prepare('SELECT hash FROM password_credentials WHERE issuer = ? AND subject = ?')
+          .get(issuer, entry.subject) as { hash: string } | undefined;
+        if (credential?.hash !== entry.passwordHash) {
+          this.db
+            .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
+            .run(issuer, entry.subject);
+          this.db
+            .prepare('DELETE FROM password_credentials WHERE issuer = ? AND subject = ?')
+            .run(issuer, entry.subject);
+          if (entry.passwordHash)
+            this.db
+              .prepare('INSERT INTO password_credentials (issuer, subject, hash) VALUES (?, ?, ?)')
+              .run(issuer, entry.subject, entry.passwordHash);
+        }
       }
       this.db
         .prepare(
@@ -119,6 +134,21 @@ export class ControlPlaneDatabase {
       .get(issuer, subject) as
       { id: string; organization_id: string; role: Actor['role'] } | undefined;
     return row ? { id: row.id, organizationId: row.organization_id, role: row.role } : undefined;
+  }
+
+  findPasswordIdentity(
+    issuer: string,
+    email: string,
+  ): { subject: string; hash: string } | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT i.subject, p.hash FROM identities i
+      JOIN employees e ON e.id = i.employee_id
+      JOIN password_credentials p ON p.issuer = i.issuer AND p.subject = i.subject
+      WHERE i.issuer = ? AND i.enabled = 1 AND lower(e.email) = ?`,
+      )
+      .all(issuer, email.toLowerCase()) as unknown as { subject: string; hash: string }[];
+    return rows.length === 1 ? rows[0] : undefined;
   }
 
   createLogin(hash: string, transaction: LoginTransaction, expiresAt: number): void {
@@ -653,6 +683,10 @@ export class ControlPlaneDatabase {
         PRIMARY KEY (issuer, subject), FOREIGN KEY (employee_id) REFERENCES employees(id)
       );
       CREATE TABLE IF NOT EXISTS login_transactions (hash TEXT PRIMARY KEY, body TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS password_credentials (
+        issuer TEXT NOT NULL, subject TEXT NOT NULL, hash TEXT NOT NULL,
+        PRIMARY KEY (issuer, subject), FOREIGN KEY (issuer, subject) REFERENCES identities(issuer, subject)
+      );
       CREATE TABLE IF NOT EXISTS auth_sessions (hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS provisioning_requests (
         id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, employee_id TEXT NOT NULL, body TEXT NOT NULL,

@@ -24,6 +24,7 @@ export class AuthSession {
   readonly actor = signal<Actor | null>(null);
   readonly ready = signal(false);
   readonly error = signal('');
+  readonly signingIn = signal(false);
   private role: UserRole = 'EMPLOYEE';
 
   demoHeaders(): Record<string, string> {
@@ -74,6 +75,35 @@ export class AuthSession {
       return;
     }
     location.assign(`${API_URL}/auth/login?client=${this.role === 'ADMIN' ? 'admin' : 'employee'}`);
+  }
+
+  async signInWithPassword(email: string, password: string): Promise<void> {
+    if (this.signingIn()) return;
+    this.signingIn.set(true);
+    this.error.set('');
+    try {
+      const actor = await firstValueFrom(
+        this.http.post<Actor>(
+          `${API_URL}/auth/password`,
+          { email, password },
+          { withCredentials: true },
+        ),
+      );
+      this.actor.set(actor);
+      this.ready.set(actor.role === this.role);
+      if (actor.role !== this.role)
+        this.error.set(
+          `This application requires the ${this.role.toLowerCase()} role. Sign out and use an assigned account.`,
+        );
+    } catch (error) {
+      this.error.set(
+        error instanceof HttpErrorResponse && error.status === 429
+          ? 'Too many sign-in attempts. Please try again later.'
+          : 'Sign-in failed. Check your email and application password, or contact your administrator.',
+      );
+    } finally {
+      this.signingIn.set(false);
+    }
   }
 
   expire(): void {

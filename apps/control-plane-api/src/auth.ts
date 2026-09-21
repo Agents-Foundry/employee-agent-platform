@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
+import { verifyPassword } from './passwords.js';
 import type { Express, Request, RequestHandler } from 'express';
 import type { PublicAuthConfig } from '@agents-foundry/contracts';
 import type { ControlPlaneDatabase } from './database.js';
@@ -179,6 +181,71 @@ export function configureAuth(
     }
     next();
   };
+
+  const passwordLimit = rateLimit({
+    windowMs: 15 * 60000,
+    limit: 10,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'LOGIN_RATE_LIMITED' },
+  });
+  const accountLimit = rateLimit({
+    windowMs: 15 * 60000,
+    limit: 10,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    keyGenerator: (req) =>
+      hashToken(typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''),
+    message: { error: 'LOGIN_RATE_LIMITED' },
+  });
+  let passwordChecks = 0;
+  app.post('/api/auth/password', requireOrigin, passwordLimit, accountLimit, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const input = z
+      .object({
+        email: z.string().trim().max(254).pipe(z.email()),
+        password: z.string().min(1).max(256),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!input.success) {
+      res.status(401).json({ error: 'INVALID_CREDENTIALS' });
+      return;
+    }
+    if (passwordChecks >= 4) {
+      res.status(429).json({ error: 'LOGIN_RATE_LIMITED' });
+      return;
+    }
+    passwordChecks++;
+    try {
+      const identity = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email);
+      const valid = await verifyPassword(input.data.password, identity?.hash);
+      // Recheck after async hashing so concurrent revocation/rotation cannot issue a stale session.
+      const current = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email);
+      if (
+        !valid ||
+        !identity ||
+        current?.subject !== identity.subject ||
+        current.hash !== identity.hash
+      ) {
+        res.status(401).json({ error: 'INVALID_CREDENTIALS' });
+        return;
+      }
+      const old = cookie(req, sessionName);
+      if (old) database.deleteSession(hashToken(old));
+      const session = randomToken();
+      database.createSession(
+        hashToken(session),
+        GOOGLE_ISSUER,
+        identity.subject,
+        Date.now() + 8 * 3600000,
+      );
+      res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
+      res.json(database.findIdentity(GOOGLE_ISSUER, identity.subject));
+    } finally {
+      passwordChecks--;
+    }
+  });
 
   app.get('/api/auth/login', (req, res) => {
     const destination =
