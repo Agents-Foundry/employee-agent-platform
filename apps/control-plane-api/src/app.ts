@@ -8,6 +8,7 @@ import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { ControlPlaneDatabase } from './database.js';
 import { qaBlueprint, validateAnswers } from './blueprints.js';
 import { configureAuth, loadAuthConfig, type AuthConfig, type GoogleSignIn } from './auth.js';
+import { configureOrganizationRoutes } from './organization-routes.js';
 
 const provisioningSchema = z
   .object({
@@ -64,7 +65,7 @@ export function createApp(
 ) {
   const app = express();
   const allowedOrigins =
-    auth.mode === 'google'
+    auth.mode !== 'demo'
       ? [new URL(auth.adminUrl).origin, new URL(auth.employeeUrl).origin]
       : (
           process.env['ALLOWED_ORIGINS'] ??
@@ -108,6 +109,7 @@ export function createApp(
     next();
   });
   app.get('/api/auth/session', (_request, response) => response.json(response.locals['actor']));
+  configureOrganizationRoutes(app, database, auth);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));

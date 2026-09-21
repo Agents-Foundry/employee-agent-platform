@@ -8,7 +8,7 @@ import { AuthPanel } from '../../../../packages/web-auth/src/auth-panel';
   imports: [App, AuthPanel],
   template: `
     @if (auth.ready()) {
-      @if (auth.config()?.mode === 'google') {
+      @if (auth.config()?.mode !== 'demo') {
         <div class="session-bar">
           {{ auth.actor()?.role }} · <button (click)="auth.signOut()">Sign out</button>
         </div>

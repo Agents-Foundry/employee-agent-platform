@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
+import { LOCAL_ISSUER, type NewMember } from './onboarding-types.js';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   AgentDefinition,
@@ -119,6 +120,151 @@ export class ControlPlaneDatabase {
           'DELETE FROM auth_sessions WHERE issuer = ? AND subject IN (SELECT subject FROM identities WHERE issuer = ? AND enabled = 0)',
         )
         .run(issuer, issuer);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  createCustomer(organization: { name: string; slug: string }, admin: NewMember) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const organizationId = randomUUID();
+      this.db
+        .prepare('INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)')
+        .run(organizationId, organization.name, organization.slug);
+      const invitation = this.insertInvitation(organizationId, admin, 'ADMIN');
+      this.audit(
+        'platform-operator',
+        'organization.created',
+        'organization',
+        organizationId,
+        {},
+        organizationId,
+      );
+      this.db.exec('COMMIT');
+      return { organizationId, ...invitation };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private insertInvitation(organizationId: string, member: NewMember, role: Actor['role']) {
+    const email = member.email.trim().toLowerCase();
+    if (this.db.prepare('SELECT id FROM employees WHERE lower(email) = ?').get(email))
+      throw new Error('MEMBER_ALREADY_EXISTS');
+    const employeeId = randomUUID();
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + 48 * 3600000;
+    this.db
+      .prepare(
+        'INSERT INTO employees (id, organization_id, display_name, email, role, team) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(employeeId, organizationId, member.displayName, email, role, member.team);
+    this.db
+      .prepare('INSERT INTO identities (issuer, subject, employee_id, enabled) VALUES (?, ?, ?, 0)')
+      .run(LOCAL_ISSUER, employeeId, employeeId);
+    this.db
+      .prepare(
+        'INSERT INTO invitations (hash, employee_id, expires_at, consumed) VALUES (?, ?, ?, 0)',
+      )
+      .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
+    return { employeeId, token, expiresAt };
+  }
+
+  inviteEmployee(actor: Actor, member: NewMember) {
+    if (actor.role !== 'ADMIN') throw new Error('ACTOR_FORBIDDEN');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const invitation = this.insertInvitation(actor.organizationId, member, 'EMPLOYEE');
+      this.audit(
+        actor.id,
+        'employee.invited',
+        'employee',
+        invitation.employeeId,
+        {},
+        actor.organizationId,
+      );
+      this.db.exec('COMMIT');
+      return invitation;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  acceptInvitation(hash: string, passwordHash: string): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const invitation = this.db
+        .prepare(
+          'SELECT employee_id FROM invitations WHERE hash = ? AND consumed = 0 AND expires_at > ?',
+        )
+        .get(hash, Date.now()) as { employee_id: string } | undefined;
+      if (!invitation) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      const employeeId = invitation.employee_id;
+      const employee = this.db
+        .prepare('SELECT organization_id FROM employees WHERE id = ?')
+        .get(employeeId) as { organization_id: string };
+      this.db.prepare('UPDATE invitations SET consumed = 1 WHERE employee_id = ?').run(employeeId);
+      this.db
+        .prepare('INSERT INTO password_credentials (issuer, subject, hash) VALUES (?, ?, ?)')
+        .run(LOCAL_ISSUER, employeeId, passwordHash);
+      this.db
+        .prepare('UPDATE identities SET enabled = 1 WHERE issuer = ? AND subject = ?')
+        .run(LOCAL_ISSUER, employeeId);
+      this.audit(
+        employeeId,
+        'employee.activated',
+        'employee',
+        employeeId,
+        {},
+        employee.organization_id,
+      );
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listMembers(organizationId: string) {
+    return this.db
+      .prepare(
+        `SELECT e.id, e.display_name AS displayName, e.email, e.role, e.team,
+      CASE WHEN i.enabled = 1 THEN 'ACTIVE'
+      WHEN EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0 AND v.expires_at > ?) THEN 'INVITED'
+      ELSE 'INACTIVE' END AS status
+      FROM employees e JOIN identities i ON i.employee_id = e.id AND i.issuer = ?
+      WHERE e.organization_id = ? ORDER BY e.display_name`,
+      )
+      .all(Date.now(), LOCAL_ISSUER, organizationId);
+  }
+
+  disableMember(actor: Actor, employeeId: string): void {
+    if (actor.role !== 'ADMIN' || actor.id === employeeId) throw new Error('ACTOR_FORBIDDEN');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (
+        !this.db
+          .prepare('SELECT id FROM employees WHERE id = ? AND organization_id = ? AND role = ?')
+          .get(employeeId, actor.organizationId, 'EMPLOYEE')
+      )
+        throw new Error('MEMBER_NOT_FOUND');
+      this.db
+        .prepare('UPDATE identities SET enabled = 0 WHERE employee_id = ? AND issuer = ?')
+        .run(employeeId, LOCAL_ISSUER);
+      this.db
+        .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
+        .run(LOCAL_ISSUER, employeeId);
+      this.db.prepare('UPDATE invitations SET consumed = 1 WHERE employee_id = ?').run(employeeId);
+      this.audit(actor.id, 'employee.disabled', 'employee', employeeId, {}, actor.organizationId);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -362,7 +508,7 @@ export class ControlPlaneDatabase {
   listLifecycleEvents(organizationId: string): LifecycleEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued') ORDER BY rowid DESC LIMIT 100",
+        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued', 'organization.created', 'employee.invited', 'employee.activated', 'employee.disabled') ORDER BY rowid DESC LIMIT 100",
       )
       .all(organizationId) as Record<string, unknown>[];
     return rows.map((row) => ({
@@ -688,6 +834,10 @@ export class ControlPlaneDatabase {
         PRIMARY KEY (issuer, subject), FOREIGN KEY (issuer, subject) REFERENCES identities(issuer, subject)
       );
       CREATE TABLE IF NOT EXISTS auth_sessions (hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS invitations (
+        hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL,
+        FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
       CREATE TABLE IF NOT EXISTS provisioning_requests (
         id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, employee_id TEXT NOT NULL, body TEXT NOT NULL,
         FOREIGN KEY (organization_id) REFERENCES organizations(id),

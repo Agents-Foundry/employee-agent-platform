@@ -2,7 +2,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
-import { verifyPassword } from './passwords.js';
+import { verifyPassword, hashPassword } from './passwords.js';
+import { LOCAL_ISSUER } from './onboarding-types.js';
 import type { Express, Request, RequestHandler } from 'express';
 import type { PublicAuthConfig } from '@agents-foundry/contracts';
 import type { ControlPlaneDatabase } from './database.js';
@@ -18,7 +19,13 @@ export type GoogleConfig = {
   employeeUrl: string;
   secureCookies: boolean;
 };
-export type AuthConfig = { mode: 'demo' } | GoogleConfig;
+export type PasswordConfig = {
+  mode: 'password';
+  adminUrl: string;
+  employeeUrl: string;
+  secureCookies: boolean;
+};
+export type AuthConfig = { mode: 'demo' } | GoogleConfig | PasswordConfig;
 export const hashToken = (value: string) => createHash('sha256').update(value).digest('hex');
 const randomToken = () => randomBytes(32).toString('base64url');
 
@@ -26,6 +33,34 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
   if (env['AUTH_MODE'] === 'demo') {
     if (env['NODE_ENV'] === 'production') throw new Error('DEMO_AUTH_FORBIDDEN_IN_PRODUCTION');
     return { mode: 'demo' };
+  }
+  if (env['AUTH_MODE'] === 'password') {
+    const urls = [env['ADMIN_APP_URL'], env['EMPLOYEE_APP_URL']].map(
+      (value) => new URL(value ?? ''),
+    );
+    for (const url of urls) {
+      if (
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash ||
+        (url.protocol !== 'https:' &&
+          !(
+            env['NODE_ENV'] !== 'production' &&
+            url.protocol === 'http:' &&
+            ['localhost', '127.0.0.1'].includes(url.hostname)
+          ))
+      )
+        throw new Error('INVALID_AUTH_URL');
+    }
+    if (urls[0].hostname !== urls[1].hostname || urls[0].protocol !== urls[1].protocol)
+      throw new Error('AUTH_URL_HOSTS_MUST_MATCH');
+    return {
+      mode: 'password',
+      adminUrl: urls[0].href,
+      employeeUrl: urls[1].href,
+      secureCookies: urls[0].protocol === 'https:',
+    };
   }
   if (env['AUTH_MODE'] && env['AUTH_MODE'] !== 'google') throw new Error('INVALID_AUTH_MODE');
   const required = (name: string) => z.string().trim().min(1).parse(env[name]);
@@ -67,6 +102,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
 }
 
 export function publicAuthConfig(config: AuthConfig): PublicAuthConfig {
+  if (config.mode === 'password') return { mode: 'password' };
   return config.mode === 'demo'
     ? config
     : { mode: 'google', workspaceDomain: config.workspaceDomain };
@@ -164,7 +200,8 @@ export function configureAuth(
       }
     };
   }
-  const provider = google ?? new GoogleSignIn(config);
+  const provider = config.mode === 'google' ? (google ?? new GoogleSignIn(config)) : undefined;
+  const passwordIssuer = config.mode === 'password' ? LOCAL_ISSUER : GOOGLE_ISSUER;
   const sessionName = config.secureCookies ? '__Host-af_session' : 'af_session';
   const loginName = config.secureCookies ? '__Host-af_login' : 'af_login';
   const options = {
@@ -218,10 +255,10 @@ export function configureAuth(
     }
     passwordChecks++;
     try {
-      const identity = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email);
+      const identity = database.findPasswordIdentity(passwordIssuer, input.data.email);
       const valid = await verifyPassword(input.data.password, identity?.hash);
       // Recheck after async hashing so concurrent revocation/rotation cannot issue a stale session.
-      const current = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email);
+      const current = database.findPasswordIdentity(passwordIssuer, input.data.email);
       if (
         !valid ||
         !identity ||
@@ -236,18 +273,22 @@ export function configureAuth(
       const session = randomToken();
       database.createSession(
         hashToken(session),
-        GOOGLE_ISSUER,
+        passwordIssuer,
         identity.subject,
         Date.now() + 8 * 3600000,
       );
       res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
-      res.json(database.findIdentity(GOOGLE_ISSUER, identity.subject));
+      res.json(database.findIdentity(passwordIssuer, identity.subject));
     } finally {
       passwordChecks--;
     }
   });
 
   app.get('/api/auth/login', (req, res) => {
+    if (config.mode !== 'google') {
+      res.status(404).json({ error: 'GOOGLE_NOT_CONFIGURED' });
+      return;
+    }
     const destination =
       req.query['client'] === 'admin'
         ? config.adminUrl
@@ -287,6 +328,10 @@ export function configureAuth(
     res.redirect(url.href);
   });
   app.get('/api/auth/callback', async (req, res) => {
+    if (!provider) {
+      res.status(404).json({ error: 'GOOGLE_NOT_CONFIGURED' });
+      return;
+    }
     res.setHeader('Cache-Control', 'no-store');
     const binding = cookie(req, loginName);
     res.clearCookie(loginName, options);
@@ -326,6 +371,40 @@ export function configureAuth(
     if (token) database.deleteSession(hashToken(token));
     res.clearCookie(sessionName, options);
     res.status(204).end();
+  });
+  app.post('/api/auth/activate', requireOrigin, passwordLimit, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (config.mode !== 'password') {
+      res.status(404).json({ error: 'NOT_FOUND' });
+      return;
+    }
+    const input = z
+      .object({
+        token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        password: z.string().min(15).max(256),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!input.success) {
+      res.status(400).json({ error: 'INVALID_ACTIVATION' });
+      return;
+    }
+    if (passwordChecks >= 4) {
+      res.status(429).json({ error: 'LOGIN_RATE_LIMITED' });
+      return;
+    }
+    passwordChecks++;
+    try {
+      const hash = await hashPassword(input.data.password);
+      if (!database.acceptInvitation(hashToken(input.data.token), hash)) {
+        res.status(400).json({ error: 'INVALID_OR_EXPIRED_INVITATION' });
+        return;
+      }
+      // Activation does not replace an existing browser session or log a different user in.
+      res.status(204).end();
+    } finally {
+      passwordChecks--;
+    }
   });
   return (req, res, next) => {
     const token = cookie(req, sessionName);
