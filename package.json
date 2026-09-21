@@ -5,6 +5,7 @@
   "scripts": {
     "ng": "ng",
     "dev:api": "npm run dev --workspace @agents-foundry/control-plane-api",
+    "dev:api:demo": "npm run dev:demo --workspace @agents-foundry/control-plane-api",
     "start:admin": "ng serve control-plane-web --port 4200",
     "start:employee": "ng serve employee-desktop --port 4300",
     "tauri:dev": "tauri dev --config apps/employee-desktop/src-tauri/tauri.conf.json",

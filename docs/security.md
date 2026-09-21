@@ -13,9 +13,9 @@
 
 ## POC authentication warning
 
-Milestone 1 uses explicit actor headers only to demonstrate the approval contract locally. It is **not production authentication**. Before any shared deployment, replace these headers with OIDC-issued identity and organization/role claims verified server-side.
+Explicit actor headers now work only in opt-in local demo mode. Google mode requires a server-side Workspace login and an HttpOnly application session on every business route. Roles and organizations come from operator-managed membership records; browser headers are ignored. See [Google Workspace security and setup](google-workspace.md).
 
-Provisioning routes additionally restrict these demo headers to the seeded employee/admin identities and organization, and prevent self decisions. These public headers remain forgeable. Signed manifest verification does not turn this POC into authenticated production software. See [provisioning](provisioning.md) for key storage, trust, and rotation limitations.
+Demo headers remain public and forgeable, and demo mode cannot run with NODE_ENV=production. Google sign-in does not complete the remaining production work: database-level tenant isolation, vaults, and key rotation are still pending. See [provisioning](provisioning.md) for manifest-key storage, trust, and rotation limitations.
 
 ## Key management
 

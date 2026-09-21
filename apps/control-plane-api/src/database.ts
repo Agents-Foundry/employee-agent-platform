@@ -18,7 +18,9 @@ import type {
   ProvisioningRequest,
   SignedAgentManifest,
   LifecycleEvent,
+  Actor,
 } from '@agents-foundry/contracts';
+import type { IdentityEntry } from './identity-directory.js';
 import { ManifestSigner } from './manifest-signing.js';
 import { qaBlueprint } from './blueprints.js';
 
@@ -30,11 +32,19 @@ function now(): string {
   return new Date().toISOString();
 }
 
+interface LoginTransaction {
+  state: string;
+  nonce: string;
+  verifier: string;
+  destination: string;
+}
+const demoEmployee: Actor = { id: EMPLOYEE_ID, role: 'EMPLOYEE', organizationId: ORGANIZATION_ID };
+
 export class ControlPlaneDatabase {
   private readonly db: DatabaseSync;
   readonly signer: ManifestSigner;
 
-  constructor(path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db') {
+  constructor(path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db', seedDemo = true) {
     this.signer =
       path === ':memory:'
         ? new ManifestSigner()
@@ -47,7 +57,101 @@ export class ControlPlaneDatabase {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     this.migrate();
-    this.seed();
+    if (seedDemo) this.seed();
+  }
+
+  syncIdentities(issuer: string, entries: IdentityEntry[]): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE identities SET enabled = 0 WHERE issuer = ?').run(issuer);
+      for (const entry of entries) {
+        const current = this.db
+          .prepare('SELECT organization_id FROM employees WHERE id = ?')
+          .get(entry.employeeId) as { organization_id: string } | undefined;
+        const identity = this.db
+          .prepare('SELECT employee_id FROM identities WHERE issuer = ? AND subject = ?')
+          .get(issuer, entry.subject) as { employee_id: string } | undefined;
+        if (
+          (current && current.organization_id !== entry.organization.id) ||
+          (identity && identity.employee_id !== entry.employeeId)
+        )
+          throw new Error('IDENTITY_REASSIGNMENT_FORBIDDEN');
+        this.db
+          .prepare(
+            'INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug',
+          )
+          .run(entry.organization.id, entry.organization.name, entry.organization.slug);
+        this.db
+          .prepare(
+            'INSERT INTO employees (id, organization_id, display_name, email, role, team) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, email = excluded.email, role = excluded.role, team = excluded.team',
+          )
+          .run(
+            entry.employeeId,
+            entry.organization.id,
+            entry.displayName,
+            entry.email,
+            entry.role,
+            entry.team,
+          );
+        this.db
+          .prepare(
+            'INSERT INTO identities (issuer, subject, employee_id, enabled) VALUES (?, ?, ?, 1) ON CONFLICT(issuer, subject) DO UPDATE SET enabled = 1',
+          )
+          .run(issuer, entry.subject, entry.employeeId);
+      }
+      this.db
+        .prepare(
+          'DELETE FROM auth_sessions WHERE issuer = ? AND subject IN (SELECT subject FROM identities WHERE issuer = ? AND enabled = 0)',
+        )
+        .run(issuer, issuer);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  findIdentity(issuer: string, subject: string): Actor | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT e.id, e.organization_id, e.role FROM identities i JOIN employees e ON e.id = i.employee_id WHERE i.issuer = ? AND i.subject = ? AND i.enabled = 1',
+      )
+      .get(issuer, subject) as
+      { id: string; organization_id: string; role: Actor['role'] } | undefined;
+    return row ? { id: row.id, organizationId: row.organization_id, role: row.role } : undefined;
+  }
+
+  createLogin(hash: string, transaction: LoginTransaction, expiresAt: number): void {
+    this.db.prepare('DELETE FROM login_transactions WHERE expires_at <= ?').run(Date.now());
+    this.db
+      .prepare('INSERT INTO login_transactions (hash, body, expires_at) VALUES (?, ?, ?)')
+      .run(hash, JSON.stringify(transaction), expiresAt);
+  }
+  discardLogin(hash: string): void {
+    this.db.prepare('DELETE FROM login_transactions WHERE hash = ?').run(hash);
+  }
+  consumeLogin(hash: string): LoginTransaction | undefined {
+    const row = this.db
+      .prepare('DELETE FROM login_transactions WHERE hash = ? RETURNING body, expires_at')
+      .get(hash) as { body: string; expires_at: number } | undefined;
+    return row && row.expires_at > Date.now()
+      ? (JSON.parse(row.body) as LoginTransaction)
+      : undefined;
+  }
+  createSession(hash: string, issuer: string, subject: string, expiresAt: number): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(Date.now());
+    this.db
+      .prepare('INSERT INTO auth_sessions (hash, issuer, subject, expires_at) VALUES (?, ?, ?, ?)')
+      .run(hash, issuer, subject, expiresAt);
+  }
+  deleteSession(hash: string): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE hash = ?').run(hash);
+  }
+  findSession(hash: string): Actor | undefined {
+    const row = this.db
+      .prepare('SELECT issuer, subject FROM auth_sessions WHERE hash = ? AND expires_at > ?')
+      .get(hash, Date.now()) as { issuer: string; subject: string } | undefined;
+    return row ? this.findIdentity(row.issuer, row.subject) : undefined;
   }
 
   resolveActor(id: string, role: string, organizationId: string) {
@@ -58,12 +162,23 @@ export class ControlPlaneDatabase {
     throw new Error('ACTOR_FORBIDDEN');
   }
 
-  requestProvisioning(employeeId: string, input: ProvisioningInput): ProvisioningRequest {
-    if (employeeId !== EMPLOYEE_ID) throw new Error('ACTOR_FORBIDDEN');
+  requestProvisioning(
+    employeeId: string,
+    input: ProvisioningInput,
+    organizationId = ORGANIZATION_ID,
+  ): ProvisioningRequest {
+    if (
+      !this.db
+        .prepare(
+          "SELECT id FROM employees WHERE id = ? AND organization_id = ? AND role = 'EMPLOYEE'",
+        )
+        .get(employeeId, organizationId)
+    )
+      throw new Error('ACTOR_FORBIDDEN');
     const request: ProvisioningRequest = {
       ...input,
       id: randomUUID(),
-      organizationId: ORGANIZATION_ID,
+      organizationId,
       employeeId,
       status: 'PENDING',
       capabilities: structuredClone(qaBlueprint.capabilities),
@@ -76,10 +191,17 @@ export class ControlPlaneDatabase {
           'INSERT INTO provisioning_requests (id, organization_id, employee_id, body) VALUES (?, ?, ?, ?)',
         )
         .run(request.id, request.organizationId, employeeId, JSON.stringify(request));
-      this.audit(employeeId, 'provisioning.requested', 'provisioning_request', request.id, {
-        blueprintId: input.blueprintId,
-        blueprintVersion: input.blueprintVersion,
-      });
+      this.audit(
+        employeeId,
+        'provisioning.requested',
+        'provisioning_request',
+        request.id,
+        {
+          blueprintId: input.blueprintId,
+          blueprintVersion: input.blueprintVersion,
+        },
+        organizationId,
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -163,10 +285,17 @@ export class ControlPlaneDatabase {
             'INSERT INTO agent_manifests (agent_id, organization_id, employee_id, body) VALUES (?, ?, ?, ?)',
           )
           .run(request.agentId, organizationId, request.employeeId, JSON.stringify(manifest));
-        this.audit(actorId, 'agent.manifest.issued', 'agent', request.agentId, {
-          manifestId: manifest.payload.manifestId,
-          keyId: manifest.keyId,
-        });
+        this.audit(
+          actorId,
+          'agent.manifest.issued',
+          'agent',
+          request.agentId,
+          {
+            manifestId: manifest.payload.manifestId,
+            keyId: manifest.keyId,
+          },
+          organizationId,
+        );
       }
       this.db
         .prepare('UPDATE provisioning_requests SET body = ? WHERE id = ?')
@@ -177,6 +306,7 @@ export class ControlPlaneDatabase {
         'provisioning_request',
         id,
         { agentId: request.agentId ?? null, reason },
+        organizationId,
       );
       this.db.exec('COMMIT');
       return { request, ...(manifest ? { manifest } : {}) };
@@ -220,18 +350,31 @@ export class ControlPlaneDatabase {
     this.db.close();
   }
 
-  getBootstrap(): BootstrapResponse {
+  getBootstrap(actor: Actor = demoEmployee, allowDemo = true): BootstrapResponse {
     const organization = this.db
-      .prepare('SELECT id, name, slug FROM organizations LIMIT 1')
-      .get() as unknown as Organization;
+      .prepare('SELECT id, name, slug FROM organizations WHERE id = ?')
+      .get(actor.organizationId) as unknown as Organization;
     const employeeRow = this.db
-      .prepare('SELECT id, organization_id, display_name, email, role, team FROM employees LIMIT 1')
-      .get() as Record<string, unknown>;
+      .prepare(
+        'SELECT id, organization_id, display_name, email, role, team FROM employees WHERE id = ? AND organization_id = ?',
+      )
+      .get(actor.id, actor.organizationId) as Record<string, unknown>;
+    if (!organization || !employeeRow) throw new Error('ACTOR_FORBIDDEN');
     const agentRows = this.db
       .prepare(
-        'SELECT id, organization_id, name, department, team, status, capabilities FROM agents',
+        `SELECT id, organization_id, name, department, team, status, capabilities FROM agents a WHERE organization_id = ?
+         AND (? = 'ADMIN' OR EXISTS (SELECT 1 FROM agent_manifests m WHERE m.agent_id = a.id AND m.employee_id = ?) OR (? = 1 AND a.id = ?))
+         AND (? = 1 OR a.id != ?)`,
       )
-      .all() as Record<string, unknown>[];
+      .all(
+        actor.organizationId,
+        actor.role,
+        actor.id,
+        allowDemo ? 1 : 0,
+        AGENT_ID,
+        allowDemo ? 1 : 0,
+        AGENT_ID,
+      ) as Record<string, unknown>[];
 
     return {
       organization,
@@ -246,18 +389,36 @@ export class ControlPlaneDatabase {
     };
   }
 
-  listConversations(employeeId: string): Conversation[] {
+  listConversations(employeeId: string, organizationId = ORGANIZATION_ID): Conversation[] {
     const rows = this.db
       .prepare(
         `SELECT id, organization_id, employee_id, agent_id, title, created_at, updated_at
-         FROM conversations WHERE employee_id = ? ORDER BY updated_at DESC`,
+         FROM conversations WHERE employee_id = ? AND organization_id = ? ORDER BY updated_at DESC`,
       )
-      .all(employeeId) as Record<string, unknown>[];
+      .all(employeeId, organizationId) as Record<string, unknown>[];
     return rows.map((row) => this.mapConversation(row));
   }
 
-  createConversation(employeeId: string, agentId: string, title: string): Conversation {
-    if (agentId !== AGENT_ID) this.getManifest(agentId, ORGANIZATION_ID, employeeId);
+  createConversation(
+    employeeId: string,
+    agentId: string,
+    title: string,
+    organizationId = ORGANIZATION_ID,
+    allowDemo = true,
+  ): Conversation {
+    if (
+      !this.db
+        .prepare('SELECT id FROM employees WHERE id = ? AND organization_id = ?')
+        .get(employeeId, organizationId)
+    )
+      throw new Error('ACTOR_FORBIDDEN');
+    if (
+      !this.db
+        .prepare("SELECT id FROM agents WHERE id = ? AND organization_id = ? AND status = 'ACTIVE'")
+        .get(agentId, organizationId)
+    )
+      throw new Error('AGENT_NOT_FOUND');
+    if (agentId !== AGENT_ID || !allowDemo) this.getManifest(agentId, organizationId, employeeId);
     const id = randomUUID();
     const timestamp = now();
     this.db
@@ -266,19 +427,24 @@ export class ControlPlaneDatabase {
          (id, organization_id, employee_id, agent_id, title, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, ORGANIZATION_ID, employeeId, agentId, title, timestamp, timestamp);
-    this.audit(employeeId, 'conversation.created', 'conversation', id, { title });
-    return this.getConversation(id);
+      .run(id, organizationId, employeeId, agentId, title, timestamp, timestamp);
+    this.audit(employeeId, 'conversation.created', 'conversation', id, { title }, organizationId);
+    return this.getConversation(id, organizationId, employeeId);
   }
 
-  getConversation(id: string): ConversationDetail {
+  getConversation(
+    id: string,
+    organizationId = ORGANIZATION_ID,
+    employeeId?: string,
+  ): ConversationDetail {
     const row = this.db
       .prepare(
         `SELECT id, organization_id, employee_id, agent_id, title, created_at, updated_at
-         FROM conversations WHERE id = ?`,
+         FROM conversations WHERE id = ? AND organization_id = ?`,
       )
-      .get(id) as Record<string, unknown> | undefined;
-    if (!row) throw new Error('CONVERSATION_NOT_FOUND');
+      .get(id, organizationId) as Record<string, unknown> | undefined;
+    if (!row || (employeeId && row['employee_id'] !== employeeId))
+      throw new Error('CONVERSATION_NOT_FOUND');
 
     const messages = this.db
       .prepare(
@@ -296,7 +462,10 @@ export class ControlPlaneDatabase {
     conversationId: string,
     author: ConversationMessage['author'],
     content: string,
+    organizationId = ORGANIZATION_ID,
+    employeeId?: string,
   ): ConversationMessage {
+    const conversation = this.getConversation(conversationId, organizationId, employeeId);
     const id = randomUUID();
     const timestamp = now();
     this.db
@@ -307,22 +476,33 @@ export class ControlPlaneDatabase {
     this.db
       .prepare('UPDATE conversations SET updated_at = ? WHERE id = ?')
       .run(timestamp, conversationId);
-    this.audit(author, 'message.created', 'conversation', conversationId, { messageId: id });
+    this.audit(
+      author === 'EMPLOYEE' ? conversation.employeeId : 'agent-runtime',
+      'message.created',
+      'conversation',
+      conversationId,
+      { messageId: id },
+      organizationId,
+    );
     return { id, conversationId, author, content, createdAt: timestamp };
   }
 
-  createQaRun(input: {
-    employeeId: string;
-    conversationId: string;
-    storyKey: string;
-    targetUrl: string;
-    plan: string[];
-    approvalSummary: string;
-  }): { run: QaRun; approval: Approval } {
-    const conversation = this.getConversation(input.conversationId);
+  createQaRun(
+    input: {
+      employeeId: string;
+      conversationId: string;
+      storyKey: string;
+      targetUrl: string;
+      plan: string[];
+      approvalSummary: string;
+    },
+    organizationId = ORGANIZATION_ID,
+    allowDemo = true,
+  ): { run: QaRun; approval: Approval } {
+    const conversation = this.getConversation(input.conversationId, organizationId);
     if (conversation.employeeId !== input.employeeId) throw new Error('CONVERSATION_FORBIDDEN');
-    if (conversation.agentId !== AGENT_ID)
-      this.getManifest(conversation.agentId, ORGANIZATION_ID, input.employeeId);
+    if (conversation.agentId !== AGENT_ID || !allowDemo)
+      this.getManifest(conversation.agentId, organizationId, input.employeeId);
     const runId = randomUUID();
     const approvalId = randomUUID();
     const timestamp = now();
@@ -336,7 +516,7 @@ export class ControlPlaneDatabase {
         )
         .run(
           approvalId,
-          ORGANIZATION_ID,
+          organizationId,
           input.employeeId,
           'qa.execute_playwright',
           'qa_run',
@@ -354,7 +534,7 @@ export class ControlPlaneDatabase {
         )
         .run(
           runId,
-          ORGANIZATION_ID,
+          organizationId,
           input.employeeId,
           input.conversationId,
           input.storyKey,
@@ -364,35 +544,49 @@ export class ControlPlaneDatabase {
           approvalId,
           timestamp,
         );
-      this.audit(input.employeeId, 'qa_run.requested', 'qa_run', runId, {
-        storyKey: input.storyKey,
-      });
+      this.audit(
+        input.employeeId,
+        'qa_run.requested',
+        'qa_run',
+        runId,
+        {
+          storyKey: input.storyKey,
+        },
+        organizationId,
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
-    return { run: this.getQaRun(runId), approval: this.getApproval(approvalId) };
+    return {
+      run: this.getQaRun(runId, organizationId),
+      approval: this.getApproval(approvalId, organizationId),
+    };
   }
 
-  listApprovals(): Approval[] {
+  listApprovals(organizationId = ORGANIZATION_ID, employeeId?: string): Approval[] {
     const rows = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
                 risk, summary, status, decided_by, decided_at, created_at
-         FROM approvals ORDER BY created_at DESC`,
+         FROM approvals WHERE organization_id = ? ORDER BY created_at DESC`,
       )
-      .all() as Record<string, unknown>[];
-    return rows.map((row) => this.mapApproval(row));
+      .all(organizationId) as Record<string, unknown>[];
+    return rows
+      .map((row) => this.mapApproval(row))
+      .filter((item) => !employeeId || item.requestedBy === employeeId);
   }
 
   decideApproval(
     id: string,
     status: Exclude<ApprovalStatus, 'PENDING'>,
     actorId: string,
+    organizationId = ORGANIZATION_ID,
   ): Approval {
     const timestamp = now();
-    const approval = this.getApproval(id);
+    const approval = this.getApproval(id, organizationId);
+    if (approval.requestedBy === actorId) throw new Error('SELF_APPROVAL_FORBIDDEN');
     if (approval.status !== 'PENDING') throw new Error('APPROVAL_ALREADY_DECIDED');
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -401,24 +595,31 @@ export class ControlPlaneDatabase {
         .run(status, actorId, timestamp, id);
       const runStatus: QaRunStatus = status === 'APPROVED' ? 'READY' : 'REJECTED';
       this.db.prepare('UPDATE qa_runs SET status = ? WHERE approval_id = ?').run(runStatus, id);
-      this.audit(actorId, `approval.${status.toLowerCase()}`, 'approval', id, {
-        resourceId: approval.resourceId,
-      });
+      this.audit(
+        actorId,
+        `approval.${status.toLowerCase()}`,
+        'approval',
+        id,
+        {
+          resourceId: approval.resourceId,
+        },
+        organizationId,
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
-    return this.getApproval(id);
+    return this.getApproval(id, organizationId);
   }
 
-  private getQaRun(id: string): QaRun {
+  private getQaRun(id: string, organizationId: string): QaRun {
     const row = this.db
       .prepare(
         `SELECT id, organization_id, employee_id, conversation_id, story_key, target_url,
-                status, plan, approval_id, created_at FROM qa_runs WHERE id = ?`,
+                status, plan, approval_id, created_at FROM qa_runs WHERE id = ? AND organization_id = ?`,
       )
-      .get(id) as Record<string, unknown> | undefined;
+      .get(id, organizationId) as Record<string, unknown> | undefined;
     if (!row) throw new Error('QA_RUN_NOT_FOUND');
     return {
       id: String(row['id']),
@@ -434,19 +635,25 @@ export class ControlPlaneDatabase {
     };
   }
 
-  private getApproval(id: string): Approval {
+  private getApproval(id: string, organizationId: string): Approval {
     const row = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
-                risk, summary, status, decided_by, decided_at, created_at FROM approvals WHERE id = ?`,
+                risk, summary, status, decided_by, decided_at, created_at FROM approvals WHERE id = ? AND organization_id = ?`,
       )
-      .get(id) as Record<string, unknown> | undefined;
+      .get(id, organizationId) as Record<string, unknown> | undefined;
     if (!row) throw new Error('APPROVAL_NOT_FOUND');
     return this.mapApproval(row);
   }
 
   private migrate(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS identities (
+        issuer TEXT NOT NULL, subject TEXT NOT NULL, employee_id TEXT NOT NULL, enabled INTEGER NOT NULL,
+        PRIMARY KEY (issuer, subject), FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
+      CREATE TABLE IF NOT EXISTS login_transactions (hash TEXT PRIMARY KEY, body TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS auth_sessions (hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS provisioning_requests (
         id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, employee_id TEXT NOT NULL, body TEXT NOT NULL,
         FOREIGN KEY (organization_id) REFERENCES organizations(id),
@@ -535,6 +742,18 @@ export class ControlPlaneDatabase {
       );
     this.db
       .prepare(
+        'INSERT OR IGNORE INTO employees (id, organization_id, display_name, email, role, team) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        'admin_demo',
+        ORGANIZATION_ID,
+        'Demo Admin',
+        'admin@agents-foundry.local',
+        'ADMIN',
+        'Administration',
+      );
+    this.db
+      .prepare(
         `INSERT OR IGNORE INTO agents
          (id, organization_id, name, department, team, status, capabilities)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -556,6 +775,7 @@ export class ControlPlaneDatabase {
     resourceType: string,
     resourceId: string,
     metadata: object,
+    organizationId = ORGANIZATION_ID,
   ): void {
     this.db
       .prepare(
@@ -565,7 +785,7 @@ export class ControlPlaneDatabase {
       )
       .run(
         randomUUID(),
-        ORGANIZATION_ID,
+        organizationId,
         actorId,
         eventType,
         resourceType,

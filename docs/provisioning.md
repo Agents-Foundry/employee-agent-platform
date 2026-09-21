@@ -22,7 +22,7 @@ The employee app obtains the public key from the local API, validates its finger
 
 ## Local POC authentication boundary
 
-This is not production identity or multi-tenant authorization. The new routes require explicit demo headers: `x-organization-id: org_agents_foundry`, with `x-actor-id: employee_qa_demo` / `x-actor-role: EMPLOYEE`, or `x-actor-id: admin_demo` / `x-actor-role: ADMIN`. These are public, forgeable demo identities. OIDC, verified tenant claims, transport security, pinned/managed verification keys, revocation, and vault-backed signing must precede any shared deployment. Existing foundation routes retain their documented demo behavior.
+The original demo headers now work only in explicitly enabled local demo mode: `x-organization-id: org_agents_foundry`, with `x-actor-id: employee_qa_demo` / `x-actor-role: EMPLOYEE`, or `x-actor-id: admin_demo` / `x-actor-role: ADMIN`. In Google mode all business routes require server-verified application sessions, with organization and role resolved from membership records. See [Google Workspace setup](google-workspace.md). Managed verification keys, revocation, database-level isolation, and vault-backed signing remain pending before a shared rollout.
 
 Fetching a key from the same local API protects against payload alteration, not compromise of that API or its transport. Neither this verification nor provisioning launches an autonomous runtime. The existing QA execution approval gate remains in force.
 

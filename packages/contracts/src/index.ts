@@ -1,6 +1,18 @@
 export type Identifier = string;
 
 export type UserRole = 'ADMIN' | 'EMPLOYEE';
+export interface Actor {
+  id: string;
+  organizationId: string;
+  role: UserRole;
+}
+
+export type PublicAuthConfig =
+  | { mode: 'demo' }
+  | {
+      mode: 'google';
+      workspaceDomain: string;
+    };
 export type KeySource = 'EMPLOYEE_BYOK' | 'ORGANIZATION_MANAGED';
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 export type QaRunStatus = 'AWAITING_APPROVAL' | 'READY' | 'REJECTED';

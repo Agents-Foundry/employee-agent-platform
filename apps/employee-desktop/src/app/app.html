@@ -141,6 +141,12 @@
           Signature verified · {{ manifest.payload.answers['projectName'] }} · Used for new QA tasks
         </p>
       }
+      @if (bootstrap() && !selectedAgentId) {
+        <p class="verified-agent" role="status">
+          Request an agent above, then refresh your requests and choose Verify and use agent after
+          admin approval.
+        </p>
+      }
       @if (!activeConversation()) {
         <div class="welcome">
           <div class="hero-mark"><span>QA</span></div>
@@ -244,7 +250,7 @@
           <div class="composer-actions">
             <button type="button" class="attach" aria-label="Attach context">＋</button
             ><span>External writes require approval</span
-            ><button type="submit" class="send" [disabled]="busy()">
+            ><button type="submit" class="send" [disabled]="busy() || !selectedAgentId">
               {{ busy() ? '…' : '↑' }}
             </button>
           </div>

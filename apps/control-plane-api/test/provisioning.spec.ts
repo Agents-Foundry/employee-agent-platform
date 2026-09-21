@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import request from 'supertest';
+import rawRequest from 'supertest';
+import { demoRequest as request, createDemoApp as createApp } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createApp } from '../src/app.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { ManifestSigner } from '../src/manifest-signing.js';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
@@ -150,7 +150,7 @@ describe('blueprint provisioning', () => {
   it('rejects unauthenticated, cross-tenant, non-admin and self decisions', async () => {
     const app = createApp(db);
     const pending = await submit(app);
-    await request(app).get('/api/provisioning').expect(401);
+    await rawRequest(app).get('/api/provisioning').expect(401);
     await request(app)
       .get('/api/provisioning')
       .set({ ...employee, 'x-organization-id': 'other' })

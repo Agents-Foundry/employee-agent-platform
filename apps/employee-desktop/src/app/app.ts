@@ -15,6 +15,7 @@ import type {
   ManifestVerificationKey,
 } from '@agents-foundry/contracts';
 import { verifyManifest } from './verify-manifest';
+import { API_URL } from '../../../../packages/web-auth/src/session';
 
 @Component({
   imports: [DatePipe, FormsModule],
@@ -24,7 +25,7 @@ import { verifyManifest } from './verify-manifest';
 })
 export class App implements OnInit {
   private readonly http = inject(HttpClient);
-  private readonly apiUrl = 'http://localhost:4100/api';
+  private readonly apiUrl = API_URL;
 
   protected readonly bootstrap = signal<BootstrapResponse | null>(null);
   protected readonly conversations = signal<Conversation[]>([]);
@@ -178,14 +179,15 @@ export class App implements OnInit {
   }
 
   protected async submit(): Promise<void> {
-    if (this.busy() || this.provisioningBusy() || !this.prompt.trim()) return;
+    if (this.busy() || this.provisioningBusy() || !this.prompt.trim() || !this.selectedAgentId)
+      return;
     this.busy.set(true);
     this.error.set('');
     try {
       let conversation = this.activeConversation();
       if (!conversation) {
         const bootstrap = this.bootstrap();
-        if (!bootstrap?.agents[0]) throw new Error('BOOTSTRAP_MISSING');
+        if (!bootstrap) throw new Error('BOOTSTRAP_MISSING');
         const created = await firstValueFrom(
           this.http.post<Conversation>(`${this.apiUrl}/conversations`, {
             employeeId: bootstrap.employee.id,
@@ -233,6 +235,8 @@ export class App implements OnInit {
         this.http.get<BootstrapResponse>(`${this.apiUrl}/bootstrap`),
       );
       this.bootstrap.set(bootstrap);
+      if (!bootstrap.agents.some((agent) => agent.id === 'agent_qa_engineer'))
+        this.selectedAgentId = '';
       const blueprints = await firstValueFrom(
         this.http.get<AgentBlueprint[]>(`${this.apiUrl}/blueprints`, {
           headers: this.actorHeaders(),
