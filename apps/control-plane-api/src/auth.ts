@@ -372,40 +372,55 @@ export function configureAuth(
     res.clearCookie(sessionName, options);
     res.status(204).end();
   });
-  app.post('/api/auth/activate', requireOrigin, passwordLimit, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    if (config.mode !== 'password') {
-      res.status(404).json({ error: 'NOT_FOUND' });
-      return;
-    }
-    const input = z
-      .object({
-        token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-        password: z.string().min(15).max(256),
-      })
-      .strict()
-      .safeParse(req.body);
-    if (!input.success) {
-      res.status(400).json({ error: 'INVALID_ACTIVATION' });
-      return;
-    }
-    if (passwordChecks >= 4) {
-      res.status(429).json({ error: 'LOGIN_RATE_LIMITED' });
-      return;
-    }
-    passwordChecks++;
-    try {
-      const hash = await hashPassword(input.data.password);
-      if (!database.acceptInvitation(hashToken(input.data.token), hash)) {
-        res.status(400).json({ error: 'INVALID_OR_EXPIRED_INVITATION' });
+  app.post(
+    ['/api/auth/activate', '/api/auth/reset-password'],
+    requireOrigin,
+    passwordLimit,
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      if (config.mode !== 'password') {
+        res.status(404).json({ error: 'NOT_FOUND' });
         return;
       }
-      // Activation does not replace an existing browser session or log a different user in.
-      res.status(204).end();
-    } finally {
-      passwordChecks--;
-    }
-  });
+      const input = z
+        .object({
+          token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+          password: z
+            .string()
+            .min(15)
+            .max(256)
+            .refine((value) => [...value].length >= 15),
+        })
+        .strict()
+        .safeParse(req.body);
+      if (!input.success) {
+        res.status(400).json({ error: 'INVALID_ACTIVATION' });
+        return;
+      }
+      if (passwordChecks >= 4) {
+        res.status(429).json({ error: 'LOGIN_RATE_LIMITED' });
+        return;
+      }
+      passwordChecks++;
+      try {
+        const hash = await hashPassword(input.data.password);
+        const resetting = req.path === '/api/auth/reset-password';
+        const accepted = resetting
+          ? database.resetPassword(hashToken(input.data.token), hash)
+          : database.acceptInvitation(hashToken(input.data.token), hash);
+        if (!accepted) {
+          res.status(400).json({
+            error: resetting ? 'INVALID_OR_EXPIRED_RESET' : 'INVALID_OR_EXPIRED_INVITATION',
+          });
+          return;
+        }
+        // Activation does not replace an existing browser session or log a different user in.
+        res.status(204).end();
+      } finally {
+        passwordChecks--;
+      }
+    },
+  );
   return (req, res, next) => {
     const token = cookie(req, sessionName);
     const actor = token ? database.findSession(hashToken(token)) : undefined;

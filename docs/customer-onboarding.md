@@ -1,6 +1,6 @@
-# Customer onboarding — first implementation slice
+# Customer onboarding and account recovery
 
-This slice adds database-managed organizations, first-admin activation, employee invitations, member listing and access revocation. It is separate from the existing file-managed Google pilot. It does not complete the entire customer-onboarding milestone.
+Implemented so far: database-managed organizations, first-admin activation, employee invitations/reissue, member listing, administrator-assisted password recovery and access revocation. This is separate from the existing file-managed Google pilot and does not complete the entire customer-onboarding milestone.
 
 ## Deployment mode
 
@@ -39,11 +39,31 @@ Audit events record organization creation, invitations, activation, and disable 
 
 ## Remaining milestone work
 
-- Transactional email delivery, invitation reissue, and password recovery (links are manually delivered in this slice).
+- Transactional email delivery and self-service reset requests (reissue and administrator-assisted recovery are implemented; links are manually delivered).
 - Organization profile setup, additional admins, role/team administration, and reactivation workflows.
 - Admin-created agent configuration and assignment; existing employee request/admin approval flow remains available.
 - Purchase webhook integration, idempotent provisioning, subscription and seat limits.
 - Per-organization optional Google SSO and explicit identity linking; the legacy Google pilot still uses one configured domain.
 - Production database/RLS, shared rate limiting, secret vaults, and operational hardening.
 
-Do not describe this first slice as fully automated post-purchase onboarding. An expired first-admin invitation currently needs operator follow-up; reissue is the next lifecycle capability to implement before customer rollout.
+Do not describe the current implementation as fully automated post-purchase onboarding. Links still require manual secure delivery and identity verification.
+
+## Invitation reissue and password recovery
+
+The admin member panel distinguishes pending and expired invitations. **Reissue invitation** creates a new 48-hour activation link and invalidates the previous one. It preserves the original employee ID, role, organization, and email. It cannot recover disabled accounts or reset an already-active user's password.
+
+For active employees, **Reset password** creates a one-hour, single-use reset link. Earlier reset links are invalidated. Merely issuing the link does not sign anyone out or change a password. Successful redemption atomically replaces the salted password hash, consumes all reset links for the account, and revokes all existing application sessions. It then asks the user to sign in, without automatically issuing a new session. Reset links cannot activate pending or disabled accounts, and activation links cannot reset passwords.
+
+Admin-issued links are restricted to EMPLOYEE accounts in the admin's organization. The API ignores browser-supplied role/organization values and limits recovery-link issuance to ten attempts per admin per fifteen minutes. Redemption uses the existing origin checks, IP throttling, and bounded hashing concurrency. Limits remain process-local, so a shared limiter is required for multiple server instances.
+
+For first-admin activation reissue or administrator password recovery, the platform operator can run this command from `apps/control-plane-api` after independently verifying the recipient's identity:
+
+```powershell
+npx tsx --env-file=../../.env src/recover-member.ts <organization-uuid> <employee-uuid> activate
+# For an active administrator who has forgotten their password:
+npx tsx --env-file=../../.env src/recover-member.ts <organization-uuid> <employee-uuid> reset
+```
+
+The CLI prints the private link once and uses the admin or employee app URL according to the stored role. No password is passed to the command. Local operator access is privileged: the operator must verify the organization, person, and delivery channel before sharing a link. Do not copy links to source control, public logs, or support tickets. The unauthenticated API never generates or discloses recovery links.
+
+Links carry their token in the URL fragment. The UI immediately removes it from the address bar and keeps it only in memory. Refreshing requires reopening the original link. Account disable invalidates all outstanding activation and reset links; recovery never re-enables a disabled identity. Audit entries record link issuance/reissue and completed resets without raw tokens or passwords.

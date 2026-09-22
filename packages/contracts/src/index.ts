@@ -130,7 +130,10 @@ export interface LifecycleEvent {
     | 'organization.created'
     | 'employee.invited'
     | 'employee.activated'
-    | 'employee.disabled';
+    | 'employee.disabled'
+    | 'employee.invitation.reissued'
+    | 'employee.password_reset.issued'
+    | 'employee.password_reset.completed';
   subjectId: string;
   occurredAt: string;
   data: Record<string, unknown>;

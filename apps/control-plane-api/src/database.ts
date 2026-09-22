@@ -240,6 +240,7 @@ export class ControlPlaneDatabase {
         `SELECT e.id, e.display_name AS displayName, e.email, e.role, e.team,
       CASE WHEN i.enabled = 1 THEN 'ACTIVE'
       WHEN EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0 AND v.expires_at > ?) THEN 'INVITED'
+      WHEN EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0) THEN 'INVITATION_EXPIRED'
       ELSE 'INACTIVE' END AS status
       FROM employees e JOIN identities i ON i.employee_id = e.id AND i.issuer = ?
       WHERE e.organization_id = ? ORDER BY e.display_name`,
@@ -264,8 +265,117 @@ export class ControlPlaneDatabase {
         .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
         .run(LOCAL_ISSUER, employeeId);
       this.db.prepare('UPDATE invitations SET consumed = 1 WHERE employee_id = ?').run(employeeId);
+      this.db
+        .prepare('UPDATE password_resets SET consumed = 1 WHERE employee_id = ?')
+        .run(employeeId);
       this.audit(actor.id, 'employee.disabled', 'employee', employeeId, {}, actor.organizationId);
       this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  issueEmployeeLink(actor: Actor, employeeId: string, purpose: 'activate' | 'reset') {
+    if (actor.role !== 'ADMIN' || actor.id === employeeId) throw new Error('ACTOR_FORBIDDEN');
+    return this.issueMemberLink(actor.organizationId, employeeId, purpose, actor.id, true);
+  }
+
+  // Only exposed through the operator CLI, never an HTTP route.
+  issueOperatorLink(organizationId: string, employeeId: string, purpose: 'activate' | 'reset') {
+    return this.issueMemberLink(organizationId, employeeId, purpose, 'platform-operator', false);
+  }
+
+  private issueMemberLink(
+    organizationId: string,
+    employeeId: string,
+    purpose: 'activate' | 'reset',
+    actorId: string,
+    employeeOnly: boolean,
+  ) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const target = this.db
+        .prepare(
+          `SELECT e.role, i.enabled,
+        EXISTS (SELECT 1 FROM password_credentials p WHERE p.issuer = i.issuer AND p.subject = i.subject) AS has_password,
+        EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0) AS has_invitation
+        FROM employees e JOIN identities i ON i.employee_id = e.id AND i.issuer = ?
+        WHERE e.organization_id = ? AND e.id = ?`,
+        )
+        .get(LOCAL_ISSUER, organizationId, employeeId) as
+        | { role: Actor['role']; enabled: number; has_password: number; has_invitation: number }
+        | undefined;
+      if (!target || (employeeOnly && target.role !== 'EMPLOYEE'))
+        throw new Error('MEMBER_NOT_FOUND');
+      if (
+        purpose === 'activate'
+          ? target.enabled || target.has_password || !target.has_invitation
+          : !target.enabled || !target.has_password
+      )
+        throw new Error('RECOVERY_STATE_CONFLICT');
+      const token = randomBytes(32).toString('base64url');
+      const expiresAt = Date.now() + (purpose === 'activate' ? 48 : 1) * 3600000;
+      // Purpose-specific tables ensure activation links cannot be used to reset passwords.
+      const table = purpose === 'activate' ? 'invitations' : 'password_resets';
+      this.db.prepare(`UPDATE ${table} SET consumed = 1 WHERE employee_id = ?`).run(employeeId);
+      this.db
+        .prepare(
+          `INSERT INTO ${table} (hash, employee_id, expires_at, consumed) VALUES (?, ?, ?, 0)`,
+        )
+        .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
+      this.audit(
+        actorId,
+        purpose === 'activate' ? 'employee.invitation.reissued' : 'employee.password_reset.issued',
+        'employee',
+        employeeId,
+        {},
+        organizationId,
+      );
+      this.db.exec('COMMIT');
+      return { employeeId, token, expiresAt, role: target.role };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  resetPassword(hash: string, passwordHash: string): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const reset = this.db
+        .prepare(
+          `SELECT r.employee_id, e.organization_id FROM password_resets r
+        JOIN employees e ON e.id = r.employee_id
+        JOIN identities i ON i.employee_id = e.id AND i.issuer = ? AND i.enabled = 1
+        JOIN password_credentials p ON p.issuer = i.issuer AND p.subject = i.subject
+        WHERE r.hash = ? AND r.consumed = 0 AND r.expires_at > ?`,
+        )
+        .get(LOCAL_ISSUER, hash, Date.now()) as
+        { employee_id: string; organization_id: string } | undefined;
+      if (!reset) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      this.db
+        .prepare('UPDATE password_credentials SET hash = ? WHERE issuer = ? AND subject = ?')
+        .run(passwordHash, LOCAL_ISSUER, reset.employee_id);
+      this.db
+        .prepare('UPDATE password_resets SET consumed = 1 WHERE employee_id = ?')
+        .run(reset.employee_id);
+      this.db
+        .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
+        .run(LOCAL_ISSUER, reset.employee_id);
+      this.audit(
+        reset.employee_id,
+        'employee.password_reset.completed',
+        'employee',
+        reset.employee_id,
+        {},
+        reset.organization_id,
+      );
+      this.db.exec('COMMIT');
+      return true;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -508,7 +618,7 @@ export class ControlPlaneDatabase {
   listLifecycleEvents(organizationId: string): LifecycleEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued', 'organization.created', 'employee.invited', 'employee.activated', 'employee.disabled') ORDER BY rowid DESC LIMIT 100",
+        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued', 'organization.created', 'employee.invited', 'employee.activated', 'employee.disabled', 'employee.invitation.reissued', 'employee.password_reset.issued', 'employee.password_reset.completed') ORDER BY rowid DESC LIMIT 100",
       )
       .all(organizationId) as Record<string, unknown>[];
     return rows.map((row) => ({
@@ -835,6 +945,10 @@ export class ControlPlaneDatabase {
       );
       CREATE TABLE IF NOT EXISTS auth_sessions (hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS invitations (
+        hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL,
+        FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
+      CREATE TABLE IF NOT EXISTS password_resets (
         hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL,
         FOREIGN KEY (employee_id) REFERENCES employees(id)
       );
