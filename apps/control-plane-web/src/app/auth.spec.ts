@@ -15,6 +15,32 @@ describe('browser authentication boundary', () => {
   );
   afterEach(() => TestBed.inject(HttpTestingController).verify());
 
+  it('uses the reset endpoint for reset links, clears the token, and never signs in automatically', async () => {
+    history.replaceState(null, '', '#reset=' + 'r'.repeat(43));
+    const auth = TestBed.inject(AuthSession),
+      http = TestBed.inject(HttpTestingController);
+    expect(location.hash).toBe('');
+    expect(auth.linkPurpose()).toBe('reset');
+    const fixture = TestBed.createComponent(AuthPanel);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Reset your password');
+    fixture.componentInstance.password = 'a replacement password';
+    fixture.componentInstance.confirmation = 'does not match';
+    await fixture.componentInstance.activate();
+    expect(auth.error()).toBe('Passwords do not match.');
+    fixture.componentInstance.confirmation = 'a replacement password';
+    const completion = fixture.componentInstance.activate();
+    expect(fixture.componentInstance.password).toBe('');
+    expect(fixture.componentInstance.confirmation).toBe('');
+    const reset = http.expectOne(`${API_URL}/auth/reset-password`);
+    expect(reset.request.body.token).toBe('r'.repeat(43));
+    reset.flush(null, { status: 204, statusText: 'No Content' });
+    await completion;
+    expect(auth.activationToken()).toBe('');
+    expect(auth.ready()).toBe(false);
+    expect(auth.notice()).toContain('existing sessions revoked');
+  });
+
   it('activates an invitation without Google and removes the private token from the URL', async () => {
     history.replaceState(null, '', '#activate=' + 'a'.repeat(43));
     const auth = TestBed.inject(AuthSession),

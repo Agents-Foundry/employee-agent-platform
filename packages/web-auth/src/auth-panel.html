@@ -27,8 +27,16 @@
         <p class="help" role="status">{{ auth.notice() }}</p>
       }
       @if (auth.activationToken()) {
-        <h2>Activate your account</h2>
-        <p class="intro">Choose a unique application password to join your organization.</p>
+        <h2>
+          {{ auth.linkPurpose() === 'reset' ? 'Reset your password' : 'Activate your account' }}
+        </h2>
+        <p class="intro">
+          {{
+            auth.linkPurpose() === 'reset'
+              ? 'Choose a new application password. Your existing sessions will be signed out.'
+              : 'Choose a unique application password to join your organization.'
+          }}
+        </p>
         <form #activationForm="ngForm" (ngSubmit)="activationForm.valid && activate()">
           <label for="new-password">New password (15–256 characters)</label>
           <input
@@ -57,7 +65,13 @@
             type="submit"
             [disabled]="auth.signingIn() || !activationForm.valid"
           >
-            {{ auth.signingIn() ? 'Activating…' : 'Activate account' }}
+            {{
+              auth.signingIn()
+                ? 'Saving…'
+                : auth.linkPurpose() === 'reset'
+                  ? 'Reset password'
+                  : 'Activate account'
+            }}
           </button>
         </form>
       } @else if (auth.config()?.mode === 'google' || auth.config()?.mode === 'password') {

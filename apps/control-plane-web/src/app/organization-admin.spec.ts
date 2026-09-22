@@ -11,6 +11,39 @@ describe('organization administration', () => {
     }),
   );
   afterEach(() => TestBed.inject(HttpTestingController).verify());
+
+  it('selects invitation reissue for expired invites and password recovery for active members', () => {
+    const fixture = TestBed.createComponent(OrganizationAdmin),
+      http = TestBed.inject(HttpTestingController);
+    const component = fixture.componentInstance;
+    const member = {
+      id: 'member',
+      displayName: 'Employee',
+      email: 'employee@example.com',
+      role: 'EMPLOYEE',
+      team: 'QA',
+      status: 'INVITATION_EXPIRED',
+    };
+    component.recover(member);
+    const reissue = http.expectOne(`${API_URL}/organization/members/member/recovery-link`);
+    expect(reissue.request.body).toEqual({ purpose: 'activate' });
+    reissue.flush({
+      activationUrl: 'http://localhost:4300/#activate=test',
+      expiresAt: Date.now() + 3600000,
+    });
+    http.expectOne(`${API_URL}/organization/members`).flush([]);
+    expect(component.linkKind()).toBe('activate');
+    component.recover({ ...member, status: 'ACTIVE' });
+    const reset = http.expectOne(`${API_URL}/organization/members/member/recovery-link`);
+    expect(reset.request.body).toEqual({ purpose: 'reset' });
+    reset.flush({
+      activationUrl: 'http://localhost:4300/#reset=test',
+      expiresAt: Date.now() + 3600000,
+    });
+    http.expectOne(`${API_URL}/organization/members`).flush([]);
+    expect(component.linkKind()).toBe('reset');
+    expect(component.busy()).toBe(false);
+  });
   it('invites employees without allowing the browser to assign an organization or role', () => {
     TestBed.inject(AuthSession).config.set({ mode: 'password' });
     const fixture = TestBed.createComponent(OrganizationAdmin),

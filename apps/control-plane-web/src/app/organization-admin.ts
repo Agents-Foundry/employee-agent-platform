@@ -1,6 +1,7 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { DatePipe } from '@angular/common';
 import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session';
 
 interface Member {
@@ -13,7 +14,7 @@ interface Member {
 }
 @Component({
   selector: 'af-organization-admin',
-  imports: [FormsModule],
+  imports: [FormsModule, DatePipe],
   template: `@if (auth.config()?.mode === 'password') {
     <section aria-labelledby="organization-heading">
       <h2 id="organization-heading">Organization members</h2>
@@ -40,12 +41,19 @@ interface Member {
       </form>
       @if (link()) {
         <div class="invitation" role="status">
-          <strong>Invitation created · expires in 48 hours</strong>
+          <strong
+            >{{ linkKind() === 'reset' ? 'Password reset link created' : 'Invitation created' }} ·
+            expires {{ linkExpires() | date: 'medium' }}</strong
+          >
           <p>
             Email delivery is not connected yet. Share this private, single-use link with the
             invited employee through your approved secure channel.
           </p>
-          <label>Activation link<input readonly [value]="link()" /></label>
+          <label
+            >Private {{ linkKind() === 'reset' ? 'reset' : 'activation' }} link<input
+              readonly
+              [value]="link()"
+          /></label>
           <button type="button" (click)="link.set('')">Dismiss private link</button>
         </div>
       }
@@ -58,6 +66,24 @@ interface Member {
               <small>{{ member.role }} · {{ member.status }}</small>
             </div>
             @if (member.role === 'EMPLOYEE' && member.status !== 'INACTIVE') {
+              @if (confirmRecovery() === member.id) {
+                <span
+                  >Replace earlier {{ member.status === 'ACTIVE' ? 'reset' : 'activation' }} links?
+                  Verify the recipient before sharing.</span
+                >
+                <button type="button" [disabled]="busy()" (click)="recover(member)">
+                  Create private link
+                </button>
+                <button type="button" (click)="confirmRecovery.set('')">Cancel</button>
+              } @else {
+                <button
+                  type="button"
+                  [disabled]="busy()"
+                  (click)="confirmRecovery.set(member.id); confirmDisable.set('')"
+                >
+                  {{ member.status === 'ACTIVE' ? 'Reset password' : 'Reissue invitation' }}
+                </button>
+              }
               @if (confirmDisable() === member.id) {
                 <span>Revoke access immediately?</span
                 ><button type="button" [disabled]="busy()" (click)="disable(member)">
@@ -155,6 +181,9 @@ export class OrganizationAdmin implements OnInit {
   readonly busy = signal(false);
   readonly link = signal('');
   readonly confirmDisable = signal('');
+  readonly confirmRecovery = signal('');
+  readonly linkKind = signal<'activate' | 'reset'>('activate');
+  readonly linkExpires = signal<number | null>(null);
   name = '';
   email = '';
   team = '';
@@ -162,12 +191,10 @@ export class OrganizationAdmin implements OnInit {
     if (this.auth.config()?.mode === 'password') this.refresh();
   }
   refresh() {
-    this.http
-      .get<Member[]>(`${API_URL}/organization/members`)
-      .subscribe({
-        next: (rows) => this.members.set(rows),
-        error: () => this.error.set('Could not load organization members.'),
-      });
+    this.http.get<Member[]>(`${API_URL}/organization/members`).subscribe({
+      next: (rows) => this.members.set(rows),
+      error: () => this.error.set('Could not load organization members.'),
+    });
   }
   invite() {
     if (this.busy()) return;
@@ -175,7 +202,7 @@ export class OrganizationAdmin implements OnInit {
     this.error.set('');
     this.link.set('');
     this.http
-      .post<{ activationUrl: string }>(`${API_URL}/organization/invitations`, {
+      .post<{ activationUrl: string; expiresAt: number }>(`${API_URL}/organization/invitations`, {
         displayName: this.name,
         email: this.email,
         team: this.team,
@@ -183,6 +210,8 @@ export class OrganizationAdmin implements OnInit {
       .subscribe({
         next: (result) => {
           this.link.set(result.activationUrl);
+          this.linkKind.set('activate');
+          this.linkExpires.set(result.expiresAt);
           this.name = this.email = this.team = '';
           this.busy.set(false);
           this.refresh();
@@ -203,6 +232,7 @@ export class OrganizationAdmin implements OnInit {
       next: () => {
         this.busy.set(false);
         this.confirmDisable.set('');
+        this.confirmRecovery.set('');
         this.link.set('');
         this.refresh();
       },
@@ -211,5 +241,34 @@ export class OrganizationAdmin implements OnInit {
         this.error.set('Unable to disable this member.');
       },
     });
+  }
+
+  recover(member: Member) {
+    if (this.busy()) return;
+    const purpose = member.status === 'ACTIVE' ? 'reset' : 'activate';
+    this.busy.set(true);
+    this.error.set('');
+    this.link.set('');
+    this.http
+      .post<{ activationUrl: string; expiresAt: number }>(
+        `${API_URL}/organization/members/${member.id}/recovery-link`,
+        { purpose },
+      )
+      .subscribe({
+        next: (result) => {
+          this.link.set(result.activationUrl);
+          this.linkKind.set(purpose);
+          this.linkExpires.set(result.expiresAt);
+          this.confirmRecovery.set('');
+          this.busy.set(false);
+          this.refresh();
+        },
+        error: () => {
+          this.error.set(
+            'Unable to create a recovery link. Refresh the member list and try again later. Disabled accounts cannot be recovered this way.',
+          );
+          this.busy.set(false);
+        },
+      });
   }
 }

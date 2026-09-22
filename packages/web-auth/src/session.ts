@@ -25,14 +25,18 @@ export class AuthSession {
   readonly ready = signal(false);
   readonly error = signal('');
   readonly signingIn = signal(false);
+  readonly linkPurpose = signal<'activate' | 'reset'>('activate');
   readonly activationToken = signal(this.readActivationToken());
   readonly notice = signal('');
   private role: UserRole = 'EMPLOYEE';
 
   private readActivationToken(): string {
     if (typeof location === 'undefined') return '';
-    const token = new URLSearchParams(location.hash.slice(1)).get('activate');
+    const parameters = new URLSearchParams(location.hash.slice(1));
+    const resetting = parameters.has('reset');
+    const token = parameters.get(resetting ? 'reset' : 'activate');
     if (!token) return '';
+    this.linkPurpose.set(resetting ? 'reset' : 'activate');
     history.replaceState(null, '', location.pathname + location.search);
     return token;
   }
@@ -44,16 +48,20 @@ export class AuthSession {
     try {
       await firstValueFrom(
         this.http.post(
-          `${API_URL}/auth/activate`,
+          `${API_URL}/auth/${this.linkPurpose() === 'reset' ? 'reset-password' : 'activate'}`,
           { token: this.activationToken(), password },
           { withCredentials: true },
         ),
       );
       this.activationToken.set('');
-      this.notice.set('Your account is activated. Sign in with your email and new password.');
+      this.notice.set(
+        this.linkPurpose() === 'reset'
+          ? 'Your password has been reset and existing sessions revoked. Sign in with your new password.'
+          : 'Your account is activated. Sign in with your email and new password.',
+      );
     } catch {
       this.error.set(
-        'Activation failed. Use a password of 15–256 characters and a valid, unexpired invitation.',
+        'Unable to complete this link. Use a password of 15–256 characters and a valid, unexpired link. Contact your administrator if it has expired.',
       );
     } finally {
       this.signingIn.set(false);
