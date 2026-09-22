@@ -9,6 +9,7 @@ export interface Actor {
 
 export type PublicAuthConfig =
   | { mode: 'demo' }
+  | { mode: 'password' }
   | {
       mode: 'google';
       workspaceDomain: string;
@@ -125,7 +126,11 @@ export interface LifecycleEvent {
     | 'provisioning.requested'
     | 'provisioning.approved'
     | 'provisioning.rejected'
-    | 'agent.manifest.issued';
+    | 'agent.manifest.issued'
+    | 'organization.created'
+    | 'employee.invited'
+    | 'employee.activated'
+    | 'employee.disabled';
   subjectId: string;
   occurredAt: string;
   data: Record<string, unknown>;

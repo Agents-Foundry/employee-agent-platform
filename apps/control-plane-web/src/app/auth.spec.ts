@@ -15,6 +15,35 @@ describe('browser authentication boundary', () => {
   );
   afterEach(() => TestBed.inject(HttpTestingController).verify());
 
+  it('activates an invitation without Google and removes the private token from the URL', async () => {
+    history.replaceState(null, '', '#activate=' + 'a'.repeat(43));
+    const auth = TestBed.inject(AuthSession),
+      http = TestBed.inject(HttpTestingController);
+    expect(location.hash).toBe('');
+    const initialize = auth.initialize('ADMIN');
+    http.expectOne(`${API_URL}/auth/config`).flush({ mode: 'password' });
+    await initialize;
+    expect(auth.ready()).toBe(false);
+    const fixture = TestBed.createComponent(AuthPanel);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Activate your account');
+    expect(fixture.nativeElement.textContent).not.toContain('Sign in with Google');
+    fixture.componentInstance.password = 'a unique long passphrase';
+    fixture.componentInstance.confirmation = 'a unique long passphrase';
+    const activation = fixture.componentInstance.activate();
+    const request = http.expectOne(`${API_URL}/auth/activate`);
+    expect(request.request.body.token).toBe('a'.repeat(43));
+    expect(request.request.withCredentials).toBe(true);
+    request.flush(null, { status: 204, statusText: 'No Content' });
+    await activation;
+    fixture.detectChanges();
+    expect(auth.activationToken()).toBe('');
+    expect(auth.ready()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Your account is activated');
+    expect(fixture.nativeElement.textContent).toContain('Sign in with email');
+    expect(fixture.nativeElement.textContent).not.toContain('Sign in with Google');
+  });
+
   it('renders both login methods and clears the password on form submission', async () => {
     const auth = TestBed.inject(AuthSession),
       http = TestBed.inject(HttpTestingController);

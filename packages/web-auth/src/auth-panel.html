@@ -23,7 +23,44 @@
       @if (auth.error()) {
         <p class="alert" role="alert">{{ auth.error() }}</p>
       }
-      @if (auth.config()?.mode === 'google') {
+      @if (auth.notice()) {
+        <p class="help" role="status">{{ auth.notice() }}</p>
+      }
+      @if (auth.activationToken()) {
+        <h2>Activate your account</h2>
+        <p class="intro">Choose a unique application password to join your organization.</p>
+        <form #activationForm="ngForm" (ngSubmit)="activationForm.valid && activate()">
+          <label for="new-password">New password (15–256 characters)</label>
+          <input
+            id="new-password"
+            name="new-password"
+            type="password"
+            autocomplete="new-password"
+            minlength="15"
+            maxlength="256"
+            required
+            [(ngModel)]="password"
+          />
+          <label for="confirm-password">Confirm password</label>
+          <input
+            id="confirm-password"
+            name="confirm-password"
+            type="password"
+            autocomplete="new-password"
+            minlength="15"
+            maxlength="256"
+            required
+            [(ngModel)]="confirmation"
+          />
+          <button
+            class="primary-button"
+            type="submit"
+            [disabled]="auth.signingIn() || !activationForm.valid"
+          >
+            {{ auth.signingIn() ? 'Activating…' : 'Activate account' }}
+          </button>
+        </form>
+      } @else if (auth.config()?.mode === 'google' || auth.config()?.mode === 'password') {
         <form
           #loginForm="ngForm"
           (ngSubmit)="loginForm.valid && submit()"
@@ -95,15 +132,17 @@
             ><span aria-hidden="true">→</span>
           </button>
         </form>
-        <div class="divider"><span>or continue with</span></div>
-        <button
-          class="google-button"
-          type="button"
-          (click)="auth.signIn()"
-          [disabled]="auth.signingIn()"
-        >
-          <span class="google-letter" aria-hidden="true">G</span>Sign in with Google
-        </button>
+        @if (auth.config()?.mode === 'google') {
+          <div class="divider"><span>or continue with</span></div>
+          <button
+            class="google-button"
+            type="button"
+            (click)="auth.signIn()"
+            [disabled]="auth.signingIn()"
+          >
+            <span class="google-letter" aria-hidden="true">G</span>Sign in with Google
+          </button>
+        }
         <p class="access-note">
           An assigned workspace account is required.<br />Need access? Contact your administrator.
         </p>

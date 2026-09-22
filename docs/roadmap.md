@@ -13,6 +13,17 @@
 
 ## Milestone 2 — Identity and production data
 
+### Customer onboarding and organization administration (in progress)
+
+- Password-only authentication independent of Google (implemented)
+- Operator-created organizations and one-time first-admin activation (implemented)
+- Admin employee invitations, member listing, and immediate access revocation (implemented)
+- Email delivery, invitation reissue/password recovery, and purchase automation (pending)
+- Admin-created agents and employee assignments (pending)
+- Per-organization optional SSO and expanded administration (pending)
+
+See `customer-onboarding.md` for the first slice and its rollout limits.
+
 - Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
 - Native system-browser Google sign-in (pending)
 - Managed PostgreSQL migration and row-level organization isolation

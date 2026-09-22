@@ -25,7 +25,40 @@ export class AuthSession {
   readonly ready = signal(false);
   readonly error = signal('');
   readonly signingIn = signal(false);
+  readonly activationToken = signal(this.readActivationToken());
+  readonly notice = signal('');
   private role: UserRole = 'EMPLOYEE';
+
+  private readActivationToken(): string {
+    if (typeof location === 'undefined') return '';
+    const token = new URLSearchParams(location.hash.slice(1)).get('activate');
+    if (!token) return '';
+    history.replaceState(null, '', location.pathname + location.search);
+    return token;
+  }
+
+  async activate(password: string): Promise<void> {
+    if (this.signingIn()) return;
+    this.signingIn.set(true);
+    this.error.set('');
+    try {
+      await firstValueFrom(
+        this.http.post(
+          `${API_URL}/auth/activate`,
+          { token: this.activationToken(), password },
+          { withCredentials: true },
+        ),
+      );
+      this.activationToken.set('');
+      this.notice.set('Your account is activated. Sign in with your email and new password.');
+    } catch {
+      this.error.set(
+        'Activation failed. Use a password of 15–256 characters and a valid, unexpired invitation.',
+      );
+    } finally {
+      this.signingIn.set(false);
+    }
+  }
 
   demoHeaders(): Record<string, string> {
     return {
@@ -42,6 +75,7 @@ export class AuthSession {
         this.http.get<PublicAuthConfig>(`${API_URL}/auth/config`),
       );
       this.config.set(config);
+      if (this.activationToken()) return;
       const actor = await firstValueFrom(
         this.http.get<Actor>(`${API_URL}/auth/session`, {
           withCredentials: true,

@@ -14,6 +14,16 @@ export class AuthPanel {
   password = '';
   showPassword = false;
   showHelp = false;
+  confirmation = '';
+  async activate(): Promise<void> {
+    if (this.password !== this.confirmation) {
+      this.auth.error.set('Passwords do not match.');
+      return;
+    }
+    const password = this.password;
+    this.password = this.confirmation = '';
+    await this.auth.activate(password);
+  }
   async submit(): Promise<void> {
     const password = this.password;
     this.password = '';
