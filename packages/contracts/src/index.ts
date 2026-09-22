@@ -90,6 +90,20 @@ export interface ProvisioningRequest extends ProvisioningInput {
   agentId?: string;
 }
 
+export interface AdminAgentInput extends ProvisioningInput {
+  requestId: string;
+  name: string;
+  employeeIds: string[];
+}
+export interface AgentAssignment {
+  agentId: string;
+  name: string;
+  employeeId: string;
+  employeeName: string;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface AgentManifestPayload {
   apiVersion: 'agents-foundry/v1';
   manifestId: string;
@@ -133,7 +147,9 @@ export interface LifecycleEvent {
     | 'employee.disabled'
     | 'employee.invitation.reissued'
     | 'employee.password_reset.issued'
-    | 'employee.password_reset.completed';
+    | 'employee.password_reset.completed'
+    | 'agent.admin_created'
+    | 'agent.assigned';
   subjectId: string;
   occurredAt: string;
   data: Record<string, unknown>;

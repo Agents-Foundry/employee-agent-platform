@@ -20,7 +20,7 @@
 - Admin employee invitations, member listing, and immediate access revocation (implemented)
 - Invitation reissue and administrator-assisted password recovery (implemented)
 - Email delivery, self-service recovery requests, and purchase automation (pending)
-- Admin-created agents and employee assignments (pending)
+- Admin-created QA agents and employee-bound assignments with signed manifests (implemented)
 - Per-organization optional SSO and expanded administration (pending)
 
 See `customer-onboarding.md` for the first slice and its rollout limits.

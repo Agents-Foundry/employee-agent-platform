@@ -18,6 +18,37 @@ describe('App', () => {
     expect(app).toBeTruthy();
   });
 
+  it('shows admin-assigned agents without provisioning requests and refuses an invalid manifest', async () => {
+    const fixture = TestBed.createComponent(App),
+      http = TestBed.inject(HttpTestingController);
+    fixture.detectChanges();
+    http.expectOne('http://localhost:4100/api/bootstrap').flush({
+      organization: { id: 'org' },
+      employee: { id: 'employee', organizationId: 'org' },
+      agents: [{ id: 'assigned-agent', name: 'Release QA', status: 'ACTIVE' }],
+    });
+    await fixture.whenStable();
+    http.expectOne('http://localhost:4100/api/blueprints').flush([]);
+    await fixture.whenStable();
+    http.expectOne('http://localhost:4100/api/provisioning').flush([]);
+    await fixture.whenStable();
+    await vi.waitFor(() => http.expectOne((req) => req.url.endsWith('/conversations')).flush([]));
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Release QA');
+    const select = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
+    ).find((button) => button.textContent?.includes('Verify and use agent'))!;
+    select.click();
+    http.expectOne('http://localhost:4100/api/agents/assigned-agent/manifest').flush({});
+    http.expectOne('http://localhost:4100/api/manifest-key').flush({});
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('could not be verified');
+    http.expectNone((req) => req.method === 'POST');
+    http.verify();
+  });
+
   it('renders blueprint questions and submits an employee request with its answers', async () => {
     const fixture = TestBed.createComponent(App);
     const http = TestBed.inject(HttpTestingController);

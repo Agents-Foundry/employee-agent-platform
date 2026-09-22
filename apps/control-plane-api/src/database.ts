@@ -20,6 +20,8 @@ import type {
   SignedAgentManifest,
   LifecycleEvent,
   Actor,
+  AdminAgentInput,
+  AgentAssignment,
 } from '@agents-foundry/contracts';
 import type { IdentityEntry } from './identity-directory.js';
 import { ManifestSigner } from './manifest-signing.js';
@@ -496,6 +498,154 @@ export class ControlPlaneDatabase {
     return request;
   }
 
+  createAssignedAgents(actor: Actor, input: AdminAgentInput): AgentAssignment[] {
+    if (
+      actor.role !== 'ADMIN' ||
+      !this.db
+        .prepare(
+          `SELECT e.id FROM employees e JOIN identities i ON i.employee_id = e.id
+      WHERE e.id = ? AND e.organization_id = ? AND e.role = 'ADMIN' AND i.issuer = ? AND i.enabled = 1`,
+        )
+        .get(actor.id, actor.organizationId, LOCAL_ISSUER)
+    )
+      throw new Error('ACTOR_FORBIDDEN');
+    const bodyHash = createHash('sha256')
+      .update(JSON.stringify({ actorId: actor.id, ...input }))
+      .digest('hex');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.db
+        .prepare(
+          'SELECT body_hash, result FROM admin_agent_batches WHERE organization_id = ? AND request_id = ?',
+        )
+        .get(actor.organizationId, input.requestId) as
+        { body_hash: string; result: string } | undefined;
+      if (previous) {
+        if (previous.body_hash !== bodyHash) throw new Error('IDEMPOTENCY_CONFLICT');
+        this.db.exec('COMMIT');
+        return JSON.parse(previous.result) as AgentAssignment[];
+      }
+      // Check every recipient before creating anything; invitations and disabled users are ineligible.
+      const recipients = input.employeeIds.map((employeeId) => {
+        const employee = this.db
+          .prepare(
+            `SELECT e.id, e.display_name, e.team FROM employees e JOIN identities i ON i.employee_id = e.id
+          WHERE e.id = ? AND e.organization_id = ? AND e.role = 'EMPLOYEE' AND i.issuer = ? AND i.enabled = 1`,
+          )
+          .get(employeeId, actor.organizationId, LOCAL_ISSUER) as
+          { id: string; display_name: string; team: string } | undefined;
+        if (!employee) throw new Error('ASSIGNMENT_RECIPIENT_FORBIDDEN');
+        return employee;
+      });
+      const assignments: AgentAssignment[] = [];
+      for (const employee of recipients) {
+        const agentId = randomUUID(),
+          createdAt = now();
+        const manifest = this.signer.sign({
+          apiVersion: 'agents-foundry/v1',
+          manifestId: randomUUID(),
+          agentId,
+          organizationId: actor.organizationId,
+          employeeId: employee.id,
+          blueprint: { id: input.blueprintId, version: input.blueprintVersion },
+          model: {
+            provider: input.provider,
+            model: input.model,
+            credentialMode: input.credentialMode,
+          },
+          answers: input.answers,
+          capabilities: structuredClone(qaBlueprint.capabilities),
+          conversationSync: 'REQUIRED',
+          policyVersion: 'foundation-approval-v1',
+          issuedAt: createdAt,
+        });
+        if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
+        this.db
+          .prepare(
+            'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          )
+          .run(
+            agentId,
+            actor.organizationId,
+            input.name,
+            qaBlueprint.department,
+            employee.team,
+            'ACTIVE',
+            JSON.stringify(
+              qaBlueprint.capabilities.filter((c) => c.outcome !== 'DENY').map((c) => c.action),
+            ),
+          );
+        this.db
+          .prepare(
+            'INSERT INTO agent_manifests (agent_id, organization_id, employee_id, body) VALUES (?, ?, ?, ?)',
+          )
+          .run(agentId, actor.organizationId, employee.id, JSON.stringify(manifest));
+        this.db
+          .prepare(
+            'INSERT INTO agent_assignments (agent_id, created_by, created_at) VALUES (?, ?, ?)',
+          )
+          .run(agentId, actor.id, createdAt);
+        this.audit(
+          actor.id,
+          'agent.admin_created',
+          'agent',
+          agentId,
+          {
+            blueprintId: input.blueprintId,
+            blueprintVersion: input.blueprintVersion,
+            requestId: input.requestId,
+          },
+          actor.organizationId,
+        );
+        this.audit(
+          actor.id,
+          'agent.assigned',
+          'agent',
+          agentId,
+          { employeeId: employee.id },
+          actor.organizationId,
+        );
+        this.audit(
+          actor.id,
+          'agent.manifest.issued',
+          'agent',
+          agentId,
+          { manifestId: manifest.payload.manifestId, keyId: manifest.keyId },
+          actor.organizationId,
+        );
+        assignments.push({
+          agentId,
+          name: input.name,
+          employeeId: employee.id,
+          employeeName: employee.display_name,
+          createdBy: actor.id,
+          createdAt,
+        });
+      }
+      this.db
+        .prepare(
+          'INSERT INTO admin_agent_batches (organization_id, request_id, body_hash, result) VALUES (?, ?, ?, ?)',
+        )
+        .run(actor.organizationId, input.requestId, bodyHash, JSON.stringify(assignments));
+      this.db.exec('COMMIT');
+      return assignments;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listAgentAssignments(organizationId: string): AgentAssignment[] {
+    return this.db
+      .prepare(
+        `SELECT a.id AS agentId, a.name, m.employee_id AS employeeId, e.display_name AS employeeName,
+      s.created_by AS createdBy, s.created_at AS createdAt FROM agent_assignments s
+      JOIN agents a ON a.id = s.agent_id JOIN agent_manifests m ON m.agent_id = a.id
+      JOIN employees e ON e.id = m.employee_id WHERE a.organization_id = ? ORDER BY s.created_at DESC, a.id`,
+      )
+      .all(organizationId) as unknown as AgentAssignment[];
+  }
+
   listProvisioning(organizationId: string, employeeId?: string): ProvisioningRequest[] {
     const rows = this.db
       .prepare(
@@ -618,7 +768,7 @@ export class ControlPlaneDatabase {
   listLifecycleEvents(organizationId: string): LifecycleEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued', 'organization.created', 'employee.invited', 'employee.activated', 'employee.disabled', 'employee.invitation.reissued', 'employee.password_reset.issued', 'employee.password_reset.completed') ORDER BY rowid DESC LIMIT 100",
+        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type IN ('provisioning.requested', 'provisioning.approved', 'provisioning.rejected', 'agent.manifest.issued', 'organization.created', 'employee.invited', 'employee.activated', 'employee.disabled', 'employee.invitation.reissued', 'employee.password_reset.issued', 'employee.password_reset.completed', 'agent.admin_created', 'agent.assigned') ORDER BY rowid DESC LIMIT 100",
       )
       .all(organizationId) as Record<string, unknown>[];
     return rows.map((row) => ({
@@ -962,6 +1112,14 @@ export class ControlPlaneDatabase {
         FOREIGN KEY (agent_id) REFERENCES agents(id),
         FOREIGN KEY (organization_id) REFERENCES organizations(id),
         FOREIGN KEY (employee_id) REFERENCES employees(id)
+      );
+      CREATE TABLE IF NOT EXISTS admin_agent_batches (
+        organization_id TEXT NOT NULL, request_id TEXT NOT NULL, body_hash TEXT NOT NULL, result TEXT NOT NULL,
+        PRIMARY KEY (organization_id, request_id), FOREIGN KEY (organization_id) REFERENCES organizations(id)
+      );
+      CREATE TABLE IF NOT EXISTS agent_assignments (
+        agent_id TEXT PRIMARY KEY, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY (agent_id) REFERENCES agents(id), FOREIGN KEY (created_by) REFERENCES employees(id)
       );
       CREATE TABLE IF NOT EXISTS organizations (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE
