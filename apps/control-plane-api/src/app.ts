@@ -7,6 +7,7 @@ import type { QaRunRequest, QaRunResponse } from '@agents-foundry/contracts';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { ControlPlaneDatabase } from './database.js';
 import { qaBlueprint, validateAnswers } from './blueprints.js';
+import { configureAuth, loadAuthConfig, type AuthConfig, type GoogleSignIn } from './auth.js';
 
 const provisioningSchema = z
   .object({
@@ -56,22 +57,30 @@ const approvalDecisionSchema = z.object({
   decision: z.enum(['APPROVED', 'REJECTED']),
 });
 
-export function createApp(database = new ControlPlaneDatabase()) {
+export function createApp(
+  database: ControlPlaneDatabase,
+  auth: AuthConfig = loadAuthConfig(),
+  google?: GoogleSignIn,
+) {
   const app = express();
-  const allowedOrigins = (
-    process.env['ALLOWED_ORIGINS'] ??
-    'http://localhost:4200,http://localhost:4300,tauri://localhost'
-  )
-    .split(',')
-    .map((origin) => origin.trim());
+  const allowedOrigins =
+    auth.mode === 'google'
+      ? [new URL(auth.adminUrl).origin, new URL(auth.employeeUrl).origin]
+      : (
+          process.env['ALLOWED_ORIGINS'] ??
+          'http://localhost:4200,http://localhost:4300,tauri://localhost'
+        )
+          .split(',')
+          .map((origin) => origin.trim());
 
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(
     cors({
+      credentials: true,
       origin(origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error('Origin is not allowed.'));
+        return callback(new Error('ORIGIN_FORBIDDEN'));
       },
     }),
   );
@@ -93,26 +102,22 @@ export function createApp(database = new ControlPlaneDatabase()) {
     });
   });
 
+  const authenticate = configureAuth(app, database, auth, google);
+  app.use('/api', authenticate, (_request, response, next) => {
+    response.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+  app.get('/api/auth/session', (_request, response) => response.json(response.locals['actor']));
+
   app.get('/api/bootstrap', (_request, response) => {
-    response.json(database.getBootstrap());
+    response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
   });
 
-  function demoActor(request: Request, response: Response, next: NextFunction) {
-    const id = request.header('x-actor-id');
-    const role = request.header('x-actor-role');
-    const organizationId = request.header('x-organization-id');
-    if (!id || !role || !organizationId)
-      return response.status(401).json({ error: 'ACTOR_REQUIRED' });
-    database.resolveActor(id, role, organizationId);
-    response.locals['actor'] = { id, role, organizationId };
-    return next();
-  }
-
-  app.get('/api/blueprints', demoActor, (_request, response) => response.json([qaBlueprint]));
-  app.get('/api/manifest-key', demoActor, (_request, response) =>
+  app.get('/api/blueprints', (_request, response) => response.json([qaBlueprint]));
+  app.get('/api/manifest-key', (_request, response) =>
     response.json(database.signer.verificationKey),
   );
-  app.get('/api/provisioning', demoActor, (_request, response) => {
+  app.get('/api/provisioning', (_request, response) => {
     const actor = response.locals['actor'];
     response.json(
       database.listProvisioning(
@@ -121,15 +126,17 @@ export function createApp(database = new ControlPlaneDatabase()) {
       ),
     );
   });
-  app.post('/api/provisioning', demoActor, (request, response) => {
+  app.post('/api/provisioning', (request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'EMPLOYEE')
       return response.status(403).json({ error: 'EMPLOYEE_ROLE_REQUIRED' });
     const input = provisioningSchema.parse(request.body);
     input.answers = validateAnswers(input.answers);
-    return response.status(201).json(database.requestProvisioning(actor.id, input));
+    return response
+      .status(201)
+      .json(database.requestProvisioning(actor.id, input, actor.organizationId));
   });
-  app.post('/api/provisioning/:id/decision', demoActor, (request, response) => {
+  app.post('/api/provisioning/:id/decision', (request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
     const input = z
@@ -149,7 +156,7 @@ export function createApp(database = new ControlPlaneDatabase()) {
       ),
     );
   });
-  app.get('/api/agents/:id/manifest', demoActor, (request, response) => {
+  app.get('/api/agents/:id/manifest', (request, response) => {
     const actor = response.locals['actor'];
     response.json(
       database.getManifest(
@@ -159,37 +166,68 @@ export function createApp(database = new ControlPlaneDatabase()) {
       ),
     );
   });
-  app.get('/api/lifecycle-events', demoActor, (_request, response) => {
+  app.get('/api/lifecycle-events', (_request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
     return response.json(database.listLifecycleEvents(actor.organizationId));
   });
 
   app.get('/api/conversations', (request, response) => {
-    const employeeId = z.string().min(1).parse(request.query['employeeId']);
-    response.json(database.listConversations(employeeId));
+    const actor = response.locals['actor'];
+    if (request.query['employeeId'] && request.query['employeeId'] !== actor.id)
+      return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
+    return response.json(database.listConversations(actor.id, actor.organizationId));
   });
 
   app.post('/api/conversations', (request, response) => {
     const input = createConversationSchema.parse(request.body);
-    response
+    const actor = response.locals['actor'];
+    if (actor.role !== 'EMPLOYEE' || input.employeeId !== actor.id)
+      return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
+    return response
       .status(201)
-      .json(database.createConversation(input.employeeId, input.agentId, input.title));
+      .json(
+        database.createConversation(
+          actor.id,
+          input.agentId,
+          input.title,
+          actor.organizationId,
+          auth.mode === 'demo',
+        ),
+      );
   });
 
   app.get('/api/conversations/:id', (request, response) => {
-    response.json(database.getConversation(String(request.params['id'])));
+    const actor = response.locals['actor'];
+    response.json(
+      database.getConversation(String(request.params['id']), actor.organizationId, actor.id),
+    );
   });
 
   app.post('/api/conversations/:id/messages', (request, response) => {
     const input = addMessageSchema.parse(request.body);
-    response
+    const actor = response.locals['actor'];
+    if (actor.role !== 'EMPLOYEE' || input.author !== 'EMPLOYEE')
+      return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
+    return response
       .status(201)
-      .json(database.addMessage(String(request.params['id']), input.author, input.content));
+      .json(
+        database.addMessage(
+          String(request.params['id']),
+          'EMPLOYEE',
+          input.content,
+          actor.organizationId,
+          actor.id,
+        ),
+      );
   });
 
   app.post('/api/qa/runs', (request, response) => {
     const input: QaRunRequest = qaRunSchema.parse(request.body);
+    const actor = response.locals['actor'];
+    if (actor.role !== 'EMPLOYEE' || input.employeeId !== actor.id)
+      return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
+    database.getConversation(input.conversationId, actor.organizationId, actor.id);
     const policy = evaluatePolicy('qa.execute_playwright');
     if (policy.outcome !== 'REQUIRE_APPROVAL') {
       return response.status(500).json({ error: 'POLICY_CONFIGURATION_ERROR' });
@@ -202,31 +240,49 @@ export function createApp(database = new ControlPlaneDatabase()) {
       'Capture trace, screenshots, console, and network evidence',
       'Draft defects for human review; never publish automatically',
     ];
-    const result: QaRunResponse = database.createQaRun({
-      ...input,
-      plan,
-      approvalSummary: `Approve isolated Playwright execution for ${input.storyKey} against ${input.targetUrl}.`,
-    });
+    const result: QaRunResponse = database.createQaRun(
+      {
+        ...input,
+        plan,
+        approvalSummary: `Approve isolated Playwright execution for ${input.storyKey} against ${input.targetUrl}.`,
+      },
+      actor.organizationId,
+      auth.mode === 'demo',
+    );
     database.addMessage(
       input.conversationId,
       'AGENT',
       `I prepared a six-step QA plan for ${input.storyKey}. Browser execution is paused for admin approval (${result.approval.id}).`,
+      actor.organizationId,
+      actor.id,
     );
     return response.status(202).json(result);
   });
 
   app.get('/api/approvals', (_request, response) => {
-    response.json(database.listApprovals());
+    const actor = response.locals['actor'];
+    response.json(
+      database.listApprovals(
+        actor.organizationId,
+        actor.role === 'EMPLOYEE' ? actor.id : undefined,
+      ),
+    );
   });
 
   app.post('/api/approvals/:id/decision', (request, response) => {
-    if (request.header('x-actor-role') !== 'ADMIN') {
+    const actor = response.locals['actor'];
+    if (actor.role !== 'ADMIN') {
       return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
     }
-    const actorId = request.header('x-actor-id');
-    if (!actorId) return response.status(400).json({ error: 'ACTOR_ID_REQUIRED' });
     const { decision } = approvalDecisionSchema.parse(request.body);
-    return response.json(database.decideApproval(String(request.params['id']), decision, actorId));
+    return response.json(
+      database.decideApproval(
+        String(request.params['id']),
+        decision,
+        actor.id,
+        actor.organizationId,
+      ),
+    );
   });
 
   app.use((_request, response) => {

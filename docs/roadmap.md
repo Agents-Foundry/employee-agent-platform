@@ -13,7 +13,8 @@
 
 ## Milestone 2 — Identity and production data
 
-- Organization SSO/OIDC and verified RBAC
+- Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
+- Native system-browser Google sign-in (pending)
 - Managed PostgreSQL migration and row-level organization isolation
 - Vault-backed BYOK and organization-key bindings
 - Admin CRUD for departments, teams, roles, employees, and agents

@@ -1,6 +1,5 @@
-import request from 'supertest';
+import { demoRequest as request, createDemoApp as createApp } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createApp } from '../src/app.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 
 describe('control plane API', () => {

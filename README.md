@@ -46,7 +46,7 @@ Prerequisites: Node.js 24 LTS, npm 11, and (for the native desktop build) the Ru
 
 ```bash
 npm install
-npm run dev:api
+npm run dev:api:demo
 npm run start:admin
 npm run start:employee
 ```
@@ -54,6 +54,8 @@ npm run start:employee
 - API: `http://localhost:4100/api/health`
 - Admin control plane: `http://localhost:4200`
 - Employee web preview: `http://localhost:4300`
+
+For Google Workspace sign-in, follow [the Google setup guide](docs/google-workspace.md) and use `npm run dev:api`. Google mode is the server default and requires explicit OAuth and membership configuration. The demo command is an intentional local-only opt-in.
 
 Run every build and test gate:
 

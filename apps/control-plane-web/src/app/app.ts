@@ -2,6 +2,7 @@ import { DatePipe } from '@angular/common';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { API_URL } from '../../../../packages/web-auth/src/session';
 import type {
   Approval,
   BootstrapResponse,
@@ -17,7 +18,7 @@ import type {
 })
 export class App implements OnInit {
   private readonly http = inject(HttpClient);
-  private readonly apiUrl = 'http://localhost:4100/api';
+  private readonly apiUrl = API_URL;
 
   protected readonly bootstrap = signal<BootstrapResponse | null>(null);
   protected readonly approvals = signal<Approval[]>([]);
