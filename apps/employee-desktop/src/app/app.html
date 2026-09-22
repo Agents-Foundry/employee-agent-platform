@@ -58,6 +58,31 @@
         <div class="error" role="alert">{{ error() }}</div>
       }
       <details class="provisioning-panel">
+        <summary>Your assigned agents</summary>
+        <button
+          type="button"
+          (click)="refreshAssignedAgents()"
+          [disabled]="busy() || provisioningBusy()"
+        >
+          Refresh assigned agents
+        </button>
+        <p>Choose an assigned agent to verify its signed configuration before starting a task.</p>
+        @for (agent of bootstrap()?.agents ?? []; track agent.id) {
+          @if (agent.id !== 'agent_qa_engineer' && agent.status === 'ACTIVE') {
+            <div class="provisioning-request">
+              <strong>{{ agent.name }}</strong
+              ><button
+                type="button"
+                (click)="useAssignedAgent(agent.id)"
+                [disabled]="busy() || provisioningBusy()"
+              >
+                Verify and use agent
+              </button>
+            </div>
+          }
+        }
+      </details>
+      <details class="provisioning-panel">
         <summary>Request your QA agent</summary>
         @if (blueprint(); as definition) {
           <p>{{ definition.title }} · Blueprint {{ definition.version }}</p>

@@ -41,7 +41,7 @@ Audit events record organization creation, invitations, activation, and disable 
 
 - Transactional email delivery and self-service reset requests (reissue and administrator-assisted recovery are implemented; links are manually delivered).
 - Organization profile setup, additional admins, role/team administration, and reactivation workflows.
-- Admin-created agent configuration and assignment; existing employee request/admin approval flow remains available.
+- Broader agent templates, assignment lifecycle and configuration versioning; [admin-created QA agents and employee assignments](admin-agent-assignments.md) are implemented, alongside the existing employee request/admin approval flow.
 - Purchase webhook integration, idempotent provisioning, subscription and seat limits.
 - Per-organization optional Google SSO and explicit identity linking; the legacy Google pilot still uses one configured domain.
 - Production database/RLS, shared rate limiting, secret vaults, and operational hardening.

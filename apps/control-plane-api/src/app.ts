@@ -116,6 +116,38 @@ export function createApp(
   });
 
   app.get('/api/blueprints', (_request, response) => response.json([qaBlueprint]));
+  app.get('/api/organization/agents', (_request, response) => {
+    const actor = response.locals['actor'];
+    if (auth.mode !== 'password' || actor.role !== 'ADMIN')
+      return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
+    return response.json(database.listAgentAssignments(actor.organizationId));
+  });
+  app.post('/api/organization/agents', (request, response) => {
+    const actor = response.locals['actor'];
+    if (auth.mode !== 'password' || actor.role !== 'ADMIN')
+      return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
+    const input = provisioningSchema
+      .extend({
+        requestId: z.string().uuid(),
+        name: z.string().trim().min(1).max(120),
+        employeeIds: z
+          .array(z.string().uuid())
+          .min(1)
+          .max(25)
+          .refine((ids) => new Set(ids).size === ids.length)
+          .transform((ids) => ids.sort()),
+      })
+      .strict()
+      .parse(request.body);
+    input.answers = validateAnswers(input.answers);
+    try {
+      return response.status(201).json(database.createAssignedAgents(actor, input));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT')
+        return response.status(409).json({ error: 'IDEMPOTENCY_CONFLICT' });
+      throw error;
+    }
+  });
   app.get('/api/manifest-key', (_request, response) =>
     response.json(database.signer.verificationKey),
   );

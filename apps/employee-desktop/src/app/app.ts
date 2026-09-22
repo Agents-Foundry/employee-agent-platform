@@ -104,11 +104,29 @@ export class App implements OnInit {
   }
 
   protected async useProvisionedAgent(request: ProvisioningRequest): Promise<void> {
-    if (!request.agentId || this.busy() || this.provisioningBusy()) return;
+    if (request.agentId) await this.useAssignedAgent(request.agentId);
+  }
+
+  protected async refreshAssignedAgents(): Promise<void> {
+    if (this.busy() || this.provisioningBusy()) return;
+    this.provisioningBusy.set(true);
+    try {
+      this.bootstrap.set(
+        await firstValueFrom(this.http.get<BootstrapResponse>(`${this.apiUrl}/bootstrap`)),
+      );
+    } catch {
+      this.error.set('Assigned agents could not be refreshed.');
+    } finally {
+      this.provisioningBusy.set(false);
+    }
+  }
+
+  protected async useAssignedAgent(agentId: string): Promise<void> {
+    if (this.busy() || this.provisioningBusy()) return;
     this.provisioningBusy.set(true);
     this.error.set('');
     try {
-      const manifest = await this.fetchVerifiedManifest(request.agentId);
+      const manifest = await this.fetchVerifiedManifest(agentId);
       this.verifiedManifest.set(manifest);
       this.selectedAgentId = manifest.payload.agentId;
       this.targetUrl = String(manifest.payload.answers['qaUrl']);
