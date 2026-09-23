@@ -1,6 +1,6 @@
 import { DatePipe } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import type {
@@ -11,10 +11,14 @@ import type {
   AgentBlueprint,
   ProvisioningRequest,
   KeySource,
-  SignedAgentManifest,
+  AnySignedAgentManifest,
   ManifestVerificationKey,
 } from '@agents-foundry/contracts';
 import { verifyManifest } from './verify-manifest';
+import {
+  manifestConfiguration,
+  manifestSubject,
+} from '../../../../packages/contracts/src/manifest.js';
 import { API_URL } from '../../../../packages/web-auth/src/session';
 
 @Component({
@@ -36,7 +40,11 @@ export class App implements OnInit {
   protected readonly blueprint = signal<AgentBlueprint | null>(null);
   protected readonly provisioning = signal<ProvisioningRequest[]>([]);
   protected readonly provisioningBusy = signal(false);
-  protected readonly verifiedManifest = signal<SignedAgentManifest | null>(null);
+  protected readonly verifiedManifest = signal<AnySignedAgentManifest | null>(null);
+  protected readonly verifiedProjectName = computed(() => {
+    const manifest = this.verifiedManifest();
+    return manifest ? String(manifestConfiguration(manifest.payload)['projectName'] ?? '') : '';
+  });
   protected selectedAgentId = 'agent_qa_engineer';
   protected answers: Record<string, string | string[]> = {};
   protected provider = '';
@@ -128,8 +136,8 @@ export class App implements OnInit {
     try {
       const manifest = await this.fetchVerifiedManifest(agentId);
       this.verifiedManifest.set(manifest);
-      this.selectedAgentId = manifest.payload.agentId;
-      this.targetUrl = String(manifest.payload.answers['qaUrl']);
+      this.selectedAgentId = manifestSubject(manifest.payload).agentId;
+      this.targetUrl = String(manifestConfiguration(manifest.payload)['qaUrl']);
       await this.startNewConversation();
     } catch {
       this.error.set(
@@ -140,11 +148,11 @@ export class App implements OnInit {
     }
   }
 
-  private async fetchVerifiedManifest(agentId: string): Promise<SignedAgentManifest> {
+  private async fetchVerifiedManifest(agentId: string): Promise<AnySignedAgentManifest> {
     const headers = this.actorHeaders();
     const [manifest, key] = await Promise.all([
       firstValueFrom(
-        this.http.get<SignedAgentManifest>(`${this.apiUrl}/agents/${agentId}/manifest`, {
+        this.http.get<AnySignedAgentManifest>(`${this.apiUrl}/agents/${agentId}/manifest`, {
           headers,
         }),
       ),

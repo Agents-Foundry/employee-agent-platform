@@ -1,20 +1,26 @@
-import type { ManifestVerificationKey, SignedAgentManifest } from '@agents-foundry/contracts';
-import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
+import type { AnySignedAgentManifest, ManifestVerificationKey } from '@agents-foundry/contracts';
+import {
+  canonicalManifest,
+  isSupportedManifestVersion,
+  manifestSubject,
+} from '../../../../packages/contracts/src/manifest.js';
 
+/** Verifies v1 and v2 signed manifests (ADR 0004); unknown versions fail closed. */
 export async function verifyManifest(
-  manifest: SignedAgentManifest,
+  manifest: AnySignedAgentManifest,
   key: ManifestVerificationKey,
   expected: { agentId: string; employeeId: string; organizationId: string },
 ): Promise<boolean> {
   try {
+    if (!isSupportedManifestVersion(manifest.payload.apiVersion)) return false;
+    const subject = manifestSubject(manifest.payload);
     if (
       manifest.algorithm !== 'Ed25519' ||
       key.algorithm !== 'Ed25519' ||
       manifest.keyId !== key.keyId ||
-      manifest.payload.apiVersion !== 'agents-foundry/v1' ||
-      manifest.payload.agentId !== expected.agentId ||
-      manifest.payload.employeeId !== expected.employeeId ||
-      manifest.payload.organizationId !== expected.organizationId
+      subject.agentId !== expected.agentId ||
+      subject.employeeId !== expected.employeeId ||
+      subject.organizationId !== expected.organizationId
     )
       return false;
     const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));

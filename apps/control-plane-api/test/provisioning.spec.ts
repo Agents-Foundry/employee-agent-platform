@@ -7,6 +7,7 @@ import { demoRequest as request, createDemoApp as createApp } from './helpers.js
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { ManifestSigner } from '../src/manifest-signing.js';
+import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { verifyManifest } from '../../employee-desktop/src/app/verify-manifest.js';
 
@@ -224,7 +225,8 @@ describe('blueprint provisioning', () => {
       persistent.close();
       persistent = new ControlPlaneDatabase(path);
       expect(persistent.signer.verificationKey.keyId).toBe(keyId);
-      expect(persistent.getManifest(manifest.payload.agentId, org)).toEqual(manifest);
+      const agentId = manifestSubject(manifest.payload).agentId;
+      expect(persistent.getManifest(agentId, org)).toEqual(manifest);
       persistent.close();
       persistent = undefined;
       const raw = new DatabaseSync(path);
@@ -236,9 +238,7 @@ describe('blueprint provisioning', () => {
         raw.close();
       }
       persistent = new ControlPlaneDatabase(path);
-      expect(() => persistent!.getManifest(manifest.payload.agentId, org)).toThrow(
-        'MANIFEST_INVALID',
-      );
+      expect(() => persistent!.getManifest(agentId, org)).toThrow('MANIFEST_INVALID');
     } finally {
       persistent?.close();
       rmSync(directory, { recursive: true, force: true });

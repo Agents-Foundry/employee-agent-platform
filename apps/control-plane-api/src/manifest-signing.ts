@@ -10,11 +10,15 @@ import {
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
-  AgentManifestPayload,
+  AnyAgentManifestPayload,
+  AnySignedAgentManifest,
   ManifestVerificationKey,
-  SignedAgentManifest,
+  SignedManifest,
 } from '@agents-foundry/contracts';
-import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
+import {
+  canonicalManifest,
+  isSupportedManifestVersion,
+} from '../../../packages/contracts/src/manifest.js';
 
 export class ManifestSigner {
   private readonly privateKey: KeyObject;
@@ -53,7 +57,9 @@ export class ManifestSigner {
     return new ManifestSigner(readFileSync(path, 'utf8'));
   }
 
-  sign(payload: AgentManifestPayload): SignedAgentManifest {
+  /** Signs v1 and v2 payloads identically (ADR 0004); the version is part of the signed bytes. */
+  sign<P extends AnyAgentManifestPayload>(payload: P): SignedManifest<P> {
+    if (!isSupportedManifestVersion(payload.apiVersion)) throw new Error('MANIFEST_INVALID');
     const snapshot = structuredClone(payload);
     return {
       payload: snapshot,
@@ -65,9 +71,10 @@ export class ManifestSigner {
     };
   }
 
-  verify(manifest: SignedAgentManifest): boolean {
+  verify(manifest: AnySignedAgentManifest): boolean {
     try {
       return (
+        isSupportedManifestVersion(manifest.payload.apiVersion) &&
         manifest.algorithm === 'Ed25519' &&
         manifest.keyId === this.verificationKey.keyId &&
         verify(

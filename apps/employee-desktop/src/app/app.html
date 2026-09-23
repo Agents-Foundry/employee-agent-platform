@@ -161,9 +161,9 @@
           <p>No provisioning requests yet.</p>
         }
       </details>
-      @if (verifiedManifest(); as manifest) {
+      @if (verifiedManifest()) {
         <p class="verified-agent" role="status">
-          Signature verified · {{ manifest.payload.answers['projectName'] }} · Used for new QA tasks
+          Signature verified · {{ verifiedProjectName() }} · Used for new QA tasks
         </p>
       }
       @if (bootstrap() && !selectedAgentId) {

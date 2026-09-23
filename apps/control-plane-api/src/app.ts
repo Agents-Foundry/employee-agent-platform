@@ -13,6 +13,9 @@ import { configureStructureRoutes } from './organization/structure-routes.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
 import { configureJobRoutes } from './organization/job-routes.js';
 import { configureTenancyRoutes } from './organization/tenancy-routes.js';
+import { configureExecutionRoutes } from './execution/execution-routes.js';
+import { ExecutionError } from './execution/execution-service.js';
+import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 
 const provisioningSchema = z
   .object({
@@ -146,6 +149,7 @@ export function createApp(
   configureStructureRoutes(app, database.structure, auth);
   configureJobRoutes(app, database.jobs, auth);
   configureTenancyRoutes(app, database, auth);
+  configureExecutionRoutes(app, database.execution);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
@@ -360,8 +364,10 @@ export function createApp(
   });
 
   app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
-    if (error instanceof OrganizationDomainError)
+    if (error instanceof OrganizationDomainError || error instanceof ExecutionError)
       return response.status(error.status).json({ error: error.message });
+    if (error instanceof RuntimeProtocolError)
+      return response.status(400).json({ error: error.code, details: error.issues });
     if (error instanceof Error && error.message.endsWith('_FORBIDDEN')) {
       return response.status(403).json({ error: error.message });
     }
