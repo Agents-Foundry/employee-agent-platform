@@ -32,7 +32,8 @@ try {
       {
         organizationId: result.organizationId,
         expiresAt: result.expiresAt,
-        activationUrl: activationUrl(config.adminUrl, result.token),
+        activationUrl: activationUrl(config.adminUrl, result.token, result.purpose),
+        purpose: result.purpose,
         delivery: 'MANUAL',
       },
       null,

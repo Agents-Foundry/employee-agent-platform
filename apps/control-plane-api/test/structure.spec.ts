@@ -233,7 +233,7 @@ it('applies migrations once, persists changes, and enforces cross-tenant keys an
     expect(db.structure.list(actor, {}).total).toBe(2);
     sql = new DatabaseSync(path);
     sql.exec('PRAGMA foreign_keys=ON');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(3);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(4);
     expect(() =>
       sql!
         .prepare('UPDATE organizational_units SET organization_id=? WHERE id=?')

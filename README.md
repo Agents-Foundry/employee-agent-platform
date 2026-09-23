@@ -95,7 +95,9 @@ See [provisioning design](docs/provisioning.md) for API routes, signing-key pers
 
 Password-mode organization administrators can now manage nested departments/teams, employee
 memberships, job families, disciplines, job roles, levels and positions. They can also edit
-their profile, verify a domain, record employees before inviting them and assign positions. See the
+their profile, verify a domain, record employees before inviting them and assign positions.
+Existing accounts can accept a private invitation into another organization and switch between
+active memberships. See the
 [DIY organization implementation ledger](docs/diy-organization-platform.md) for migrations,
 security boundaries, verification and the remaining phased implementation. This is not yet the
 complete DIY bootstrap/setup-wizard platform.

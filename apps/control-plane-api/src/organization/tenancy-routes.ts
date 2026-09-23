@@ -44,14 +44,26 @@ export function configureTenancyRoutes(
     res.json(service.assignPosition(res.locals['actor'], req.params['id'], req.body)),
   );
   router.post('/employees/:id/invitation', (req, res) => {
-    const result = db.inviteExistingEmployee(res.locals['actor'], req.params['id']);
-    if (config.mode !== 'password') return;
-    res.status(201).json({
-      employeeId: result.employeeId,
-      expiresAt: result.expiresAt,
-      activationUrl: activationUrl(config.employeeUrl, result.token),
-      delivery: 'MANUAL',
-    });
+    try {
+      const result = db.inviteExistingEmployee(res.locals['actor'], req.params['id']);
+      if (config.mode !== 'password') return;
+      res.status(201).json({
+        employeeId: result.employeeId,
+        expiresAt: result.expiresAt,
+        activationUrl: activationUrl(config.employeeUrl, result.token, result.purpose),
+        purpose: result.purpose,
+        delivery: 'MANUAL',
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        ['ACCOUNT_NOT_ACTIVE', 'MEMBER_ALREADY_EXISTS'].includes(error.message)
+      ) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
   router.get('/memberships', (req, res) =>
     res.json(service.listMemberships(res.locals['actor'], req.query)),

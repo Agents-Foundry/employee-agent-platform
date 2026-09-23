@@ -32,6 +32,7 @@ role, not a job role. Existing QA model preferences do not represent live model 
 - Editable organization profiles, DNS verified domains and host scoped tenant resolution.
 - Distinct global login users, tenant employee records and explicit organization memberships.
 - Employees without logins, later invitation, and historical occupied position assignments.
+- Private, consent-based account linking across organizations and organization-scoped session switching.
 
 ### Database changes and migrations
 
@@ -41,6 +42,10 @@ role, not a job role. Existing QA model preferences do not represent live model 
 `003-profiles-identities.ts` adds profile fields, `users`, `organization_memberships`,
 `organization_domains` and `employee_position_assignments`. Existing identities are backfilled
 to distinct user IDs; employees without logins remain unlinked.
+`004-account-linking.ts` rebuilds the legacy employee table so work email is unique per tenant,
+backfills one account password credential per login user, and scopes existing password sessions
+to an organization. It adds single-use account-link invitations. The migration verifies every
+foreign key before committing the table rebuild.
 `schema_migrations` records versions, SQL checksums and applied timestamps. Each migration runs
 inside `BEGIN IMMEDIATE`; failures roll back and changed applied migrations fail closed.
 The pre-existing baseline schema remains in `database.ts`; no existing table is duplicated.
@@ -75,6 +80,10 @@ The tenant is derived from the session; client organization/actor/security-role 
 | `/employees/:id/invitation` | POST | Invite a recorded employee |
 | `/memberships` | GET | Tenant login memberships |
 | `/memberships/:id/status` | PUT | Suspend/reactivate membership |
+| `/api/auth/memberships` | GET | List active organizations for the signed-in account |
+| `/api/auth/switch` | POST | Rotate the session into another active membership |
+| `/api/auth/link-preview` | GET | Preview a private invitation for the signed-in account |
+| `/api/auth/link-account` | POST | Consume that invitation and activate the pending membership |
 
 List parameters: `page`, `pageSize` (maximum 100), `search`, `status`, `sort`.
 Unit lists additionally accept `unitType` and `parentId` (`root` for top-level units).
@@ -94,6 +103,15 @@ access grant (`organization_memberships`). Session checks require all three, the
 identity and the organization to be active. Deactivating employment ends its current position
 and suspends login membership. A position is a unique seat; reassignment closes the old row
 and preserves the history. Job roles do not grant application access.
+
+An admin may invite an email already belonging to an active password account. This creates
+a tenant employee record and a **pending** membership; matching the email does not grant access.
+The admin privately delivers a one-use link. The existing account owner must sign in and
+confirm that link before access becomes active. Password-mode sessions are scoped to exactly
+one organization and rotate on switch. A verified custom-domain host can only access its own
+tenant and cannot switch to another tenant through that host. Suspending one membership
+revokes sessions in that tenant without disabling memberships elsewhere. New-account
+activation remains a separate password setup path.
 
 Domains are globally unique and normalized to ASCII. To verify ownership, the admin adds a
 TXT record at `_agents-foundry-verification.<domain>` matching the generated challenge.
@@ -143,9 +161,9 @@ discipline creation through a server-backed picker, and persistence across brows
 
 ### Known limitations and remaining Phase 1 work
 
-- The legacy employee email column remains globally unique. One person cannot yet link
-  employment in several organizations through the self-service UI. A future account-linking
-  flow needs verified consent and tenant switching; an email match alone must not grant access.
+- Account linking currently requires a manually delivered private link and an already active
+  password account. Automated email delivery, account recovery across multiple tenants and
+  account merging for duplicate pre-existing identities are not provided.
 - DNS, TLS and routing must be configured by the deployment operator. Google OIDC remains
   directory-managed and does not support custom-domain callbacks in this phase.
 - Existing free-text team fields remain for compatibility. Existing signed manifests are unchanged.
@@ -158,8 +176,7 @@ discipline creation through a server-backed picker, and persistence across brows
 
 ### Sequential continuation
 
-1. Finish broader Phase 1: verified cross-organization account linking, tenant switching,
-   unit head positions, dated memberships, and setup progress.
+1. Finish broader Phase 1: unit head positions, dated memberships, and setup progress.
 2. Phase 2: central permission model, platform-vs-tenant security, lifecycle gates and tenant status.
 3. Phase 3: separately authenticated platform provisioning UI, suspension/reactivation and recovery.
 4. Phase 4: persisted setup wizard/readiness, with real dependency checks rather than percentages.

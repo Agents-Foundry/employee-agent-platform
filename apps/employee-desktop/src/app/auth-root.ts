@@ -2,20 +2,24 @@ import { Component, inject, OnInit } from '@angular/core';
 import { App } from './app';
 import { AuthSession } from '../../../../packages/web-auth/src/session';
 import { AuthPanel } from '../../../../packages/web-auth/src/auth-panel';
+import { AccountSwitcher } from '../../../../packages/web-auth/src/account-switcher';
 
 @Component({
   selector: 'af-auth-root',
-  imports: [App, AuthPanel],
+  imports: [App, AuthPanel, AccountSwitcher],
   template: `
-    @if (auth.ready()) {
+    @if (auth.ready() && !auth.linkToken()) {
       @if (auth.config()?.mode !== 'demo') {
         <div class="session-bar">
-          {{ auth.actor()?.role }} · <button (click)="auth.signOut()">Sign out</button>
+          <af-account-switcher /> · {{ auth.actor()?.role }} ·
+          <button (click)="auth.signOut()">Sign out</button>
         </div>
       } @else {
         <div class="session-bar">Local demo mode · identity is not verified</div>
       }
-      <app-root />
+      @for (tenant of [auth.actor()?.organizationId]; track tenant) {
+        <app-root />
+      }
     } @else {
       <af-auth-panel />
     }

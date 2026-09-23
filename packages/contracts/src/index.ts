@@ -7,6 +7,20 @@ export interface Actor {
   role: UserRole;
 }
 
+export interface AccountMembership {
+  organizationId: string;
+  organizationName: string;
+  role: UserRole;
+  employeeId: string;
+}
+
+export interface AccountLinkPreview {
+  organizationId: string;
+  organizationName: string;
+  role: UserRole;
+  expiresAt: number;
+}
+
 export type PublicAuthConfig =
   | { mode: 'demo' }
   | { mode: 'password' }

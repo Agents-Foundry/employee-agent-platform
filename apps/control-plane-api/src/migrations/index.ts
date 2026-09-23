@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { organizationStructureSql } from './001-organization-structure.js';
 import { jobArchitectureSql } from './002-job-architecture.js';
 import { profilesIdentitiesSql } from './003-profiles-identities.js';
+import { accountLinkingSql } from './004-account-linking.js';
 
 export function migrateOrganization(
   db: DatabaseSync,
@@ -15,10 +16,14 @@ export function migrateOrganization(
     { version: 1, name: 'organization-structure', sql: organizationStructureSql },
     { version: 2, name: 'job-architecture', sql: jobArchitectureSql },
     { version: 3, name: 'profiles-identities', sql: profilesIdentitiesSql },
+    { version: 4, name: 'account-linking', sql: accountLinkingSql },
   ];
   for (const migration of migrations) {
     if (migration.version > throughVersion) break;
     const checksum = createHash('sha256').update(migration.sql).digest('hex');
+    // SQLite cannot rebuild a referenced table while foreign-key enforcement is enabled.
+    // This one migration runs on the same synchronous connection and checks all FKs before commit.
+    if (migration.version === 4) db.exec('PRAGMA foreign_keys=OFF');
     db.exec('BEGIN IMMEDIATE');
     try {
       const applied = db
@@ -28,6 +33,8 @@ export function migrateOrganization(
         throw new Error('MIGRATION_CHECKSUM_MISMATCH');
       if (!applied) {
         db.exec(migration.sql);
+        if (migration.version === 4 && db.prepare('PRAGMA foreign_key_check').all().length)
+          throw new Error('MIGRATION_FOREIGN_KEY_CHECK_FAILED');
         db.prepare('INSERT INTO schema_migrations VALUES (?,?,?,?)').run(
           migration.version,
           migration.name,
@@ -39,6 +46,8 @@ export function migrateOrganization(
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;
+    } finally {
+      if (migration.version === 4) db.exec('PRAGMA foreign_keys=ON');
     }
   }
 }

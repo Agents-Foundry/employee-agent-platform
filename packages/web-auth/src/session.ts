@@ -6,7 +6,13 @@ import {
   type HttpInterceptorFn,
 } from '@angular/common/http';
 import { firstValueFrom, catchError, throwError } from 'rxjs';
-import type { Actor, PublicAuthConfig, UserRole } from '../../contracts/src/index';
+import type {
+  Actor,
+  AccountMembership,
+  AccountLinkPreview,
+  PublicAuthConfig,
+  UserRole,
+} from '../../contracts/src/index';
 
 export const API_URL =
   typeof location === 'undefined' ||
@@ -27,6 +33,9 @@ export class AuthSession {
   readonly signingIn = signal(false);
   readonly linkPurpose = signal<'activate' | 'reset'>('activate');
   readonly activationToken = signal(this.readActivationToken());
+  readonly linkToken = signal(this.readLinkToken());
+  readonly linkPreview = signal<AccountLinkPreview | null>(null);
+  readonly memberships = signal<AccountMembership[]>([]);
   readonly notice = signal('');
   private role: UserRole = 'EMPLOYEE';
 
@@ -39,6 +48,101 @@ export class AuthSession {
     this.linkPurpose.set(resetting ? 'reset' : 'activate');
     history.replaceState(null, '', location.pathname + location.search);
     return token;
+  }
+
+  private readLinkToken(): string {
+    if (typeof location === 'undefined') return '';
+    const token = new URLSearchParams(location.hash.slice(1)).get('link');
+    if (!token) return '';
+    history.replaceState(null, '', location.pathname + location.search);
+    return token;
+  }
+
+  private async loadMemberships(): Promise<void> {
+    if (this.config()?.mode !== 'password') return;
+    try {
+      this.memberships.set(
+        await firstValueFrom(
+          this.http.get<AccountMembership[]>(`${API_URL}/auth/memberships`, {
+            withCredentials: true,
+          }),
+        ),
+      );
+    } catch {
+      this.memberships.set([]);
+    }
+  }
+
+  private async loadLinkPreview(): Promise<void> {
+    if (!this.linkToken() || !this.actor()) return;
+    try {
+      this.linkPreview.set(
+        await firstValueFrom(
+          this.http.get<AccountLinkPreview>(`${API_URL}/auth/link-preview`, {
+            params: { token: this.linkToken() },
+            withCredentials: true,
+          }),
+        ),
+      );
+    } catch {
+      this.error.set('This link is invalid, expired, or belongs to another account.');
+    }
+  }
+
+  async acceptLink(): Promise<void> {
+    if (!this.linkToken() || !this.actor() || this.signingIn()) return;
+    this.signingIn.set(true);
+    this.error.set('');
+    try {
+      const actor = await firstValueFrom(
+        this.http.post<Actor>(
+          `${API_URL}/auth/link-account`,
+          { token: this.linkToken() },
+          { withCredentials: true },
+        ),
+      );
+      this.actor.set(actor);
+      this.linkToken.set('');
+      this.linkPreview.set(null);
+      this.ready.set(actor.role === this.role);
+      await this.loadMemberships();
+      this.notice.set('Your organization membership is active.');
+      if (actor.role !== this.role)
+        this.error.set(
+          `Open the ${actor.role === 'ADMIN' ? 'admin' : 'employee'} application to use this membership.`,
+        );
+    } catch {
+      this.error.set('Unable to accept this invitation. Ask your administrator for a new link.');
+    } finally {
+      this.signingIn.set(false);
+    }
+  }
+
+  async switchOrganization(organizationId: string): Promise<void> {
+    if (this.signingIn() || !organizationId || organizationId === this.actor()?.organizationId)
+      return;
+    this.signingIn.set(true);
+    this.error.set('');
+    try {
+      const actor = await firstValueFrom(
+        this.http.post<Actor>(
+          `${API_URL}/auth/switch`,
+          { organizationId },
+          { withCredentials: true },
+        ),
+      );
+      this.actor.set(actor);
+      this.ready.set(actor.role === this.role);
+      if (actor.role !== this.role)
+        this.error.set(
+          `Open the ${actor.role === 'ADMIN' ? 'admin' : 'employee'} application for this organization.`,
+        );
+    } catch {
+      this.error.set('Unable to switch organizations. Your membership may have changed.');
+      await this.loadMemberships();
+    } finally {
+      this.signingIn.set(false);
+    }
   }
 
   async activate(password: string): Promise<void> {
@@ -91,8 +195,10 @@ export class AuthSession {
         }),
       );
       this.actor.set(actor);
-      this.ready.set(actor.role === role);
-      if (actor.role !== role)
+      this.ready.set(actor.role === role && !this.linkToken());
+      await this.loadMemberships();
+      await this.loadLinkPreview();
+      if (actor.role !== role && !this.linkToken())
         this.error.set(
           `This application requires the ${role.toLowerCase()} role. Sign out and use an assigned account.`,
         );
@@ -127,13 +233,15 @@ export class AuthSession {
       const actor = await firstValueFrom(
         this.http.post<Actor>(
           `${API_URL}/auth/password`,
-          { email, password },
+          { email, password, client: this.role === 'ADMIN' ? 'admin' : 'employee' },
           { withCredentials: true },
         ),
       );
       this.actor.set(actor);
-      this.ready.set(actor.role === this.role);
-      if (actor.role !== this.role)
+      this.ready.set(actor.role === this.role && !this.linkToken());
+      await this.loadMemberships();
+      await this.loadLinkPreview();
+      if (actor.role !== this.role && !this.linkToken())
         this.error.set(
           `This application requires the ${this.role.toLowerCase()} role. Sign out and use an assigned account.`,
         );
@@ -151,6 +259,7 @@ export class AuthSession {
   expire(): void {
     this.ready.set(false);
     this.actor.set(null);
+    this.memberships.set([]);
     this.error.set('Your session expired. Sign in again.');
   }
 
@@ -159,6 +268,7 @@ export class AuthSession {
       await firstValueFrom(this.http.post(`${API_URL}/auth/logout`, {}, { withCredentials: true }));
       this.ready.set(false);
       this.actor.set(null);
+      this.memberships.set([]);
       this.error.set('');
     } catch {
       this.error.set('Sign-out failed. Try again.');
