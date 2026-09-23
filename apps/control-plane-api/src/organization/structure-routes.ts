@@ -24,6 +24,12 @@ export function configureStructureRoutes(
   router.get('/:id/ancestors', (req, res) =>
     res.json(service.ancestors(res.locals['actor'], req.params['id'])),
   );
+  router.get('/:id/head-position-options', (req, res) =>
+    res.json(service.headPositionOptions(res.locals['actor'], req.params['id'], req.query)),
+  );
+  router.put('/:id/head', (req, res) =>
+    res.json(service.setHeadPosition(res.locals['actor'], req.params['id'], req.body)),
+  );
   router.put('/:id', (req, res) =>
     res.json(service.save(res.locals['actor'], req.body, req.params['id'])),
   );

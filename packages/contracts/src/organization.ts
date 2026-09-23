@@ -20,6 +20,9 @@ export interface OrganizationUnitInput {
 }
 export interface OrganizationUnit extends OrganizationUnitInput {
   parentName?: string | null;
+  headPositionId: string | null;
+  headPositionName: string | null;
+  headEmployeeName: string | null;
   id: string;
   organizationId: string;
   status: 'active' | 'archived';
@@ -39,4 +42,7 @@ export interface UnitMembership {
   displayName: string;
   membershipType: 'member' | 'lead' | 'manager' | 'owner' | 'contributor';
   isPrimary: boolean;
+  startedAt: string;
+  endedAt: string | null;
+  version: number;
 }

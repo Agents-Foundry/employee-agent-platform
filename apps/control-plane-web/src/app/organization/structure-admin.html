@@ -161,20 +161,58 @@
       </fieldset>
     </form>
     @if (selected(); as unit) {
+      <h3>Head position</h3>
+      <p>
+        Choose an active position in this unit. The position holder is shown automatically; this
+        does not change access permissions.
+      </p>
+      <p>
+        {{ unit.headPositionName || 'No head position selected' }}
+        @if (unit.headEmployeeName) {
+          · {{ unit.headEmployeeName }}
+        }
+      </p>
+      @if (unit.status === 'active') {
+        <af-record-picker
+          [url]="url + '/' + unit.id + '/head-position-options'"
+          label="Find head position"
+          [disabled]="busy()"
+          (chosen)="chooseHeadPosition($event)"
+        />
+        <p>{{ headPositionName || 'Choose a position' }}</p>
+        <button (click)="saveHeadPosition(headPositionId)" [disabled]="busy() || !headPositionId">
+          Set head position
+        </button>
+        <button (click)="saveHeadPosition(null)" [disabled]="busy() || !unit.headPositionId">
+          Clear head position
+        </button>
+      }
       <h3>Members of {{ unit.name }}</h3>
       <p>
         Employees can belong to multiple groups. A lead or manager membership describes their
         organizational responsibility; it does not grant application permissions.
       </p>
+      <label
+        >Memberships
+        <select [(ngModel)]="membershipStatus" (change)="loadMembers()">
+          <option value="active">Current</option>
+          <option value="ended">Ended</option>
+          <option value="all">All</option>
+        </select>
+      </label>
       @for (member of members().items; track member.id) {
         <div class="member">
           <span
             >{{ member.displayName }} · {{ member.membershipType }}
-            {{ member.isPrimary ? '· Primary' : '' }}</span
-          ><button (click)="memberRemoval.set(member)" [disabled]="busy()">Remove</button>
+            {{ member.isPrimary ? '· Primary' : '' }} · From {{ member.startedAt.slice(0, 10) }}
+            {{ member.endedAt ? '· Ended ' + member.endedAt.slice(0, 10) : '' }}</span
+          >
+          @if (!member.endedAt) {
+            <button (click)="memberRemoval.set(member)" [disabled]="busy()">End membership</button>
+          }
         </div>
       } @empty {
-        <p>No memberships yet. Add an existing employee below.</p>
+        <p>No matching memberships. Add an existing employee below or change the history filter.</p>
       }
       <div class="pager">
         <button (click)="loadMembers(members().page - 1)" [disabled]="members().page === 1">
@@ -188,8 +226,8 @@
         </button>
       </div>
       @if (memberRemoval(); as member) {
-        <p>Remove {{ member.displayName }} from this group?</p>
-        <button (click)="removeMember()" [disabled]="busy()">Confirm removal</button
+        <p>End {{ member.displayName }}'s membership now? Its history will be retained.</p>
+        <button (click)="removeMember()" [disabled]="busy()">Confirm end</button
         ><button (click)="memberRemoval.set(null)">Cancel</button>
       }
       @if (unit.status === 'active') {
@@ -201,6 +239,12 @@
             (chosen)="chooseEmployee($event)"
           />
           <p>{{ employeeName || 'Choose an employee to add' }}</p>
+          <label
+            >Start date (optional)<input
+              type="date"
+              name="membershipStartDate"
+              [(ngModel)]="membershipStartDate"
+          /></label>
           <label
             >Membership<select name="membershipType" [(ngModel)]="membershipType">
               <option>member</option>

@@ -378,7 +378,7 @@ it('backfills legacy identities and leaves employees without login unlinked', ()
         .prepare('SELECT membership_status FROM organization_memberships WHERE employee_id=?')
         .get('legacy-admin')!['membership_status'],
     ).toBe('active');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(4);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(5);
     expect(
       sql.prepare('SELECT hash FROM account_password_credentials WHERE user_id=?').get(admin)![
         'hash'
