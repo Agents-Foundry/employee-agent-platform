@@ -33,3 +33,7 @@ The implemented slice proves the control path rather than pretending that a gene
 `QA request → central conversation → policy evaluation → approval record → admin decision → READY/REJECTED run state`
 
 The next slice consumes `READY` runs in an isolated Playwright worker and uploads evidence artifacts.
+
+Architecture V2 supersedes the runtime part of this topology: see
+[architecture-v2.md](architecture-v2.md). Every QA run now also has a generic `AgentRun`, and
+the "isolated QA runtime" becomes a role-independent agent runtime and execution runtime.

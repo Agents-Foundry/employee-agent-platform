@@ -50,6 +50,16 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Human-approved Jira/PR writes
 - Evaluation suite, failure drills, observability, and QA team pilot
 
+## Architecture V2 track
+
+Phased evolution toward a generic governed AI employee platform. See `migration-plan.md`.
+
+- Phase A — generic execution contracts, thread/run/step/event persistence, artifacts, Agent
+  Manifest v2 (flagged) and the runtime protocol v1 (implemented; no runtime executes yet)
+- Phase B — versioned agent catalog and organization installations (pending)
+- Phases C–G — agent runtime, Action Gateway, execution runtime, QA migration, and the Frontend
+  Engineer as the second-role acceptance test (pending)
+
 ## Milestone 6 — Agent factory
 
 - Reusable role blueprints for frontend, backend, DevOps, product, sales, and HR
