@@ -1,0 +1,220 @@
+@if (auth.config()?.mode === 'password') {
+  <section id="organization-structure" aria-labelledby="structure-title">
+    <header>
+      <div>
+        <p>ORGANIZATION</p>
+        <h2 id="structure-title">Organization structure</h2>
+      </div>
+      <button (click)="create()" [disabled]="busy()">+ Create unit</button>
+    </header>
+    <p>
+      Model your business with departments, teams, and other groups. Job roles and application
+      access remain separate.
+    </p>
+    @if (error()) {
+      <p role="alert" class="error">{{ error() }}</p>
+    }
+    @if (notice()) {
+      <p role="status">{{ notice() }}</p>
+    }
+    <div class="toolbar">
+      <label
+        >View<select [(ngModel)]="view" (change)="navigate(null)">
+          <option value="tree">Tree — browse one level</option>
+          <option value="table">Table — all units</option>
+        </select></label
+      >
+      <label>Search<input [(ngModel)]="search" maxlength="160" (keyup.enter)="load()" /></label>
+      <label
+        >Status<select [(ngModel)]="status">
+          <option value="active">Active</option>
+          <option value="archived">Archived</option>
+          <option value="all">All</option>
+        </select></label
+      >
+      <label
+        >Type<select [(ngModel)]="type">
+          <option value="">All types</option>
+          @for (item of types; track item) {
+            <option [value]="item">{{ item.replaceAll('_', ' ') }}</option>
+          }
+        </select></label
+      >
+      <label
+        >Sort<select [(ngModel)]="sort">
+          <option value="name">Name</option>
+          <option value="code">Code</option>
+          <option value="updated">Recently updated</option>
+        </select></label
+      >
+      <button (click)="load()" [disabled]="loading()">Apply filters</button>
+    </div>
+    @if (view === 'tree') {
+      <nav aria-label="Organization path">
+        <button (click)="navigate(null)">Organization</button>
+        @for (unit of path(); track unit.id) {
+          <span> / </span><button (click)="navigate(unit)">{{ unit.name }}</button>
+        }
+      </nav>
+    }
+    @if (loading()) {
+      <p role="status">Loading structure…</p>
+    } @else {
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Code / ID</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (unit of rows().items; track unit.id) {
+              <tr>
+                <td>
+                  @if (view === 'tree') {
+                    <button (click)="navigate(unit)">↳ {{ unit.name }}</button>
+                  } @else {
+                    {{ unit.name }}
+                  }
+                </td>
+                <td>
+                  {{ unit.code }}<small>{{ unit.id }}</small>
+                </td>
+                <td>{{ unit.unitType.replaceAll('_', ' ') }}</td>
+                <td>{{ unit.status }}</td>
+                <td>
+                  <button (click)="edit(unit)" [disabled]="busy()">Details / members</button>
+                  @if (unit.status === 'active') {
+                    <button (click)="confirmation.set(unit)" [disabled]="busy()">Archive</button>
+                  }
+                </td>
+              </tr>
+            } @empty {
+              <tr>
+                <td colspan="5">
+                  No matching units here. Create a department or team using the form below, or
+                  adjust the filters.
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button (click)="load(rows().page - 1)" [disabled]="rows().page === 1">Previous</button
+        ><span>Page {{ rows().page }} · {{ rows().total }} units</span
+        ><button (click)="load(rows().page + 1)" [disabled]="rows().page * 25 >= rows().total">
+          Next
+        </button>
+      </div>
+    }
+    @if (confirmation(); as unit) {
+      <div role="alert">
+        <p>
+          Archive {{ unit.name }}? Move or archive its children and remove memberships first.
+          Historical records will be retained.
+        </p>
+        <button (click)="archive()" [disabled]="busy()">Confirm archive</button
+        ><button (click)="confirmation.set(null)">Cancel</button>
+      </div>
+    }
+    <h3>{{ selected() ? 'Unit details' : 'Create a unit' }}</h3>
+    <form [formGroup]="form" (ngSubmit)="save()">
+      <fieldset [disabled]="busy() || selected()?.status === 'archived'">
+        <label>Name<input formControlName="name" maxlength="160" /></label>
+        <label
+          >Code<input formControlName="code" maxlength="40" /><small
+            >Unique in your organization. Letters, numbers, underscores, and hyphens.</small
+          ></label
+        >
+        <label
+          >Type<select formControlName="unitType">
+            @for (item of types; track item) {
+              <option [value]="item">{{ item.replaceAll('_', ' ') }}</option>
+            }
+          </select></label
+        >
+        <div>
+          <af-record-picker
+            [url]="url"
+            label="Find parent unit"
+            [disabled]="busy() || selected()?.status === 'archived'"
+            (chosen)="chooseParent($event)"
+          />
+          <p>{{ parentName || 'Top level — no parent' }}</p>
+          <button type="button" (click)="chooseParent(null)">Move to top level</button
+          ><small
+            >A department is a major function such as Engineering. Teams can be created within
+            it.</small
+          >
+        </div>
+        <label
+          >Description<textarea formControlName="description" maxlength="2000"></textarea>
+        </label>
+        <button [disabled]="form.invalid || busy() || selected()?.status === 'archived'">
+          {{ busy() ? 'Saving…' : 'Save unit' }}
+        </button>
+      </fieldset>
+    </form>
+    @if (selected(); as unit) {
+      <h3>Members of {{ unit.name }}</h3>
+      <p>
+        Employees can belong to multiple groups. A lead or manager membership describes their
+        organizational responsibility; it does not grant application permissions.
+      </p>
+      @for (member of members().items; track member.id) {
+        <div class="member">
+          <span
+            >{{ member.displayName }} · {{ member.membershipType }}
+            {{ member.isPrimary ? '· Primary' : '' }}</span
+          ><button (click)="memberRemoval.set(member)" [disabled]="busy()">Remove</button>
+        </div>
+      } @empty {
+        <p>No memberships yet. Add an existing employee below.</p>
+      }
+      <div class="pager">
+        <button (click)="loadMembers(members().page - 1)" [disabled]="members().page === 1">
+          Previous members</button
+        ><span>{{ members().total }} memberships</span
+        ><button
+          (click)="loadMembers(members().page + 1)"
+          [disabled]="members().page * 25 >= members().total"
+        >
+          Next members
+        </button>
+      </div>
+      @if (memberRemoval(); as member) {
+        <p>Remove {{ member.displayName }} from this group?</p>
+        <button (click)="removeMember()" [disabled]="busy()">Confirm removal</button
+        ><button (click)="memberRemoval.set(null)">Cancel</button>
+      }
+      @if (unit.status === 'active') {
+        <form (ngSubmit)="addMember()">
+          <af-record-picker
+            [url]="url + '/employee-options'"
+            label="Find employee"
+            [disabled]="busy()"
+            (chosen)="chooseEmployee($event)"
+          />
+          <p>{{ employeeName || 'Choose an employee to add' }}</p>
+          <label
+            >Membership<select name="membershipType" [(ngModel)]="membershipType">
+              <option>member</option>
+              <option>lead</option>
+              <option>manager</option>
+              <option>owner</option>
+              <option>contributor</option>
+            </select></label
+          ><label
+            ><input type="checkbox" name="primary" [(ngModel)]="isPrimary" />Primary organizational
+            unit</label
+          ><button [disabled]="busy() || !employeeId">Add membership</button>
+        </form>
+      }
+    }
+  </section>
+}
