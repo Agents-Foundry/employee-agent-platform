@@ -58,32 +58,34 @@ These additive migrations preserve existing tenant, employee, agent and manifest
 All routes below require an authenticated, enabled password-mode organization administrator.
 The tenant is derived from the session; client organization/actor/security-role fields are rejected.
 
-| Route under `/api/organization` | Methods | Purpose |
-| --- | --- | --- |
-| `/units` | GET, POST | Filtered list, create |
-| `/units/:id` | PUT | Edit/move with required `version` |
-| `/units/:id/ancestors` | GET | Tenant-scoped breadcrumb path |
-| `/units/:id/archive` | POST | Soft archive with required `version` |
-| `/units/:id/members` | GET, POST | Paginated memberships, add membership |
-| `/units/:id/members/:membershipId` | DELETE | Remove active membership; retain audit |
-| `/units/employee-options` | GET | Paginated employee picker |
-| `/jobs/:kind` | GET, POST | List/create families, disciplines, roles, levels, positions |
-| `/jobs/:kind/:id` | PUT | Version-checked update |
-| `/jobs/:kind/:id/archive` | POST | Dependency-checked soft archive |
-| `/profile` | GET, PUT | Versioned organization profile |
-| `/domains` | GET, POST | List/register domains |
-| `/domains/:id/verify` | POST | Verify DNS TXT proof |
-| `/domains/:id/primary` | POST | Select verified primary domain |
-| `/employees` | GET, POST | Paginated people directory; create without login |
-| `/employees/:id` | PUT | Edit employment |
-| `/employees/:id/position` | PUT | Assign or end position, retaining history |
-| `/employees/:id/invitation` | POST | Invite a recorded employee |
-| `/memberships` | GET | Tenant login memberships |
-| `/memberships/:id/status` | PUT | Suspend/reactivate membership |
-| `/api/auth/memberships` | GET | List active organizations for the signed-in account |
-| `/api/auth/switch` | POST | Rotate the session into another active membership |
-| `/api/auth/link-preview` | GET | Preview a private invitation for the signed-in account |
-| `/api/auth/link-account` | POST | Consume that invitation and activate the pending membership |
+| Route under `/api/organization`    | Methods   | Purpose                                                     |
+| ---------------------------------- | --------- | ----------------------------------------------------------- |
+| `/units`                           | GET, POST | Filtered list, create                                       |
+| `/units/:id`                       | PUT       | Edit/move with required `version`                           |
+| `/units/:id/ancestors`             | GET       | Tenant-scoped breadcrumb path                               |
+| `/units/:id/head-position-options` | GET       | Active positions in the unit for the head picker            |
+| `/units/:id/head`                  | PUT       | Set or clear the head position with required `version`      |
+| `/units/:id/archive`               | POST      | Soft archive with required `version`                        |
+| `/units/:id/members`               | GET, POST | Paginated current/ended memberships, add dated membership   |
+| `/units/:id/members/:membershipId` | DELETE    | End active membership; retain history and audit             |
+| `/units/employee-options`          | GET       | Paginated employee picker                                   |
+| `/jobs/:kind`                      | GET, POST | List/create families, disciplines, roles, levels, positions |
+| `/jobs/:kind/:id`                  | PUT       | Version-checked update                                      |
+| `/jobs/:kind/:id/archive`          | POST      | Dependency-checked soft archive                             |
+| `/profile`                         | GET, PUT  | Versioned organization profile                              |
+| `/domains`                         | GET, POST | List/register domains                                       |
+| `/domains/:id/verify`              | POST      | Verify DNS TXT proof                                        |
+| `/domains/:id/primary`             | POST      | Select verified primary domain                              |
+| `/employees`                       | GET, POST | Paginated people directory; create without login            |
+| `/employees/:id`                   | PUT       | Edit employment                                             |
+| `/employees/:id/position`          | PUT       | Assign or end position, retaining history                   |
+| `/employees/:id/invitation`        | POST      | Invite a recorded employee                                  |
+| `/memberships`                     | GET       | Tenant login memberships                                    |
+| `/memberships/:id/status`          | PUT       | Suspend/reactivate membership                               |
+| `/api/auth/memberships`            | GET       | List active organizations for the signed-in account         |
+| `/api/auth/switch`                 | POST      | Rotate the session into another active membership           |
+| `/api/auth/link-preview`           | GET       | Preview a private invitation for the signed-in account      |
+| `/api/auth/link-account`           | POST      | Consume that invitation and activate the pending membership |
 
 List parameters: `page`, `pageSize` (maximum 100), `search`, `status`, `sort`.
 Unit lists additionally accept `unitType` and `parentId` (`root` for top-level units).
@@ -167,7 +169,7 @@ discipline creation through a server-backed picker, and persistence across brows
 - DNS, TLS and routing must be configured by the deployment operator. Google OIDC remains
   directory-managed and does not support custom-domain callbacks in this phase.
 - Existing free-text team fields remain for compatibility. Existing signed manifests are unchanged.
-- Unit head-position links, dated memberships, restore/archive lifecycle and imports are pending.
+- Unit head-position links and dated unit-membership history are available. Restore/archive lifecycle and imports remain pending.
 - Tree view is paginated, one-level drill-down, not an expandable drag-and-drop tree.
 - New screens are password-mode only; Google pilot identities remain file-managed.
 - The new immutable audit store has no dedicated administration viewer yet.
@@ -176,7 +178,7 @@ discipline creation through a server-backed picker, and persistence across brows
 
 ### Sequential continuation
 
-1. Finish broader Phase 1: unit head positions, dated memberships, and setup progress.
+1. Finish broader Phase 1: setup progress, restore/archive lifecycle and imports.
 2. Phase 2: central permission model, platform-vs-tenant security, lifecycle gates and tenant status.
 3. Phase 3: separately authenticated platform provisioning UI, suspension/reactivation and recovery.
 4. Phase 4: persisted setup wizard/readiness, with real dependency checks rather than percentages.

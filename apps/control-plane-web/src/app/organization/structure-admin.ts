@@ -45,6 +45,10 @@ export class StructureAdmin implements OnInit {
   parentName = '';
   membershipType = 'member';
   isPrimary = false;
+  membershipStartDate = '';
+  membershipStatus: 'active' | 'ended' | 'all' = 'active';
+  headPositionId = '';
+  headPositionName = '';
   readonly form = new FormGroup({
     name: new FormControl('', {
       nonNullable: true,
@@ -135,6 +139,8 @@ export class StructureAdmin implements OnInit {
       unit.parentName ?? (unit.parentId ? 'Current parent (choose another to move)' : '');
     this.employeeId = '';
     this.employeeName = '';
+    this.headPositionId = unit.headPositionId ?? '';
+    this.headPositionName = unit.headPositionName ?? '';
     this.loadMembers();
   }
   create(): void {
@@ -157,6 +163,31 @@ export class StructureAdmin implements OnInit {
   chooseEmployee(item: { id: string; name: string }): void {
     this.employeeId = item.id;
     this.employeeName = item.name;
+  }
+  chooseHeadPosition(item: { id: string; name: string }): void {
+    this.headPositionId = item.id;
+    this.headPositionName = item.name;
+  }
+  saveHeadPosition(positionId: string | null): void {
+    const unit = this.selected();
+    if (!unit || this.busy()) return;
+    this.busy.set(true);
+    this.http
+      .put<OrganizationUnit>(`${this.url}/${unit.id}/head`, { positionId, version: unit.version })
+      .subscribe({
+        next: (updated) => {
+          this.busy.set(false);
+          this.selected.set(updated);
+          this.headPositionId = updated.headPositionId ?? '';
+          this.headPositionName = updated.headPositionName ?? '';
+          this.notice.set('Unit head position saved.');
+          this.load(this.rows().page);
+        },
+        error: (e) => {
+          this.busy.set(false);
+          this.fail(e);
+        },
+      });
   }
   save(): void {
     if (this.form.invalid || this.busy()) return;
@@ -211,7 +242,7 @@ export class StructureAdmin implements OnInit {
     if (!unit) return;
     this.http
       .get<Page<UnitMembership>>(`${this.url}/${unit.id}/members`, {
-        params: { page, pageSize: 25 },
+        params: { page, pageSize: 25, status: this.membershipStatus },
       })
       .subscribe({
         next: (rows) => {
@@ -232,6 +263,9 @@ export class StructureAdmin implements OnInit {
         employeeId: this.employeeId.trim(),
         membershipType: this.membershipType,
         isPrimary: this.isPrimary,
+        ...(this.membershipStartDate
+          ? { startedAt: new Date(`${this.membershipStartDate}T00:00:00`).toISOString() }
+          : {}),
       })
       .subscribe({
         next: () => {
@@ -239,6 +273,7 @@ export class StructureAdmin implements OnInit {
           this.employeeId = '';
           this.employeeName = '';
           this.isPrimary = false;
+          this.membershipStartDate = '';
           this.loadMembers();
           this.notice.set('Membership saved.');
         },
@@ -277,6 +312,12 @@ export class StructureAdmin implements OnInit {
         'This code or membership already exists, or the employee already has a primary unit.',
       UNIT_NOT_FOUND: 'That unit is not available in your organization.',
       EMPLOYEE_NOT_FOUND: 'That employee is not available in your organization.',
+      HEAD_POSITION_CONFLICT:
+        'Choose an active position in this unit that is not already a head position.',
+      MEMBERSHIP_ALREADY_ENDED: 'This membership has already ended. Refresh the list.',
+      MEMBERSHIP_START_IN_FUTURE: 'The membership start date cannot be in the future.',
+      MEMBERSHIP_DATE_CONFLICT:
+        'This membership period overlaps a previous one. Choose a later start date.',
     };
     this.error.set(
       messages[code] ??

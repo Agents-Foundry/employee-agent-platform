@@ -46,6 +46,61 @@ it('rolls back a failed migration and can resume without partial job tables', ()
     sql.close();
   }
 });
+it('upgrades populated version-four memberships without losing IDs or tenant keys', () => {
+  const sql = new DatabaseSync(':memory:');
+  try {
+    sql.exec('PRAGMA foreign_keys=ON');
+    const legacy = Object.create(ControlPlaneDatabase.prototype) as {
+      db: DatabaseSync;
+      migrate(): void;
+    };
+    legacy.db = sql;
+    legacy.migrate();
+    migrateOrganization(sql, 4);
+    const organization = randomUUID(),
+      employee = randomUUID(),
+      unit = randomUUID(),
+      membership = randomUUID();
+    const stamp = new Date().toISOString();
+    sql
+      .prepare('INSERT INTO organizations(id,name,slug) VALUES (?,?,?)')
+      .run(organization, 'Legacy', 'legacy');
+    sql
+      .prepare(
+        'INSERT INTO employees(id,organization_id,display_name,email,role,team) VALUES (?,?,?,?,?,?)',
+      )
+      .run(employee, organization, 'Legacy Admin', 'legacy@example.test', 'ADMIN', 'Admin');
+    sql
+      .prepare(
+        'INSERT INTO organizational_units(id,organization_id,name,code,unit_type,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        unit,
+        organization,
+        'Engineering',
+        'ENG',
+        'department',
+        stamp,
+        stamp,
+        employee,
+        employee,
+      );
+    sql
+      .prepare('INSERT INTO organizational_unit_memberships VALUES (?,?,?,?,?,?,?,?)')
+      .run(membership, organization, unit, employee, 'manager', 1, stamp, employee);
+    migrateOrganization(sql);
+    const upgraded = sql
+      .prepare(
+        'SELECT id,started_at AS startedAt,ended_at AS endedAt FROM organizational_unit_memberships',
+      )
+      .get();
+    expect(upgraded).toEqual({ id: membership, startedAt: stamp, endedAt: null });
+    expect(sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(5);
+  } finally {
+    sql.close();
+  }
+});
 describe('organization structure', () => {
   let db: ControlPlaneDatabase, admin: Actor, other: Actor, employee: Actor;
   beforeEach(() => {
@@ -148,9 +203,92 @@ describe('organization structure', () => {
     expect(() => db.structure.archive(admin, engineering.id, 1)).toThrow('HIERARCHY_CONFLICT');
     const membership = db.structure.members(admin, engineering.id, {}).items[0];
     db.structure.removeMember(admin, engineering.id, membership.id);
+    expect(db.structure.members(admin, engineering.id, {}).total).toBe(0);
+    expect(
+      db.structure.members(admin, engineering.id, { status: 'ended' }).items[0].endedAt,
+    ).toBeTruthy();
+    expect(() =>
+      db.structure.addMember(admin, engineering.id, {
+        ...input,
+        startedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      }),
+    ).toThrow('MEMBERSHIP_DATE_CONFLICT');
+    expect(() =>
+      db.structure.addMember(admin, engineering.id, {
+        ...input,
+        startedAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }),
+    ).toThrow('MEMBERSHIP_START_IN_FUTURE');
+    db.structure.addMember(admin, engineering.id, input);
+    const renewed = db.structure.members(admin, engineering.id, {}).items[0];
+    expect(renewed.id).not.toBe(membership.id);
+    db.structure.removeMember(admin, engineering.id, renewed.id);
+    expect(() => db.structure.removeMember(admin, engineering.id, renewed.id)).toThrow(
+      'MEMBERSHIP_ALREADY_ENDED',
+    );
     db.structure.archive(admin, engineering.id, 1);
     expect(db.structure.list(admin, { status: 'archived' }).total).toBe(1);
     expect(() => db.structure.addMember(admin, engineering.id, input)).toThrow('UNIT_INACTIVE');
+  });
+
+  it('links a unit head to a same-unit active position, with tenant and version checks', () => {
+    const unit = db.structure.save(admin, payload());
+    const otherUnit = db.structure.save(admin, payload('QA'));
+    const family = db.jobs.save(admin, 'families', {
+      name: 'Engineering',
+      code: 'ENG',
+      description: '',
+    });
+    const discipline = db.jobs.save(admin, 'disciplines', {
+      name: 'Quality',
+      code: 'QUAL',
+      description: '',
+      jobFamilyId: family.id,
+    });
+    const role = db.jobs.save(admin, 'roles', {
+      name: 'Lead',
+      code: 'LEAD',
+      description: '',
+      jobFamilyId: family.id,
+      disciplineId: discipline.id,
+    });
+    const level = db.jobs.save(admin, 'levels', {
+      name: 'Senior',
+      code: 'SEN',
+      description: '',
+      rank: 3,
+    });
+    const positionInput = {
+      name: 'Team Head',
+      code: 'HEAD',
+      description: '',
+      organizationalUnitId: unit.id,
+      roleId: role.id,
+      jobLevelId: level.id,
+      reportsToPositionId: null,
+    };
+    const position = db.jobs.save(admin, 'positions', positionInput);
+    expect(db.structure.headPositionOptions(admin, unit.id, {}).items[0].id).toBe(position.id);
+    expect(db.structure.headPositionOptions(admin, otherUnit.id, {}).total).toBe(0);
+    expect(() =>
+      db.structure.setHeadPosition(other, unit.id, { positionId: position.id, version: 1 }),
+    ).toThrow('UNIT_NOT_FOUND');
+    expect(() =>
+      db.structure.setHeadPosition(admin, otherUnit.id, { positionId: position.id, version: 1 }),
+    ).toThrow('HEAD_POSITION_CONFLICT');
+    const headed = db.structure.setHeadPosition(admin, unit.id, {
+      positionId: position.id,
+      version: 1,
+    });
+    expect(headed.headPositionName).toBe('Team Head');
+    expect(() =>
+      db.structure.setHeadPosition(admin, unit.id, { positionId: null, version: 1 }),
+    ).toThrow('UNIT_VERSION_CONFLICT');
+    expect(() => db.jobs.archive(admin, 'positions', position.id, 1)).toThrow();
+    expect(
+      db.structure.setHeadPosition(admin, unit.id, { positionId: null, version: 2 }).headPositionId,
+    ).toBeNull();
+    db.jobs.archive(admin, 'positions', position.id, 1);
   });
 
   it('retains hierarchy history and refuses to archive parents with active children', () => {
@@ -185,6 +323,21 @@ describe('organization structure', () => {
       .set('Origin', 'http://localhost:4200')
       .send(payload())
       .expect(201);
+    await request(app)
+      .get(`/api/organization/units/${result.body.id}/head-position-options`)
+      .set('Cookie', adminCookie)
+      .expect(200);
+    await request(app)
+      .put(`/api/organization/units/${result.body.id}/head`)
+      .set('Cookie', adminCookie)
+      .set('Origin', 'http://localhost:4200')
+      .send({ positionId: null, version: 1 })
+      .expect(200)
+      .expect((response) => expect(response.body.version).toBe(2));
+    await request(app)
+      .get(`/api/organization/units/${result.body.id}/members?status=ended`)
+      .set('Cookie', adminCookie)
+      .expect(200);
     await request(app)
       .put(`/api/organization/units/${result.body.id}`)
       .set('Cookie', otherCookie)
@@ -233,7 +386,7 @@ it('applies migrations once, persists changes, and enforces cross-tenant keys an
     expect(db.structure.list(actor, {}).total).toBe(2);
     sql = new DatabaseSync(path);
     sql.exec('PRAGMA foreign_keys=ON');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(4);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(5);
     expect(() =>
       sql!
         .prepare('UPDATE organizational_units SET organization_id=? WHERE id=?')

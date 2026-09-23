@@ -4,6 +4,7 @@ import { organizationStructureSql } from './001-organization-structure.js';
 import { jobArchitectureSql } from './002-job-architecture.js';
 import { profilesIdentitiesSql } from './003-profiles-identities.js';
 import { accountLinkingSql } from './004-account-linking.js';
+import { unitHeadsMembershipDatesSql } from './005-unit-heads-membership-dates.js';
 
 export function migrateOrganization(
   db: DatabaseSync,
@@ -17,6 +18,7 @@ export function migrateOrganization(
     { version: 2, name: 'job-architecture', sql: jobArchitectureSql },
     { version: 3, name: 'profiles-identities', sql: profilesIdentitiesSql },
     { version: 4, name: 'account-linking', sql: accountLinkingSql },
+    { version: 5, name: 'unit-heads-membership-dates', sql: unitHeadsMembershipDatesSql },
   ];
   for (const migration of migrations) {
     if (migration.version > throughVersion) break;
