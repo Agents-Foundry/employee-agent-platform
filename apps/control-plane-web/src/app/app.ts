@@ -9,6 +9,7 @@ import { StructureAdmin } from './organization/structure-admin';
 import { JobAdmin } from './organization/job-admin';
 import { TenantAdmin } from './organization/tenant-admin';
 import { PeopleAdmin } from './organization/people-admin';
+import { SetupProgress } from './organization/setup-progress';
 import type {
   Approval,
   BootstrapResponse,
@@ -26,6 +27,7 @@ import type {
     JobAdmin,
     TenantAdmin,
     PeopleAdmin,
+    SetupProgress,
   ],
   selector: 'app-root',
   styleUrl: './app.scss',

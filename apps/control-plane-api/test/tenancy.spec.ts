@@ -98,6 +98,43 @@ describe('tenant profile, account separation, membership and positions', () => {
     peer = create('beta');
   });
   afterEach(() => db.close());
+  it('computes tenant-scoped setup progress from live records and reverses stale completion', () => {
+    const first = db.tenancy.setupProgress(admin);
+    expect(first).toMatchObject({ completedRequired: 0, totalRequired: 6 });
+    expect(first.steps.find((step) => step.id === 'domain')).toMatchObject({
+      required: false,
+      complete: false,
+    });
+    db.tenancy.updateProfile(admin, profile(db.tenancy.profile(admin)));
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(1);
+    const position = positionContext(db, admin);
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(3);
+    const personRecord = db.tenancy.createEmployee(admin, person('setup@alpha.example'));
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(4);
+    const assigned = db.tenancy.assignPosition(admin, personRecord.id, {
+      positionId: position.id,
+      version: 1,
+    });
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(5);
+    const invitation = db.inviteExistingEmployee(admin, personRecord.id);
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(5);
+    db.acceptInvitation(hashToken(invitation.token), 'test-hash');
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(6);
+    expect(db.tenancy.setupProgress(peer).completedRequired).toBe(0);
+    db.tenancy.updateEmployee(admin, personRecord.id, {
+      ...person('setup@alpha.example'),
+      version: assigned.version,
+      employmentStatus: 'inactive',
+    });
+    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(3);
+    expect(() =>
+      db.tenancy.setupProgress({
+        id: personRecord.id,
+        organizationId: admin.organizationId,
+        role: 'EMPLOYEE',
+      }),
+    ).toThrow('ORGANIZATION_ADMIN_REQUIRED');
+  });
   it('separates user, employee and membership and gates existing sessions on status', () => {
     const member = db.tenancy.listMemberships(admin, {}).items[0];
     expect(member.userId).not.toBe(member.employeeId);
@@ -273,6 +310,14 @@ describe('tenant profile, account separation, membership and positions', () => {
     db.createSession(hashToken(token), LOCAL_ISSUER, admin.id, Date.now() + 60000);
     const cookie = `af_session=${token}`;
     await request(app).get('/api/organization/profile').expect(401);
+    await request(app).get('/api/organization/setup-progress').expect(401);
+    await request(app)
+      .get('/api/organization/setup-progress')
+      .set('Cookie', cookie)
+      .expect(200)
+      .expect((response) =>
+        expect(response.body).toMatchObject({ completedRequired: 0, totalRequired: 6 }),
+      );
     const own = await request(app)
       .get('/api/organization/profile')
       .set('Cookie', cookie)
@@ -296,6 +341,11 @@ describe('tenant profile, account separation, membership and positions', () => {
       .send(person('ada@alpha.example'))
       .expect(201);
     expect(created.body.userId).toBeNull();
+    await request(app)
+      .get('/api/organization/setup-progress')
+      .set('Cookie', cookie)
+      .expect(200)
+      .expect((response) => expect(response.body.completedRequired).toBe(1));
     const listing = await request(app)
       .get('/api/organization/employees?search=Ada&pageSize=1')
       .set('Cookie', cookie)

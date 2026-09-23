@@ -18,6 +18,9 @@ export function configureTenancyRoutes(
     next();
   });
   router.get('/profile', (_req, res) => res.json(service.profile(res.locals['actor'])));
+  router.get('/setup-progress', (_req, res) =>
+    res.json(service.setupProgress(res.locals['actor'])),
+  );
   router.put('/profile', (req, res) =>
     res.json(service.updateProfile(res.locals['actor'], req.body)),
   );
