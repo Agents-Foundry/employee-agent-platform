@@ -33,6 +33,7 @@ role, not a job role. Existing QA model preferences do not represent live model 
 - Distinct global login users, tenant employee records and explicit organization memberships.
 - Employees without logins, later invitation, and historical occupied position assignments.
 - Private, consent-based account linking across organizations and organization-scoped session switching.
+- Live, tenant-scoped setup checklist for profile, structure, positions, people, assignments and employee access; optional verified-domain indicator.
 
 ### Database changes and migrations
 
@@ -73,6 +74,7 @@ The tenant is derived from the session; client organization/actor/security-role 
 | `/jobs/:kind/:id`                  | PUT       | Version-checked update                                      |
 | `/jobs/:kind/:id/archive`          | POST      | Dependency-checked soft archive                             |
 | `/profile`                         | GET, PUT  | Versioned organization profile                              |
+| `/setup-progress`                  | GET       | Live organization setup checklist (read-only)               |
 | `/domains`                         | GET, POST | List/register domains                                       |
 | `/domains/:id/verify`              | POST      | Verify DNS TXT proof                                        |
 | `/domains/:id/primary`             | POST      | Select verified primary domain                              |
@@ -174,11 +176,12 @@ discipline creation through a server-backed picker, and persistence across brows
 - New screens are password-mode only; Google pilot identities remain file-managed.
 - The new immutable audit store has no dedicated administration viewer yet.
 - SQLite and the current single API process have not been validated for thousands of tenants.
+- Setup progress is derived from current records and can regress when records are archived or disabled. It is not a persisted wizard, deployment approval, or agent-readiness gate.
 - This does not complete Phase 1 or the full master acceptance scenario.
 
 ### Sequential continuation
 
-1. Finish broader Phase 1: setup progress, restore/archive lifecycle and imports.
+1. Finish broader Phase 1: restore/archive lifecycle and imports.
 2. Phase 2: central permission model, platform-vs-tenant security, lifecycle gates and tenant status.
 3. Phase 3: separately authenticated platform provisioning UI, suspension/reactivation and recovery.
 4. Phase 4: persisted setup wizard/readiness, with real dependency checks rather than percentages.

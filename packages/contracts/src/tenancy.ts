@@ -50,3 +50,16 @@ export interface OrganizationMembership {
   membershipStatus: 'pending' | 'active' | 'suspended';
   version: number;
 }
+
+export type SetupStepId =
+  'profile' | 'structure' | 'positions' | 'people' | 'assignments' | 'employee_access' | 'domain';
+export interface SetupStep {
+  id: SetupStepId;
+  complete: boolean;
+  required: boolean;
+}
+export interface SetupProgress {
+  completedRequired: number;
+  totalRequired: number;
+  steps: SetupStep[];
+}

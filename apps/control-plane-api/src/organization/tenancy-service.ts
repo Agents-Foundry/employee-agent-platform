@@ -9,6 +9,8 @@ import type {
   TenantDomain,
   EmploymentRecord,
   OrganizationMembership,
+  SetupProgress,
+  SetupStep,
 } from '../../../../packages/contracts/src/tenancy.js';
 import type { Page } from '../../../../packages/contracts/src/organization.js';
 import { LOCAL_ISSUER } from '../onboarding-types.js';
@@ -154,6 +156,68 @@ export class TenancyService {
     return this.db
       .prepare(`SELECT ${profileColumns} FROM organizations WHERE id=?`)
       .get(actor.organizationId) as unknown as OrganizationProfile;
+  }
+  setupProgress(actor: Actor): SetupProgress {
+    this.security.authorize(actor);
+    const organizationId = actor.organizationId;
+    const exists = (sql: string, ...values: SQLInputValue[]): boolean =>
+      Boolean(this.db.prepare(`SELECT 1 FROM ${sql} LIMIT 1`).get(...values));
+    const profile = this.profile(actor);
+    const steps: SetupStep[] = [
+      { id: 'profile', required: true, complete: Boolean(profile.legalName && profile.country) },
+      {
+        id: 'structure',
+        required: true,
+        complete: exists(
+          "organizational_units WHERE organization_id=? AND status='active'",
+          organizationId,
+        ),
+      },
+      {
+        id: 'positions',
+        required: true,
+        complete: exists("positions WHERE organization_id=? AND status='active'", organizationId),
+      },
+      {
+        id: 'people',
+        required: true,
+        complete: exists(
+          "employees WHERE organization_id=? AND id<>? AND employment_status='active'",
+          organizationId,
+          actor.id,
+        ),
+      },
+      {
+        id: 'assignments',
+        required: true,
+        complete: exists(
+          "employee_position_assignments a JOIN employees e ON e.id=a.employee_id AND e.organization_id=a.organization_id WHERE a.organization_id=? AND a.ended_at IS NULL AND e.id<>? AND e.employment_status='active'",
+          organizationId,
+          actor.id,
+        ),
+      },
+      {
+        id: 'employee_access',
+        required: true,
+        complete: exists(
+          "organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.security_role='EMPLOYEE' AND m.membership_status='active' AND e.employment_status='active' AND u.status='active'",
+          organizationId,
+        ),
+      },
+      {
+        id: 'domain',
+        required: false,
+        complete: exists(
+          "organization_domains WHERE organization_id=? AND verification_status='verified'",
+          organizationId,
+        ),
+      },
+    ];
+    return {
+      completedRequired: steps.filter((step) => step.required && step.complete).length,
+      totalRequired: steps.filter((step) => step.required).length,
+      steps,
+    };
   }
   updateProfile(actor: Actor, raw: unknown): OrganizationProfile {
     const input = profileInput.parse(raw);
