@@ -211,8 +211,25 @@ export function configureAuth(
     path: '/',
   };
   const origins = new Set([new URL(config.adminUrl).origin, new URL(config.employeeUrl).origin]);
+  const originAllowed = (req: Request, res: { locals: Record<string, unknown> }): boolean => {
+    const origin = req.header('origin') ?? '';
+    if (origins.has(origin)) return true;
+    try {
+      const parsed = new URL(origin);
+      return (
+        parsed.protocol === 'https:' &&
+        !parsed.port &&
+        parsed.hostname === req.hostname.toLowerCase().replace(/\.$/, '') &&
+        typeof res.locals['tenantOrganizationId'] === 'string' &&
+        database.tenancy.resolveVerifiedDomain(parsed.hostname) ===
+          res.locals['tenantOrganizationId']
+      );
+    } catch {
+      return false;
+    }
+  };
   const requireOrigin: RequestHandler = (req, res, next) => {
-    if (!origins.has(req.header('origin') ?? '')) {
+    if (!originAllowed(req, res)) {
       res.status(403).json({ error: 'ORIGIN_FORBIDDEN' });
       return;
     }
@@ -255,10 +272,11 @@ export function configureAuth(
     }
     passwordChecks++;
     try {
-      const identity = database.findPasswordIdentity(passwordIssuer, input.data.email);
+      const tenantId = res.locals['tenantOrganizationId'] as string | undefined;
+      const identity = database.findPasswordIdentity(passwordIssuer, input.data.email, tenantId);
       const valid = await verifyPassword(input.data.password, identity?.hash);
       // Recheck after async hashing so concurrent revocation/rotation cannot issue a stale session.
-      const current = database.findPasswordIdentity(passwordIssuer, input.data.email);
+      const current = database.findPasswordIdentity(passwordIssuer, input.data.email, tenantId);
       if (
         !valid ||
         !identity ||
@@ -278,7 +296,7 @@ export function configureAuth(
         Date.now() + 8 * 3600000,
       );
       res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
-      res.json(database.findIdentity(passwordIssuer, identity.subject));
+      res.json(database.findIdentity(passwordIssuer, identity.subject, tenantId));
     } finally {
       passwordChecks--;
     }
@@ -352,7 +370,13 @@ export function configureAuth(
         transaction.verifier,
         transaction.nonce,
       );
-      if (!database.findIdentity(GOOGLE_ISSUER, subject)) {
+      if (
+        !database.findIdentity(
+          GOOGLE_ISSUER,
+          subject,
+          res.locals['tenantOrganizationId'] as string | undefined,
+        )
+      ) {
         res.status(403).json({ error: 'MEMBERSHIP_REQUIRED', issuer: GOOGLE_ISSUER, subject });
         return;
       }
@@ -423,15 +447,17 @@ export function configureAuth(
   );
   return (req, res, next) => {
     const token = cookie(req, sessionName);
-    const actor = token ? database.findSession(hashToken(token)) : undefined;
+    const actor = token
+      ? database.findSession(
+          hashToken(token),
+          res.locals['tenantOrganizationId'] as string | undefined,
+        )
+      : undefined;
     if (!actor) {
       res.status(401).json({ error: 'AUTHENTICATION_REQUIRED' });
       return;
     }
-    if (
-      !['GET', 'HEAD', 'OPTIONS'].includes(req.method) &&
-      !origins.has(req.header('origin') ?? '')
-    ) {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !originAllowed(req, res)) {
       res.status(403).json({ error: 'ORIGIN_FORBIDDEN' });
       return;
     }

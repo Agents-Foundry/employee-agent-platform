@@ -55,8 +55,12 @@ export class OrganizationStructureService {
       actor.role !== 'ADMIN' ||
       !this.db
         .prepare(
-          `SELECT 1 FROM employees e JOIN identities i ON i.employee_id=e.id
-      WHERE e.id=? AND e.organization_id=? AND e.role='ADMIN' AND i.enabled=1`,
+          `SELECT 1 FROM employees e
+      JOIN organization_memberships m ON m.organization_id=e.organization_id AND m.employee_id=e.id AND m.user_id=e.user_id
+      JOIN identities i ON i.employee_id=e.id AND i.user_id=e.user_id
+      JOIN users u ON u.id=e.user_id AND u.status='active'
+      JOIN organizations o ON o.id=e.organization_id AND o.status='active'
+      WHERE e.id=? AND e.organization_id=? AND m.security_role='ADMIN' AND m.membership_status='active' AND e.employment_status='active' AND i.enabled=1`,
         )
         .get(actor.id, actor.organizationId)
     ) {

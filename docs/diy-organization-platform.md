@@ -11,14 +11,13 @@ password-only tenant onboarding through an operator CLI, mandatory password init
 through single-use activation links, invitation/recovery lifecycle, organization-scoped employees,
 signed QA agent provisioning, private employee assignments, action approvals and lifecycle audit.
 
-Missing: independent global user and employment records, explicit organization memberships,
-tenant domains, expanded organization profile, platform-admin authentication/UI, granular RBAC,
-suspended-tenant enforcement, setup wizard, work/technology/integration catalogs, configurable
+Remaining: platform-admin authentication/UI, granular RBAC,
+tenant suspension controls, setup wizard, work/technology/integration catalogs, configurable
 policies and organization-derived agent readiness. Existing free-text team fields are not a
 substitute for the organizational hierarchy. Existing `employees.role` is an application access
 role, not a job role. Existing QA model preferences do not represent live model execution.
 
-## Phase 1 — in progress, not complete
+## Phase 1 — in progress
 
 ### Implemented vertical slices
 
@@ -30,12 +29,18 @@ role, not a job role. Existing QA model preferences do not represent live model 
 - Server-side filtering, stable sorting, bounded pagination and tenant-scoped search pickers.
 - Reactive forms, loading/error/empty states, archive confirmations and optimistic version checks.
 - Atomic administration writes with before/after immutable change events.
+- Editable organization profiles, DNS verified domains and host scoped tenant resolution.
+- Distinct global login users, tenant employee records and explicit organization memberships.
+- Employees without logins, later invitation, and historical occupied position assignments.
 
 ### Database changes and migrations
 
 `src/migrations/001-organization-structure.ts` adds `organizational_units`,
 `organizational_unit_memberships`, `organization_change_events` and supporting indexes/triggers.
 `002-job-architecture.ts` adds `job_families`, `job_disciplines`, `roles`, `job_levels`, `positions`.
+`003-profiles-identities.ts` adds profile fields, `users`, `organization_memberships`,
+`organization_domains` and `employee_position_assignments`. Existing identities are backfilled
+to distinct user IDs; employees without logins remain unlinked.
 `schema_migrations` records versions, SQL checksums and applied timestamps. Each migration runs
 inside `BEGIN IMMEDIATE`; failures roll back and changed applied migrations fail closed.
 The pre-existing baseline schema remains in `database.ts`; no existing table is duplicated.
@@ -60,6 +65,16 @@ The tenant is derived from the session; client organization/actor/security-role 
 | `/jobs/:kind` | GET, POST | List/create families, disciplines, roles, levels, positions |
 | `/jobs/:kind/:id` | PUT | Version-checked update |
 | `/jobs/:kind/:id/archive` | POST | Dependency-checked soft archive |
+| `/profile` | GET, PUT | Versioned organization profile |
+| `/domains` | GET, POST | List/register domains |
+| `/domains/:id/verify` | POST | Verify DNS TXT proof |
+| `/domains/:id/primary` | POST | Select verified primary domain |
+| `/employees` | GET, POST | Paginated people directory; create without login |
+| `/employees/:id` | PUT | Edit employment |
+| `/employees/:id/position` | PUT | Assign or end position, retaining history |
+| `/employees/:id/invitation` | POST | Invite a recorded employee |
+| `/memberships` | GET | Tenant login memberships |
+| `/memberships/:id/status` | PUT | Suspend/reactivate membership |
 
 List parameters: `page`, `pageSize` (maximum 100), `search`, `status`, `sort`.
 Unit lists additionally accept `unitType` and `parentId` (`root` for top-level units).
@@ -73,6 +88,18 @@ the administrator against live enabled identities. Origin protection and session
 reused. Unknown input keys are rejected. SQL values are bound, and dynamic identifiers are
 limited to static allow-lists. SQLite has no native PostgreSQL RLS: these constraints and
 server authorization must not be described as RLS or as protection from a database superuser.
+
+Login identity (`users`) is separate from tenant employment (`employees`) and the explicit
+access grant (`organization_memberships`). Session checks require all three, the login
+identity and the organization to be active. Deactivating employment ends its current position
+and suspends login membership. A position is a unique seat; reassignment closes the old row
+and preserves the history. Job roles do not grant application access.
+
+Domains are globally unique and normalized to ASCII. To verify ownership, the admin adds a
+TXT record at `_agents-foundry-verification.<domain>` matching the generated challenge.
+Only verified domains resolve to tenants; login and session checks on their hostnames are
+restricted to that tenant. Deployment must supply DNS address records, HTTPS certificates and
+reverse-proxy routing. Domain registration does not configure those services.
 
 Circular unit and position hierarchies are rejected by database triggers. A job role's discipline
 must belong to its selected family. Active dependants block archival. New dependencies must be
@@ -93,6 +120,12 @@ erDiagram
   roles ||--o{ positions : describes
   job_levels ||--o{ positions : grades
   positions ||--o{ positions : reports_to
+  users ||--o{ organization_memberships : joins
+  organizations ||--o{ organization_memberships : grants
+  employees ||--o| organization_memberships : links
+  employees ||--o{ employee_position_assignments : fills
+  positions ||--o{ employee_position_assignments : occupied_by
+  organizations ||--o{ organization_domains : resolves
 ```
 
 ### Verification
@@ -110,9 +143,12 @@ discipline creation through a server-backed picker, and persistence across brows
 
 ### Known limitations and remaining Phase 1 work
 
-- Domain/profile expansion and tenant-domain resolution are not implemented yet.
-- User identity/employee separation and explicit organization memberships still require migration.
-- Employees are not yet assigned to positions; existing team strings remain for compatibility.
+- The legacy employee email column remains globally unique. One person cannot yet link
+  employment in several organizations through the self-service UI. A future account-linking
+  flow needs verified consent and tenant switching; an email match alone must not grant access.
+- DNS, TLS and routing must be configured by the deployment operator. Google OIDC remains
+  directory-managed and does not support custom-domain callbacks in this phase.
+- Existing free-text team fields remain for compatibility. Existing signed manifests are unchanged.
 - Unit head-position links, dated memberships, restore/archive lifecycle and imports are pending.
 - Tree view is paginated, one-level drill-down, not an expandable drag-and-drop tree.
 - New screens are password-mode only; Google pilot identities remain file-managed.
@@ -122,7 +158,8 @@ discipline creation through a server-backed picker, and persistence across brows
 
 ### Sequential continuation
 
-1. Finish Phase 1: profile/domain model, user/employment split, memberships, position allocation.
+1. Finish broader Phase 1: verified cross-organization account linking, tenant switching,
+   unit head positions, dated memberships, and setup progress.
 2. Phase 2: central permission model, platform-vs-tenant security, lifecycle gates and tenant status.
 3. Phase 3: separately authenticated platform provisioning UI, suspension/reactivation and recovery.
 4. Phase 4: persisted setup wizard/readiness, with real dependency checks rather than percentages.

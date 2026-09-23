@@ -6,7 +6,9 @@
     <nav aria-label="Primary navigation">
       <a class="active" href="#overview"><span>◇</span> Overview</a>
       <a href="#organization-structure"><span>⌘</span> Organization structure</a>
+      <a href="#organization-profile"><span>◈</span> Profile and domains</a>
       <a href="#job-architecture"><span>♧</span> Job architecture</a>
+      <a href="#people-directory"><span>♙</span> People and positions</a>
       <a href="#employees"><span>♙</span> Employees</a>
       <a href="#agents"><span>✦</span> Agent catalog</a>
       <a href="#approvals"
@@ -43,8 +45,10 @@
     }
 
     <af-organization-admin />
+    <af-tenant-admin />
     <af-structure-admin />
     <af-job-admin />
+    <af-people-admin />
     <af-agent-admin (created)="refresh()" />
     <section class="metrics" id="overview" aria-label="Workspace summary">
       <article>

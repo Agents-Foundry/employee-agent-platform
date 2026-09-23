@@ -1,0 +1,198 @@
+@if (auth.config()?.mode === 'password') {
+  <section id="people-directory" aria-labelledby="people-heading">
+    <header>
+      <div>
+        <p>PEOPLE</p>
+        <h2 id="people-heading">Employees and positions</h2>
+      </div>
+      <button (click)="create()" [disabled]="busy()">+ Add employee</button>
+    </header>
+    <p>
+      Record people before they need a login. A position connects a person to a department or team,
+      job role, and level. Application access is granted separately through an invitation.
+    </p>
+    @if (error()) {
+      <p role="alert" class="error">{{ error() }}</p>
+    }
+    @if (notice()) {
+      <p role="status">{{ notice() }}</p>
+    }
+    @if (privateLink()) {
+      <div role="status">
+        <p>Private, single-use activation link. Email delivery is not connected.</p>
+        <label>Activation link<input readonly [value]="privateLink()" /></label
+        ><button (click)="privateLink.set('')">Dismiss link</button>
+      </div>
+    }
+    <div class="toolbar">
+      <label
+        >Search people<input [(ngModel)]="search" maxlength="160" (keyup.enter)="load()" /></label
+      ><label
+        >Status<select [(ngModel)]="status">
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+          <option value="all">All</option>
+        </select></label
+      ><button (click)="load()" [disabled]="loading()">Apply filters</button>
+    </div>
+    @if (loading()) {
+      <p role="status">Loading employees…</p>
+    }
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Person</th>
+            <th>Position</th>
+            <th>Team / role / level</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (item of rows().items; track item.id) {
+            <tr>
+              <td>
+                {{ item.displayName }}<small>{{ item.email }}</small>
+              </td>
+              <td>{{ item.positionTitle || 'Unassigned' }}</td>
+              <td>
+                {{ item.unitName || '—' }} / {{ item.roleName || '—' }} /
+                {{ item.levelName || '—' }}
+              </td>
+              <td>{{ item.employmentStatus }}{{ item.userId ? ' · Account' : ' · No account' }}</td>
+              <td><button (click)="edit(item)" [disabled]="busy()">Details</button></td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="5">No matching employees. Add a person using the form below.</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button (click)="load(rows().page - 1)" [disabled]="rows().page === 1">Previous</button
+      ><span>Page {{ rows().page }} · {{ rows().total }} employees</span
+      ><button (click)="load(rows().page + 1)" [disabled]="rows().page * 25 >= rows().total">
+        Next
+      </button>
+    </div>
+    <h3>{{ selected() ? 'Employee details' : 'Add employee' }}</h3>
+    <form [formGroup]="form" (ngSubmit)="save()">
+      <fieldset [disabled]="busy()">
+        <label>Display name<input formControlName="displayName" maxlength="200" /></label
+        ><label
+          >Work email<input formControlName="email" type="email" maxlength="254" /><small
+            >This employment email can differ from the login account email.</small
+          ></label
+        ><label>Employee number<input formControlName="employeeNumber" maxlength="60" /></label
+        ><label
+          >Employment type<select formControlName="employmentType">
+            <option value="employee">Employee</option>
+            <option value="contractor">Contractor</option>
+            <option value="external">External</option>
+          </select></label
+        ><button [disabled]="busy() || form.invalid">
+          {{ selected() ? 'Save employee' : 'Create employee' }}
+        </button>
+      </fieldset>
+    </form>
+    @if (selected(); as item) {
+      <p>
+        Employment status: {{ item.employmentStatus }}.
+        @if (item.userId) {
+          Login account linked.
+        } @else {
+          No login account linked.
+        }
+      </p>
+      @if (item.employmentStatus === 'active') {
+        @if (item.positionId) {
+          <p>
+            Current position: {{ item.positionTitle }} ({{ item.unitName }} · {{ item.roleName }} ·
+            {{ item.levelName }})
+          </p>
+          <button (click)="assign(null)" [disabled]="busy()">End position assignment</button>
+        }
+        <af-record-picker
+          [url]="base + '/jobs/positions'"
+          label="Find a position"
+          [disabled]="busy()"
+          (chosen)="position.set($event)"
+        />
+        @if (position(); as choice) {
+          <p>Selected: {{ choice.name }}</p>
+          <button (click)="assign(choice.id)" [disabled]="busy() || choice.id === item.positionId">
+            Assign position
+          </button>
+        }
+        @if (!item.userId) {
+          <button (click)="invite()" [disabled]="busy()">Create login invitation</button>
+        }
+        @if (confirmation()?.kind === 'inactive') {
+          <p>
+            Deactivate {{ item.displayName }}? Login and position access will end. Historical
+            assignments remain.
+          </p>
+          <button (click)="confirmInactive()" [disabled]="busy()">Confirm deactivation</button
+          ><button (click)="confirmation.set(null)">Cancel</button>
+        } @else {
+          <button (click)="confirmation.set({ kind: 'inactive', id: item.id })" [disabled]="busy()">
+            Deactivate employment
+          </button>
+        }
+      } @else {
+        <button (click)="employmentStatus = 'active'; save()" [disabled]="busy()">
+          Reactivate employment
+        </button>
+      }
+    }
+    <h3>Application memberships</h3>
+    <p>
+      Access roles control the application. They are separate from job roles and position titles.
+    </p>
+    <div class="toolbar">
+      <label
+        >Search memberships<input
+          [(ngModel)]="membershipSearch"
+          maxlength="160"
+          (keyup.enter)="loadMemberships()" /></label
+      ><button (click)="loadMemberships()">Search</button>
+    </div>
+    @for (item of memberships().items; track item.id) {
+      <article class="member">
+        <span
+          >{{ item.displayName }} · {{ item.email }} · {{ item.securityRole }} ·
+          {{ item.membershipStatus }}</span
+        >
+        @if (item.membershipStatus === 'active' || item.membershipStatus === 'suspended') {
+          <button (click)="changeMembership(item)" [disabled]="busy()">
+            {{ item.membershipStatus === 'active' ? 'Suspend' : 'Reactivate' }}
+          </button>
+        }
+        @if (confirmation()?.kind === 'membership' && confirmation()?.id === item.id) {
+          <p>Suspend this membership? Existing sessions will stop working.</p>
+          <button (click)="changeMembership(item)">Confirm suspension</button
+          ><button (click)="confirmation.set(null)">Cancel</button>
+        }
+      </article>
+    } @empty {
+      <p>No memberships yet. Invite an employee to create one.</p>
+    }
+    <div class="pager">
+      <button
+        (click)="loadMemberships(memberships().page - 1)"
+        [disabled]="memberships().page === 1"
+      >
+        Previous</button
+      ><span>{{ memberships().total }} memberships</span
+      ><button
+        (click)="loadMemberships(memberships().page + 1)"
+        [disabled]="memberships().page * 25 >= memberships().total"
+      >
+        Next
+      </button>
+    </div>
+  </section>
+}
