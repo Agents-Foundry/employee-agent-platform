@@ -19,7 +19,7 @@
     }
     @if (privateLink()) {
       <div role="status">
-        <p>Private, single-use activation link. Email delivery is not connected.</p>
+        <p>Private, single-use invitation link. Email delivery is not connected.</p>
         <label>Activation link<input readonly [value]="privateLink()" /></label
         ><button (click)="privateLink.set('')">Dismiss link</button>
       </div>

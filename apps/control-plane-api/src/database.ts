@@ -186,10 +186,29 @@ export class ControlPlaneDatabase {
     }
   }
 
-  private insertInvitation(organizationId: string, member: NewMember, role: Actor['role']) {
+  private insertInvitation(
+    organizationId: string,
+    member: NewMember,
+    role: Actor['role'],
+    invitedBy: string | null = null,
+  ) {
     const email = member.email.trim().toLowerCase();
-    if (this.db.prepare('SELECT id FROM employees WHERE lower(email) = ?').get(email))
+    if (
+      this.db
+        .prepare('SELECT id FROM employees WHERE organization_id=? AND email=? COLLATE NOCASE')
+        .get(organizationId, email)
+    )
       throw new Error('MEMBER_ALREADY_EXISTS');
+    const existing = this.db
+      .prepare(
+        'SELECT u.id FROM users u JOIN account_password_credentials c ON c.user_id=u.id WHERE u.email=? COLLATE NOCASE AND u.status=?',
+      )
+      .get(email, 'active');
+    if (
+      !existing &&
+      this.db.prepare('SELECT id FROM users WHERE email=? COLLATE NOCASE').get(email)
+    )
+      throw new Error('ACCOUNT_NOT_ACTIVE');
     const employeeId = randomUUID();
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + 48 * 3600000;
@@ -198,17 +217,40 @@ export class ControlPlaneDatabase {
         'INSERT INTO employees (id, organization_id, display_name, email, role, team) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(employeeId, organizationId, member.displayName, email, role, member.team);
-    this.db
-      .prepare(
-        'INSERT INTO identities (issuer, subject, employee_id, enabled, user_id) VALUES (?, ?, ?, 0, ?)',
-      )
-      .run(LOCAL_ISSUER, employeeId, employeeId, this.ensureAccount(employeeId, 'pending'));
-    this.db
-      .prepare(
-        'INSERT INTO invitations (hash, employee_id, expires_at, consumed) VALUES (?, ?, ?, 0)',
-      )
-      .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
-    return { employeeId, token, expiresAt };
+    if (existing)
+      this.db.prepare('UPDATE employees SET user_id=? WHERE id=?').run(existing['id'], employeeId);
+    const userId = this.ensureAccount(employeeId, 'pending');
+    if (existing)
+      this.db
+        .prepare(
+          'INSERT INTO account_link_invitations(hash,organization_id,employee_id,user_id,expires_at,invited_by) VALUES (?,?,?,?,?,?)',
+        )
+        .run(
+          createHash('sha256').update(token).digest('hex'),
+          organizationId,
+          employeeId,
+          userId,
+          expiresAt,
+          invitedBy,
+        );
+    else {
+      this.db
+        .prepare(
+          'INSERT INTO identities (issuer, subject, employee_id, enabled, user_id) VALUES (?, ?, ?, 0, ?)',
+        )
+        .run(LOCAL_ISSUER, employeeId, employeeId, userId);
+      this.db
+        .prepare(
+          'INSERT INTO invitations (hash, employee_id, expires_at, consumed) VALUES (?, ?, ?, 0)',
+        )
+        .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
+    }
+    return {
+      employeeId,
+      token,
+      expiresAt,
+      purpose: existing ? ('link' as const) : ('activate' as const),
+    };
   }
 
   private ensureAccount(employeeId: string, status: 'pending' | 'active'): string {
@@ -251,10 +293,10 @@ export class ControlPlaneDatabase {
   }
 
   inviteEmployee(actor: Actor, member: NewMember) {
-    if (actor.role !== 'ADMIN') throw new Error('ACTOR_FORBIDDEN');
+    this.structure.authorize(actor);
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const invitation = this.insertInvitation(actor.organizationId, member, 'EMPLOYEE');
+      const invitation = this.insertInvitation(actor.organizationId, member, 'EMPLOYEE', actor.id);
       this.audit(
         actor.id,
         'employee.invited',
@@ -277,25 +319,59 @@ export class ControlPlaneDatabase {
       this.structure.authorize(actor);
       const employee = this.db
         .prepare(
-          "SELECT user_id FROM employees WHERE organization_id=? AND id=? AND employment_status='active'",
+          "SELECT user_id,email FROM employees WHERE organization_id=? AND id=? AND employment_status='active'",
         )
         .get(actor.organizationId, employeeId);
       if (!employee) throw new Error('MEMBER_NOT_FOUND');
       if (employee['user_id']) throw new Error('MEMBER_ALREADY_EXISTS');
+      const existing = this.db
+        .prepare(
+          'SELECT u.id FROM users u JOIN account_password_credentials c ON c.user_id=u.id WHERE u.email=? COLLATE NOCASE AND u.status=?',
+        )
+        .get(employee['email'], 'active');
+      if (
+        !existing &&
+        this.db.prepare('SELECT id FROM users WHERE email=? COLLATE NOCASE').get(employee['email'])
+      )
+        throw new Error('ACCOUNT_NOT_ACTIVE');
+      if (existing)
+        this.db
+          .prepare('UPDATE employees SET user_id=? WHERE id=?')
+          .run(existing['id'], employeeId);
       const userId = this.ensureAccount(employeeId, 'pending');
       const token = randomBytes(32).toString('base64url'),
         expiresAt = Date.now() + 48 * 3600000;
-      this.db
-        .prepare(
-          'INSERT INTO identities(issuer,subject,employee_id,enabled,user_id) VALUES (?,?,?,0,?)',
-        )
-        .run(LOCAL_ISSUER, employeeId, employeeId, userId);
-      this.db
-        .prepare('INSERT INTO invitations(hash,employee_id,expires_at,consumed) VALUES (?,?,?,0)')
-        .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
+      if (existing)
+        this.db
+          .prepare(
+            'INSERT INTO account_link_invitations(hash,organization_id,employee_id,user_id,expires_at,invited_by) VALUES (?,?,?,?,?,?)',
+          )
+          .run(
+            createHash('sha256').update(token).digest('hex'),
+            actor.organizationId,
+            employeeId,
+            userId,
+            expiresAt,
+            actor.id,
+          );
+      else {
+        this.db
+          .prepare(
+            'INSERT INTO identities(issuer,subject,employee_id,enabled,user_id) VALUES (?,?,?,0,?)',
+          )
+          .run(LOCAL_ISSUER, employeeId, employeeId, userId);
+        this.db
+          .prepare('INSERT INTO invitations(hash,employee_id,expires_at,consumed) VALUES (?,?,?,0)')
+          .run(createHash('sha256').update(token).digest('hex'), employeeId, expiresAt);
+      }
       this.audit(actor.id, 'employee.invited', 'employee', employeeId, {}, actor.organizationId);
       this.db.exec('COMMIT');
-      return { employeeId, token, expiresAt };
+      return {
+        employeeId,
+        token,
+        expiresAt,
+        purpose: existing ? ('link' as const) : ('activate' as const),
+      };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -322,6 +398,11 @@ export class ControlPlaneDatabase {
       this.db
         .prepare('INSERT INTO password_credentials (issuer, subject, hash) VALUES (?, ?, ?)')
         .run(LOCAL_ISSUER, employeeId, passwordHash);
+      this.db
+        .prepare(
+          'INSERT INTO account_password_credentials(user_id,hash,updated_at) SELECT user_id,?,? FROM employees WHERE id=?',
+        )
+        .run(passwordHash, now(), employeeId);
       this.db
         .prepare('UPDATE identities SET enabled = 1 WHERE issuer = ? AND subject = ?')
         .run(LOCAL_ISSUER, employeeId);
@@ -351,15 +432,17 @@ export class ControlPlaneDatabase {
       .prepare(
         `SELECT e.id, e.display_name AS displayName, e.email, e.role, e.team,
       CASE WHEN m.membership_status='suspended' OR e.employment_status='inactive' THEN 'INACTIVE'
-      WHEN i.enabled = 1 THEN 'ACTIVE'
+      WHEN m.membership_status='active' AND c.user_id IS NOT NULL THEN 'ACTIVE'
       WHEN EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0 AND v.expires_at > ?) THEN 'INVITED'
       WHEN EXISTS (SELECT 1 FROM invitations v WHERE v.employee_id = e.id AND v.consumed = 0) THEN 'INVITATION_EXPIRED'
+      WHEN EXISTS (SELECT 1 FROM account_link_invitations l WHERE l.employee_id=e.id AND l.consumed=0 AND l.expires_at>?) THEN 'INVITED'
       ELSE 'INACTIVE' END AS status
-      FROM employees e JOIN identities i ON i.employee_id = e.id AND i.issuer = ?
+      FROM employees e LEFT JOIN identities i ON i.employee_id = e.id AND i.issuer = ?
       JOIN organization_memberships m ON m.organization_id=e.organization_id AND m.employee_id=e.id
+      LEFT JOIN account_password_credentials c ON c.user_id=m.user_id
       WHERE e.organization_id = ? ORDER BY e.display_name`,
       )
-      .all(Date.now(), LOCAL_ISSUER, organizationId);
+      .all(Date.now(), Date.now(), LOCAL_ISSUER, organizationId);
   }
 
   disableMember(actor: Actor, employeeId: string): void {
@@ -383,6 +466,11 @@ export class ControlPlaneDatabase {
       this.db
         .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
         .run(LOCAL_ISSUER, employeeId);
+      this.db
+        .prepare(
+          'DELETE FROM auth_sessions WHERE organization_id=? AND user_id=(SELECT user_id FROM employees WHERE id=?)',
+        )
+        .run(actor.organizationId, employeeId);
       this.db.prepare('UPDATE invitations SET consumed = 1 WHERE employee_id = ?').run(employeeId);
       this.db
         .prepare('UPDATE password_resets SET consumed = 1 WHERE employee_id = ?')
@@ -482,11 +570,21 @@ export class ControlPlaneDatabase {
         .prepare('UPDATE password_credentials SET hash = ? WHERE issuer = ? AND subject = ?')
         .run(passwordHash, LOCAL_ISSUER, reset.employee_id);
       this.db
+        .prepare(
+          'UPDATE account_password_credentials SET hash=?,updated_at=? WHERE user_id=(SELECT user_id FROM employees WHERE id=?)',
+        )
+        .run(passwordHash, now(), reset.employee_id);
+      this.db
         .prepare('UPDATE password_resets SET consumed = 1 WHERE employee_id = ?')
         .run(reset.employee_id);
       this.db
         .prepare('DELETE FROM auth_sessions WHERE issuer = ? AND subject = ?')
         .run(LOCAL_ISSUER, reset.employee_id);
+      this.db
+        .prepare(
+          'DELETE FROM auth_sessions WHERE user_id=(SELECT user_id FROM employees WHERE id=?)',
+        )
+        .run(reset.employee_id);
       this.audit(
         reset.employee_id,
         'employee.password_reset.completed',
@@ -542,6 +640,129 @@ export class ControlPlaneDatabase {
     return rows.length === 1 ? rows[0] : undefined;
   }
 
+  accountMembership(userId: string, organizationId: string): Actor | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT e.id,e.organization_id,m.security_role AS role FROM organization_memberships m
+      JOIN users u ON u.id=m.user_id AND u.status='active'
+      JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id AND e.user_id=u.id AND e.employment_status='active'
+      JOIN organizations o ON o.id=m.organization_id AND o.status='active'
+      WHERE m.user_id=? AND m.organization_id=? AND m.membership_status='active'`,
+      )
+      .get(userId, organizationId) as
+      { id: string; organization_id: string; role: Actor['role'] } | undefined;
+    return row ? { id: row.id, organizationId: row.organization_id, role: row.role } : undefined;
+  }
+
+  findPasswordAccount(
+    email: string,
+    organizationId?: string,
+    role?: Actor['role'],
+  ): { userId: string; hash: string; organizationId: string } | undefined {
+    const user = this.db
+      .prepare(
+        `SELECT u.id,c.hash FROM users u
+      JOIN account_password_credentials c ON c.user_id=u.id
+      WHERE u.email=? COLLATE NOCASE AND u.status='active'`,
+      )
+      .get(email.trim()) as { id: string; hash: string } | undefined;
+    if (!user) return undefined;
+    const memberships = this.db
+      .prepare(
+        `SELECT m.organization_id,m.security_role FROM organization_memberships m
+      JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id AND e.employment_status='active'
+      JOIN organizations o ON o.id=m.organization_id AND o.status='active'
+      WHERE m.user_id=? AND m.membership_status='active' AND (? IS NULL OR m.organization_id=?)
+      ORDER BY m.joined_at,m.organization_id`,
+      )
+      .all(user.id, organizationId ?? null, organizationId ?? null);
+    const selected = memberships.find((item) => item['security_role'] === role) ?? memberships[0];
+    return selected
+      ? { userId: user.id, hash: user.hash, organizationId: String(selected['organization_id']) }
+      : undefined;
+  }
+
+  listAccountMemberships(actor: Actor, hostOrganizationId?: string) {
+    return this.db
+      .prepare(
+        `SELECT m.organization_id AS organizationId,o.name AS organizationName,m.security_role AS role,e.id AS employeeId
+      FROM employees current JOIN organization_memberships m ON m.user_id=current.user_id
+      JOIN organizations o ON o.id=m.organization_id AND o.status='active'
+      JOIN employees e ON e.id=m.employee_id AND e.employment_status='active'
+      WHERE current.id=? AND current.organization_id=? AND m.membership_status='active' AND (? IS NULL OR m.organization_id=?)
+      ORDER BY o.name,m.organization_id`,
+      )
+      .all(actor.id, actor.organizationId, hostOrganizationId ?? null, hostOrganizationId ?? null);
+  }
+
+  accountSessionUser(hash: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT user_id FROM auth_sessions WHERE hash=? AND issuer=? AND expires_at>?')
+      .get(hash, LOCAL_ISSUER, Date.now());
+    return row?.['user_id'] ? String(row['user_id']) : undefined;
+  }
+
+  createAccountSession(
+    hash: string,
+    userId: string,
+    organizationId: string,
+    expiresAt: number,
+  ): Actor {
+    const actor = this.accountMembership(userId, organizationId);
+    if (!actor) throw new Error('MEMBERSHIP_REQUIRED');
+    this.db.prepare('DELETE FROM auth_sessions WHERE expires_at<=?').run(Date.now());
+    this.db
+      .prepare(
+        'INSERT INTO auth_sessions(hash,issuer,subject,expires_at,user_id,organization_id) VALUES (?,?,?,?,?,?)',
+      )
+      .run(hash, LOCAL_ISSUER, userId, expiresAt, userId, organizationId);
+    return actor;
+  }
+
+  previewAccountLink(hash: string, userId: string) {
+    return this.db
+      .prepare(
+        `SELECT l.organization_id AS organizationId,o.name AS organizationName,m.security_role AS role,l.expires_at AS expiresAt
+      FROM account_link_invitations l JOIN organization_memberships m ON m.organization_id=l.organization_id AND m.employee_id=l.employee_id AND m.user_id=l.user_id
+      JOIN employees e ON e.id=l.employee_id AND e.employment_status='active'
+      JOIN organizations o ON o.id=l.organization_id AND o.status='active'
+      WHERE l.hash=? AND l.user_id=? AND l.consumed=0 AND l.expires_at>? AND m.membership_status='pending'`,
+      )
+      .get(hash, userId, Date.now());
+  }
+
+  acceptAccountLink(hash: string, userId: string): Actor | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const preview = this.previewAccountLink(hash, userId);
+      if (!preview) {
+        this.db.exec('ROLLBACK');
+        return undefined;
+      }
+      this.db
+        .prepare(
+          "UPDATE organization_memberships SET membership_status='active',version=version+1,updated_at=? WHERE organization_id=? AND user_id=? AND membership_status='pending'",
+        )
+        .run(now(), preview['organizationId'], userId);
+      this.db.prepare('UPDATE account_link_invitations SET consumed=1 WHERE hash=?').run(hash);
+      const actor = this.accountMembership(userId, String(preview['organizationId']));
+      if (!actor) throw new Error('LINK_MEMBERSHIP_UNAVAILABLE');
+      this.audit(
+        actor.id,
+        'account.linked',
+        'organization_membership',
+        actor.id,
+        { userId },
+        actor.organizationId,
+      );
+      this.db.exec('COMMIT');
+      return actor;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   createLogin(hash: string, transaction: LoginTransaction, expiresAt: number): void {
     this.db.prepare('DELETE FROM login_transactions WHERE expires_at <= ?').run(Date.now());
     this.db
@@ -561,18 +782,40 @@ export class ControlPlaneDatabase {
   }
   createSession(hash: string, issuer: string, subject: string, expiresAt: number): void {
     this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(Date.now());
+    const identity = this.db
+      .prepare(
+        'SELECT i.user_id,e.organization_id FROM identities i JOIN employees e ON e.id=i.employee_id WHERE i.issuer=? AND i.subject=?',
+      )
+      .get(issuer, subject);
     this.db
-      .prepare('INSERT INTO auth_sessions (hash, issuer, subject, expires_at) VALUES (?, ?, ?, ?)')
-      .run(hash, issuer, subject, expiresAt);
+      .prepare(
+        'INSERT INTO auth_sessions (hash, issuer, subject, expires_at, user_id, organization_id) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        hash,
+        issuer,
+        subject,
+        expiresAt,
+        identity?.['user_id'] ?? null,
+        identity?.['organization_id'] ?? null,
+      );
   }
   deleteSession(hash: string): void {
     this.db.prepare('DELETE FROM auth_sessions WHERE hash = ?').run(hash);
   }
   findSession(hash: string, organizationId?: string): Actor | undefined {
     const row = this.db
-      .prepare('SELECT issuer, subject FROM auth_sessions WHERE hash = ? AND expires_at > ?')
+      .prepare(
+        'SELECT issuer, subject, user_id, organization_id FROM auth_sessions WHERE hash = ? AND expires_at > ?',
+      )
       .get(hash, Date.now()) as { issuer: string; subject: string } | undefined;
-    return row ? this.findIdentity(row.issuer, row.subject, organizationId) : undefined;
+    if (!row) return undefined;
+    const scoped = row as typeof row & { user_id: string | null; organization_id: string | null };
+    if (row.issuer === LOCAL_ISSUER && scoped.user_id && scoped.organization_id)
+      return organizationId && organizationId !== scoped.organization_id
+        ? undefined
+        : this.accountMembership(scoped.user_id, scoped.organization_id);
+    return this.findIdentity(row.issuer, row.subject, organizationId);
   }
 
   resolveActor(id: string, role: string, organizationId: string) {
@@ -636,11 +879,14 @@ export class ControlPlaneDatabase {
       actor.role !== 'ADMIN' ||
       !this.db
         .prepare(
-          `SELECT e.id FROM employees e JOIN identities i ON i.employee_id = e.id
-      JOIN organization_memberships m ON m.employee_id=e.id AND m.organization_id=e.organization_id AND m.membership_status='active'
-      WHERE e.id = ? AND e.organization_id = ? AND m.security_role = 'ADMIN' AND e.employment_status='active' AND i.issuer = ? AND i.enabled = 1`,
+          `SELECT e.id FROM employees e
+      JOIN organization_memberships m ON m.employee_id=e.id AND m.organization_id=e.organization_id AND m.user_id=e.user_id AND m.membership_status='active'
+      JOIN users u ON u.id=m.user_id AND u.status='active'
+      JOIN organizations o ON o.id=m.organization_id AND o.status='active'
+      JOIN account_password_credentials c ON c.user_id=u.id
+      WHERE e.id = ? AND e.organization_id = ? AND m.security_role = 'ADMIN' AND e.employment_status='active'`,
         )
-        .get(actor.id, actor.organizationId, LOCAL_ISSUER)
+        .get(actor.id, actor.organizationId)
     )
       throw new Error('ACTOR_FORBIDDEN');
     const bodyHash = createHash('sha256')
@@ -663,11 +909,14 @@ export class ControlPlaneDatabase {
       const recipients = input.employeeIds.map((employeeId) => {
         const employee = this.db
           .prepare(
-            `SELECT e.id, e.display_name, e.team FROM employees e JOIN identities i ON i.employee_id = e.id
-          JOIN organization_memberships m ON m.employee_id=e.id AND m.organization_id=e.organization_id AND m.membership_status='active'
-          WHERE e.id = ? AND e.organization_id = ? AND m.security_role = 'EMPLOYEE' AND e.employment_status='active' AND i.issuer = ? AND i.enabled = 1`,
+            `SELECT e.id, e.display_name, e.team FROM employees e
+          JOIN organization_memberships m ON m.employee_id=e.id AND m.organization_id=e.organization_id AND m.user_id=e.user_id AND m.membership_status='active'
+          JOIN users u ON u.id=m.user_id AND u.status='active'
+          JOIN organizations o ON o.id=m.organization_id AND o.status='active'
+          JOIN account_password_credentials c ON c.user_id=u.id
+          WHERE e.id = ? AND e.organization_id = ? AND m.security_role = 'EMPLOYEE' AND e.employment_status='active'`,
           )
-          .get(employeeId, actor.organizationId, LOCAL_ISSUER) as
+          .get(employeeId, actor.organizationId) as
           { id: string; display_name: string; team: string } | undefined;
         if (!employee) throw new Error('ASSIGNMENT_RECIPIENT_FORBIDDEN');
         return employee;

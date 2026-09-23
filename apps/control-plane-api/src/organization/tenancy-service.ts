@@ -145,7 +145,7 @@ export class TenancyService {
   private revokeSessions(employeeId: string): void {
     this.db
       .prepare(
-        'DELETE FROM auth_sessions WHERE EXISTS (SELECT 1 FROM identities i WHERE i.issuer=auth_sessions.issuer AND i.subject=auth_sessions.subject AND i.employee_id=?)',
+        'DELETE FROM auth_sessions WHERE EXISTS (SELECT 1 FROM employees e WHERE e.id=? AND e.user_id=auth_sessions.user_id AND e.organization_id=auth_sessions.organization_id)',
       )
       .run(employeeId);
   }
@@ -509,13 +509,13 @@ export class TenancyService {
       const row = this.db
         .prepare(
           `SELECT m.id,m.employee_id,m.membership_status,m.version,e.employment_status,u.status AS user_status,
-        EXISTS(SELECT 1 FROM identities i WHERE i.employee_id=e.id AND i.user_id=m.user_id AND i.enabled=1) AS enabled,
-        EXISTS(SELECT 1 FROM password_credentials c WHERE c.issuer=? AND c.subject=e.id) AS has_password
+        EXISTS(SELECT 1 FROM account_password_credentials c WHERE c.user_id=m.user_id) AS has_password,
+        EXISTS(SELECT 1 FROM identities i WHERE i.employee_id=e.id AND i.user_id=m.user_id AND i.enabled=1) AS enabled
         FROM organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id
         JOIN users u ON u.id=m.user_id
         WHERE m.organization_id=? AND m.id=?`,
         )
-        .get(LOCAL_ISSUER, actor.organizationId, membershipId);
+        .get(actor.organizationId, membershipId);
       if (!row) throw new OrganizationDomainError(404, 'MEMBERSHIP_NOT_FOUND');
       if (row['version'] !== input.version)
         throw new OrganizationDomainError(409, 'MEMBERSHIP_VERSION_CONFLICT');
@@ -525,7 +525,7 @@ export class TenancyService {
         input.status === 'active' &&
         (row['employment_status'] !== 'active' ||
           row['user_status'] !== 'active' ||
-          (row['enabled'] !== 1 && row['has_password'] !== 1))
+          row['has_password'] !== 1)
       )
         throw new OrganizationDomainError(409, 'MEMBERSHIP_NOT_READY');
       if (input.status === 'active' && row['enabled'] !== 1)

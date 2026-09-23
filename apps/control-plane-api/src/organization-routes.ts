@@ -14,7 +14,7 @@ export const memberInput = z
 export function activationUrl(
   base: string,
   token: string,
-  purpose: 'activate' | 'reset' = 'activate',
+  purpose: 'activate' | 'reset' | 'link' = 'activate',
 ): string {
   const url = new URL(base);
   // Fragments are not sent in HTTP requests, access logs, or Referer headers.
@@ -48,12 +48,17 @@ export function configureOrganizationRoutes(
       res.status(201).json({
         employeeId: invitation.employeeId,
         expiresAt: invitation.expiresAt,
-        activationUrl: activationUrl(config.employeeUrl, invitation.token),
+        activationUrl: activationUrl(config.employeeUrl, invitation.token, invitation.purpose),
+        purpose: invitation.purpose,
         delivery: 'MANUAL',
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'MEMBER_ALREADY_EXISTS') {
         res.status(409).json({ error: 'EMAIL_UNAVAILABLE' });
+        return;
+      }
+      if (error instanceof Error && error.message === 'ACCOUNT_NOT_ACTIVE') {
+        res.status(409).json({ error: 'ACCOUNT_NOT_ACTIVE' });
         return;
       }
       throw error;
@@ -80,15 +85,13 @@ export function configureOrganizationRoutes(
     const id = z.string().uuid().parse(req.params['id']);
     try {
       const result = db.issueEmployeeLink(res.locals['actor'], id, purpose);
-      res
-        .status(201)
-        .json({
-          employeeId: id,
-          purpose,
-          expiresAt: result.expiresAt,
-          activationUrl: activationUrl(config.employeeUrl, result.token, purpose),
-          delivery: 'MANUAL',
-        });
+      res.status(201).json({
+        employeeId: id,
+        purpose,
+        expiresAt: result.expiresAt,
+        activationUrl: activationUrl(config.employeeUrl, result.token, purpose),
+        delivery: 'MANUAL',
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'RECOVERY_STATE_CONFLICT') {
         res.status(409).json({ error: 'RECOVERY_STATE_CONFLICT' });

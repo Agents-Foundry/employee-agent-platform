@@ -330,6 +330,8 @@ it('backfills legacy identities and leaves employees without login unlinked', ()
       CREATE TABLE organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE);
       CREATE TABLE employees(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,display_name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,role TEXT NOT NULL,team TEXT NOT NULL,FOREIGN KEY(organization_id) REFERENCES organizations(id));
       CREATE TABLE identities(issuer TEXT NOT NULL,subject TEXT NOT NULL,employee_id TEXT NOT NULL,enabled INTEGER NOT NULL,PRIMARY KEY(issuer,subject),FOREIGN KEY(employee_id) REFERENCES employees(id));
+      CREATE TABLE password_credentials(issuer TEXT NOT NULL,subject TEXT NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(issuer,subject));
+      CREATE TABLE auth_sessions(hash TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,expires_at INTEGER NOT NULL);
       CREATE TABLE invitations(hash TEXT PRIMARY KEY,employee_id TEXT NOT NULL,expires_at INTEGER NOT NULL,consumed INTEGER NOT NULL);`);
     sql.prepare('INSERT INTO organizations VALUES (?,?,?)').run('legacy-org', 'Legacy', 'legacy');
     sql
@@ -355,6 +357,13 @@ it('backfills legacy identities and leaves employees without login unlinked', ()
     sql
       .prepare('INSERT INTO identities VALUES (?,?,?,?)')
       .run(LOCAL_ISSUER, 'legacy-admin', 'legacy-admin', 1);
+    sql
+      .prepare('INSERT INTO password_credentials VALUES (?,?,?)')
+      .run(LOCAL_ISSUER, 'legacy-admin', 'legacy-hash');
+    sql
+      .prepare('INSERT INTO auth_sessions VALUES (?,?,?,?)')
+      .run('legacy-session', LOCAL_ISSUER, 'legacy-admin', Date.now() + 60000);
+    migrateOrganization(sql, 3);
     migrateOrganization(sql);
     const admin = sql.prepare('SELECT user_id FROM employees WHERE id=?').get('legacy-admin')![
       'user_id'
@@ -369,7 +378,18 @@ it('backfills legacy identities and leaves employees without login unlinked', ()
         .prepare('SELECT membership_status FROM organization_memberships WHERE employee_id=?')
         .get('legacy-admin')!['membership_status'],
     ).toBe('active');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(3);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(4);
+    expect(
+      sql.prepare('SELECT hash FROM account_password_credentials WHERE user_id=?').get(admin)![
+        'hash'
+      ],
+    ).toBe('legacy-hash');
+    expect(
+      sql
+        .prepare('SELECT user_id,organization_id FROM auth_sessions WHERE hash=?')
+        .get('legacy-session'),
+    ).toEqual({ user_id: admin, organization_id: 'legacy-org' });
+    expect(sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   } finally {
     sql.close();
   }

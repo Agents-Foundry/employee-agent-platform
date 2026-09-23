@@ -184,7 +184,10 @@ export class PeopleAdmin implements OnInit {
     this.error.set('');
     this.privateLink.set('');
     this.http
-      .post<{ activationUrl: string }>(`${this.base}/employees/${item.id}/invitation`, {})
+      .post<{ activationUrl: string; purpose: 'link' | 'activate' }>(
+        `${this.base}/employees/${item.id}/invitation`,
+        {},
+      )
       .subscribe({
         next: (value) => {
           this.busy.set(false);
@@ -192,7 +195,9 @@ export class PeopleAdmin implements OnInit {
           this.load();
           this.loadMemberships();
           this.notice.set(
-            'Single-use invitation created. Share it through an approved private channel.',
+            value.purpose === 'link'
+              ? 'Existing account found. Share the private link so its owner can sign in and approve this membership.'
+              : 'Single-use invitation created. Share it through an approved private channel.',
           );
         },
         error: (error) => {
@@ -244,8 +249,10 @@ export class PeopleAdmin implements OnInit {
             : code === 'MEMBERSHIP_NOT_READY'
               ? 'The account must be active and the employee must be employed before reactivation.'
               : code === 'MEMBER_ALREADY_EXISTS'
-                ? 'An account already uses this email. Account linking requires a verified invitation flow.'
-                : 'The request failed. Check the fields and retry.',
+                ? 'This employee already has a login membership.'
+                : code === 'ACCOUNT_NOT_ACTIVE'
+                  ? 'That existing account must be activated before it can join another organization.'
+                  : 'The request failed. Check the fields and retry.',
     );
   }
 }

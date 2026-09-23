@@ -1,10 +1,11 @@
 import { Component, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { AuthSession } from './session';
+import { AccountSwitcher } from './account-switcher';
 
 @Component({
   selector: 'af-auth-panel',
-  imports: [FormsModule],
+  imports: [FormsModule, AccountSwitcher],
   templateUrl: './auth-panel.html',
   styleUrl: './auth-panel.css',
 })

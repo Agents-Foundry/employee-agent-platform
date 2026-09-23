@@ -102,6 +102,7 @@ describe('browser authentication boundary', () => {
     expect(login.request.body).toEqual({
       email: 'employee@example.com',
       password: 'long test password',
+      client: 'employee',
     });
     login.flush({ id: 'employee', role: 'EMPLOYEE', organizationId: 'org' });
     await attempt;
@@ -121,6 +122,61 @@ describe('browser authentication boundary', () => {
       .flush({}, { status: 429, statusText: 'Too Many Requests' });
     await throttled;
     expect(auth.error()).toContain('Too many');
+  });
+
+  it('keeps an account-link invitation gated until the signed-in owner confirms it', async () => {
+    const token = 'l'.repeat(43);
+    history.replaceState(null, '', '#link=' + token);
+    const auth = TestBed.inject(AuthSession),
+      http = TestBed.inject(HttpTestingController);
+    expect(location.hash).toBe('');
+    const loading = auth.initialize('EMPLOYEE');
+    http.expectOne(`${API_URL}/auth/config`).flush({ mode: 'password' });
+    await Promise.resolve();
+    http
+      .expectOne(`${API_URL}/auth/session`)
+      .flush({ id: 'admin', organizationId: 'org-a', role: 'ADMIN' });
+    await Promise.resolve();
+    http
+      .expectOne(`${API_URL}/auth/memberships`)
+      .flush([
+        { organizationId: 'org-a', organizationName: 'Alpha', employeeId: 'admin', role: 'ADMIN' },
+      ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    http.expectOne(`${API_URL}/auth/link-preview?token=${token}`).flush({
+      organizationId: 'org-b',
+      organizationName: 'Beta',
+      role: 'EMPLOYEE',
+      expiresAt: Date.now() + 60000,
+    });
+    await loading;
+    expect(auth.ready()).toBe(false);
+    const fixture = TestBed.createComponent(AuthPanel);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Beta invited this account');
+    const accepting = auth.acceptLink();
+    const link = http.expectOne(`${API_URL}/auth/link-account`);
+    expect(link.request.body).toEqual({ token });
+    link.flush({ id: 'employee', organizationId: 'org-b', role: 'EMPLOYEE' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    http.expectOne(`${API_URL}/auth/memberships`).flush([
+      { organizationId: 'org-a', organizationName: 'Alpha', employeeId: 'admin', role: 'ADMIN' },
+      {
+        organizationId: 'org-b',
+        organizationName: 'Beta',
+        employeeId: 'employee',
+        role: 'EMPLOYEE',
+      },
+    ]);
+    await accepting;
+    expect(auth.linkToken()).toBe('');
+    expect(auth.ready()).toBe(true);
+    const switching = auth.switchOrganization('org-a');
+    http
+      .expectOne(`${API_URL}/auth/switch`)
+      .flush({ id: 'admin', organizationId: 'org-a', role: 'ADMIN' });
+    await switching;
+    expect(auth.ready()).toBe(false);
   });
 
   it('waits for the session and sends cookies without demo identity headers in Google mode', async () => {

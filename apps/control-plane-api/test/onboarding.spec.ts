@@ -176,7 +176,7 @@ describe('customer onboarding and organization membership', () => {
         { name: 'Other', slug: 'other' },
         { email: 'ADMIN@UNIQUE.EXAMPLE', displayName: 'Collision', team: 'Admin' },
       ),
-    ).toThrow('MEMBER_ALREADY_EXISTS');
+    ).toThrow('ACCOUNT_NOT_ACTIVE');
     expect(() => customer('other')).not.toThrow();
     const app = createApp(db, config);
     const results = await Promise.all([activate(app, a.token), activate(app, a.token)]);
