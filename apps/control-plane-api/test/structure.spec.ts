@@ -32,7 +32,7 @@ it('rolls back a failed migration and can resume without partial job tables', ()
       CREATE TABLE organizations(id TEXT PRIMARY KEY);
       CREATE TABLE employees(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL);
       CREATE TABLE roles(id TEXT PRIMARY KEY);`);
-    expect(() => migrateOrganization(sql)).toThrow();
+    expect(() => migrateOrganization(sql, 2)).toThrow();
     expect(sql.prepare('SELECT version FROM schema_migrations').all()).toEqual([{ version: 1 }]);
     expect(
       sql
@@ -40,7 +40,7 @@ it('rolls back a failed migration and can resume without partial job tables', ()
         .all(),
     ).toEqual([]);
     sql.exec('DROP TABLE roles');
-    migrateOrganization(sql);
+    migrateOrganization(sql, 2);
     expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(2);
   } finally {
     sql.close();
@@ -233,7 +233,7 @@ it('applies migrations once, persists changes, and enforces cross-tenant keys an
     expect(db.structure.list(actor, {}).total).toBe(2);
     sql = new DatabaseSync(path);
     sql.exec('PRAGMA foreign_keys=ON');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(2);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(3);
     expect(() =>
       sql!
         .prepare('UPDATE organizational_units SET organization_id=? WHERE id=?')

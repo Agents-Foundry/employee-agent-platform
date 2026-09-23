@@ -94,7 +94,8 @@ See [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), and the [s
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 
 Password-mode organization administrators can now manage nested departments/teams, employee
-memberships, job families, disciplines, job roles, levels and positions. See the
+memberships, job families, disciplines, job roles, levels and positions. They can also edit
+their profile, verify a domain, record employees before inviting them and assign positions. See the
 [DIY organization implementation ledger](docs/diy-organization-platform.md) for migrations,
 security boundaries, verification and the remaining phased implementation. This is not yet the
 complete DIY bootstrap/setup-wizard platform.

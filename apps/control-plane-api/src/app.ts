@@ -12,6 +12,7 @@ import { configureOrganizationRoutes } from './organization-routes.js';
 import { configureStructureRoutes } from './organization/structure-routes.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
 import { configureJobRoutes } from './organization/job-routes.js';
+import { configureTenancyRoutes } from './organization/tenancy-routes.js';
 
 const provisioningSchema = z
   .object({
@@ -77,15 +78,44 @@ export function createApp(
           .split(',')
           .map((origin) => origin.trim());
 
+  const canonicalHosts = new Set(
+    auth.mode === 'demo'
+      ? ['localhost', '127.0.0.1']
+      : [new URL(auth.adminUrl).hostname, new URL(auth.employeeUrl).hostname, '127.0.0.1'].filter(
+          (host) => host !== '127.0.0.1' || process.env['NODE_ENV'] !== 'production',
+        ),
+  );
+
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+  app.use((request, response, next) => {
+    const host = request.hostname.toLowerCase().replace(/\.$/, '');
+    const tenantId = database.tenancy.resolveVerifiedDomain(host);
+    if (tenantId) response.locals['tenantOrganizationId'] = tenantId;
+    else if (!canonicalHosts.has(host)) {
+      response.status(421).json({ error: 'UNRECOGNIZED_HOST' });
+      return;
+    }
+    next();
+  });
   app.use(
-    cors({
-      credentials: true,
-      origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error('ORIGIN_FORBIDDEN'));
-      },
+    cors((request, callback) => {
+      const origin = request.header('origin');
+      if (!origin || allowedOrigins.includes(origin))
+        return callback(null, { credentials: true, origin: true });
+      try {
+        const parsed = new URL(origin);
+        if (
+          parsed.protocol === 'https:' &&
+          !parsed.port &&
+          parsed.hostname === request.hostname.toLowerCase().replace(/\.$/, '') &&
+          Boolean(database.tenancy.resolveVerifiedDomain(parsed.hostname))
+        )
+          return callback(null, { credentials: true, origin: true });
+      } catch {
+        /* Invalid origins are rejected. */
+      }
+      return callback(new Error('ORIGIN_FORBIDDEN'));
     }),
   );
   app.use(express.json({ limit: '64kb' }));
@@ -115,6 +145,7 @@ export function createApp(
   configureOrganizationRoutes(app, database, auth);
   configureStructureRoutes(app, database.structure, auth);
   configureJobRoutes(app, database.jobs, auth);
+  configureTenancyRoutes(app, database, auth);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));

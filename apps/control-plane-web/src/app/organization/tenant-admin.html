@@ -1,0 +1,93 @@
+@if (auth.config()?.mode === 'password') {
+  <section id="organization-profile" aria-labelledby="profile-heading">
+    <header>
+      <div>
+        <p>ORGANIZATION</p>
+        <h2 id="profile-heading">Profile and domains</h2>
+      </div>
+      <button (click)="refresh()" [disabled]="busy() || loading()">Refresh</button>
+    </header>
+    <p>
+      Set the identity of your organization. The organization code and slug are unique across Agent
+      Foundry.
+    </p>
+    @if (error()) {
+      <p role="alert" class="error">{{ error() }}</p>
+    }
+    @if (notice()) {
+      <p role="status">{{ notice() }}</p>
+    }
+    @if (loading()) {
+      <p role="status">Loading profile…</p>
+    }
+    @if (profile(); as item) {
+      <form [formGroup]="form" (ngSubmit)="save()">
+        <fieldset [disabled]="busy()">
+          <label>Organization name<input formControlName="name" maxlength="160" /></label>
+          <label>Legal name<input formControlName="legalName" maxlength="200" /></label>
+          <label>Code<input formControlName="code" maxlength="40" /></label>
+          <label>Slug<input formControlName="slug" maxlength="80" /></label>
+          <label
+            >Website<input formControlName="website" type="url" placeholder="https://example.com"
+          /></label>
+          <label>Industry<input formControlName="industry" maxlength="160" /></label>
+          <label
+            >Country code<input formControlName="country" maxlength="2" placeholder="DE"
+          /></label>
+          <label>Timezone<input formControlName="timezone" placeholder="Europe/Berlin" /></label>
+          <label>Locale<input formControlName="locale" placeholder="en" /></label>
+          <div>
+            <p>Status: {{ item.status }}</p>
+            <button [disabled]="busy() || form.invalid">Save profile</button>
+          </div>
+        </fieldset>
+      </form>
+    }
+    <h3>Organization domains</h3>
+    <p>
+      To prove ownership, create a DNS TXT record for each domain. Only verified domains can be
+      selected as primary. HTTPS and application routing must also be configured before users can
+      visit that address.
+    </p>
+    @for (item of domains(); track item.id) {
+      <article class="member">
+        <div>
+          <strong>{{ item.domain }}</strong>
+          <p>
+            {{ item.domainType }} · {{ item.verificationStatus }}
+            {{ item.isPrimary ? '· Primary' : '' }}
+          </p>
+          @if (item.verificationStatus === 'pending') {
+            <p>
+              Add TXT record <code>_agents-foundry-verification.{{ item.domain }}</code> with value
+              <code>{{ item.verificationToken }}</code>
+            </p>
+          }
+        </div>
+        @if (item.verificationStatus === 'pending') {
+          <button (click)="verify(item)" [disabled]="busy()">Verify DNS</button>
+        }
+        @if (item.verificationStatus === 'verified' && !item.isPrimary) {
+          <button (click)="setPrimary(item)" [disabled]="busy()">Set primary</button>
+        }
+      </article>
+    } @empty {
+      <p>No domains registered. Add a domain when you control its DNS settings.</p>
+    }
+    <form (ngSubmit)="register()">
+      <label
+        >Domain<input
+          name="domain"
+          [(ngModel)]="domain"
+          placeholder="agents.example.com"
+          required
+          maxlength="253" /></label
+      ><label
+        >Domain type<select name="domainType" [(ngModel)]="domainType">
+          <option value="custom_domain">Custom domain</option>
+          <option value="platform_subdomain">Platform subdomain</option>
+        </select></label
+      ><button [disabled]="busy() || !domain.trim()">Register domain</button>
+    </form>
+  </section>
+}

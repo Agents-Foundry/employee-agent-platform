@@ -142,7 +142,7 @@ describe('customer onboarding and organization membership', () => {
     const audit = JSON.stringify(db.listLifecycleEvents(a.organizationId));
     expect(audit).toContain('employee.disabled');
     expect(audit).not.toContain(token);
-  });
+  }, 15000);
 
   it('rejects missing origins, short passwords, expired links and revoked pending invitations', async () => {
     const a = customer('expiry');

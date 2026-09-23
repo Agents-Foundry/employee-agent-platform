@@ -7,6 +7,8 @@ import { OrganizationAdmin } from './organization-admin';
 import { AgentAdmin } from './agent-admin';
 import { StructureAdmin } from './organization/structure-admin';
 import { JobAdmin } from './organization/job-admin';
+import { TenantAdmin } from './organization/tenant-admin';
+import { PeopleAdmin } from './organization/people-admin';
 import type {
   Approval,
   BootstrapResponse,
@@ -15,7 +17,16 @@ import type {
 } from '@agents-foundry/contracts';
 
 @Component({
-  imports: [DatePipe, FormsModule, OrganizationAdmin, AgentAdmin, StructureAdmin, JobAdmin],
+  imports: [
+    DatePipe,
+    FormsModule,
+    OrganizationAdmin,
+    AgentAdmin,
+    StructureAdmin,
+    JobAdmin,
+    TenantAdmin,
+    PeopleAdmin,
+  ],
   selector: 'app-root',
   styleUrl: './app.scss',
   templateUrl: './app.html',
