@@ -5,6 +5,8 @@
     </a>
     <nav aria-label="Primary navigation">
       <a class="active" href="#overview"><span>◇</span> Overview</a>
+      <a href="#organization-structure"><span>⌘</span> Organization structure</a>
+      <a href="#job-architecture"><span>♧</span> Job architecture</a>
       <a href="#employees"><span>♙</span> Employees</a>
       <a href="#agents"><span>✦</span> Agent catalog</a>
       <a href="#approvals"
@@ -41,6 +43,8 @@
     }
 
     <af-organization-admin />
+    <af-structure-admin />
+    <af-job-admin />
     <af-agent-admin (created)="refresh()" />
     <section class="metrics" id="overview" aria-label="Workspace summary">
       <article>

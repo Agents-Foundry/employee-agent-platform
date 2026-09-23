@@ -5,6 +5,8 @@ import { FormsModule } from '@angular/forms';
 import { API_URL } from '../../../../packages/web-auth/src/session';
 import { OrganizationAdmin } from './organization-admin';
 import { AgentAdmin } from './agent-admin';
+import { StructureAdmin } from './organization/structure-admin';
+import { JobAdmin } from './organization/job-admin';
 import type {
   Approval,
   BootstrapResponse,
@@ -13,7 +15,7 @@ import type {
 } from '@agents-foundry/contracts';
 
 @Component({
-  imports: [DatePipe, FormsModule, OrganizationAdmin, AgentAdmin],
+  imports: [DatePipe, FormsModule, OrganizationAdmin, AgentAdmin, StructureAdmin, JobAdmin],
   selector: 'app-root',
   styleUrl: './app.scss',
   templateUrl: './app.html',

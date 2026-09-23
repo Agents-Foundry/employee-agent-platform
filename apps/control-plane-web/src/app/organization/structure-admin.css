@@ -1,0 +1,105 @@
+:host {
+  display: block;
+  margin-bottom: 24px;
+}
+section {
+  background: #fff;
+  border: 1px solid #e4e6ee;
+  border-radius: 16px;
+  padding: 24px;
+  color: #29324a;
+}
+header,
+.toolbar,
+.pager,
+.member {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+h2 {
+  margin-top: 4px;
+}
+header p {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #626985;
+}
+p,
+small {
+  color: #68718a;
+}
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  border: 1px solid #d7dce7;
+  border-radius: 8px;
+  padding: 9px;
+  background: white;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  color: #5141b5;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 16px;
+  border: 0;
+  padding: 0;
+}
+form {
+  margin: 20px 0;
+}
+small {
+  display: block;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+nav {
+  margin: 16px 0;
+}
+.table-wrap {
+  overflow: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th,
+td {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 1px solid #eceef3;
+}
+.pager {
+  justify-content: flex-end;
+  margin: 14px 0;
+}
+.error {
+  background: #fff0f0;
+  padding: 12px;
+  color: #9f2738;
+}
+.member {
+  padding: 10px;
+  border-bottom: 1px solid #eceef3;
+}
+input[type='checkbox'] {
+  justify-self: start;
+}

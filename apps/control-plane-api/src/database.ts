@@ -26,6 +26,9 @@ import type {
 import type { IdentityEntry } from './identity-directory.js';
 import { ManifestSigner } from './manifest-signing.js';
 import { qaBlueprint } from './blueprints.js';
+import { migrateOrganization } from './migrations/index.js';
+import { OrganizationStructureService } from './organization/structure-service.js';
+import { JobArchitectureService } from './organization/job-service.js';
 
 const ORGANIZATION_ID = 'org_agents_foundry';
 const EMPLOYEE_ID = 'employee_qa_demo';
@@ -46,6 +49,8 @@ const demoEmployee: Actor = { id: EMPLOYEE_ID, role: 'EMPLOYEE', organizationId:
 export class ControlPlaneDatabase {
   private readonly db: DatabaseSync;
   readonly signer: ManifestSigner;
+  readonly structure: OrganizationStructureService;
+  readonly jobs: JobArchitectureService;
 
   constructor(path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db', seedDemo = true) {
     this.signer =
@@ -59,7 +64,15 @@ export class ControlPlaneDatabase {
     }
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
-    this.migrate();
+    try {
+      this.migrate();
+      migrateOrganization(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    this.structure = new OrganizationStructureService(this.db);
+    this.jobs = new JobArchitectureService(this.db, this.structure);
     if (seedDemo) this.seed();
   }
 

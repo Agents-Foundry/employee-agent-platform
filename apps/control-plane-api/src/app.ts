@@ -9,6 +9,9 @@ import { ControlPlaneDatabase } from './database.js';
 import { qaBlueprint, validateAnswers } from './blueprints.js';
 import { configureAuth, loadAuthConfig, type AuthConfig, type GoogleSignIn } from './auth.js';
 import { configureOrganizationRoutes } from './organization-routes.js';
+import { configureStructureRoutes } from './organization/structure-routes.js';
+import { OrganizationDomainError } from './organization/structure-service.js';
+import { configureJobRoutes } from './organization/job-routes.js';
 
 const provisioningSchema = z
   .object({
@@ -110,6 +113,8 @@ export function createApp(
   });
   app.get('/api/auth/session', (_request, response) => response.json(response.locals['actor']));
   configureOrganizationRoutes(app, database, auth);
+  configureStructureRoutes(app, database.structure, auth);
+  configureJobRoutes(app, database.jobs, auth);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
@@ -324,6 +329,8 @@ export function createApp(
   });
 
   app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+    if (error instanceof OrganizationDomainError)
+      return response.status(error.status).json({ error: error.message });
     if (error instanceof Error && error.message.endsWith('_FORBIDDEN')) {
       return response.status(403).json({ error: error.message });
     }

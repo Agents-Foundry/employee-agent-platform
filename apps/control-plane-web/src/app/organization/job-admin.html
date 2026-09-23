@@ -1,0 +1,140 @@
+@if (auth.config()?.mode === 'password') {
+  <section id="job-architecture" aria-labelledby="job-heading">
+    <header>
+      <div>
+        <p>PEOPLE / JOB ARCHITECTURE</p>
+        <h2 id="job-heading">Define how your people work</h2>
+      </div>
+      <button (click)="create()" [disabled]="busy()">+ Create record</button>
+    </header>
+    <p>
+      Start with a family such as Engineering, add a discipline such as Quality Engineering, then
+      define roles, levels, and positions. A position is an organizational seat. None of these grant
+      application access.
+    </p>
+    @if (error()) {
+      <p role="alert" class="error">{{ error() }}</p>
+    }
+    @if (notice()) {
+      <p role="status">{{ notice() }}</p>
+    }
+    <div class="toolbar">
+      <label
+        >Manage<select [(ngModel)]="kind" (change)="changeKind()" [disabled]="busy() || loading()">
+          @for (item of kinds; track item) {
+            <option [value]="item">{{ labels[item] }}</option>
+          }
+        </select></label
+      >
+      <label>Search<input [(ngModel)]="search" maxlength="160" (keyup.enter)="load()" /></label>
+      <label
+        >Status<select [(ngModel)]="status">
+          <option value="active">Active</option>
+          <option value="archived">Archived</option>
+          <option value="all">All</option>
+        </select></label
+      >
+      <label
+        >Sort<select [(ngModel)]="sort">
+          <option value="name">Name</option>
+          <option value="code">Code</option>
+          <option value="updated">Recently updated</option>
+        </select></label
+      >
+      <button (click)="load()" [disabled]="loading() || busy()">Apply filters</button>
+    </div>
+    @if (loading()) {
+      <p role="status">Loading {{ labels[kind].toLowerCase() }}…</p>
+    } @else {
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Code</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (record of rows().items; track record.id) {
+              <tr>
+                <td>{{ record.name }}</td>
+                <td>{{ record.code }}</td>
+                <td>{{ record.status }}</td>
+                <td>
+                  <button (click)="edit(record)" [disabled]="busy()">Details</button>
+                  @if (record.status === 'active') {
+                    <button (click)="confirmation.set(record)" [disabled]="busy()">Archive</button>
+                  }
+                </td>
+              </tr>
+            } @empty {
+              <tr>
+                <td colspan="4">
+                  No matching {{ labels[kind].toLowerCase() }}. Create your first record below or
+                  adjust the filters.
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button (click)="load(rows().page - 1)" [disabled]="rows().page === 1">Previous</button
+        ><span>Page {{ rows().page }} · {{ rows().total }} records</span
+        ><button (click)="load(rows().page + 1)" [disabled]="rows().page * 25 >= rows().total">
+          Next
+        </button>
+      </div>
+    }
+    @if (confirmation(); as record) {
+      <p>
+        Archive {{ record.name }}? First move or archive active records that depend on it. History
+        will be retained.
+      </p>
+      <button (click)="archive()" [disabled]="busy()">Confirm archive</button
+      ><button (click)="confirmation.set(null)">Cancel</button>
+    }
+    <h3>{{ selected() ? 'Edit record' : 'Create record' }} · {{ labels[kind] }}</h3>
+    <form [formGroup]="form" (ngSubmit)="save()">
+      <fieldset [disabled]="busy() || selected()?.status === 'archived'">
+        <label
+          >{{ kind === 'positions' ? 'Position title' : 'Name'
+          }}<input formControlName="name" maxlength="160"
+        /></label>
+        <label>Code<input formControlName="code" maxlength="40" /></label>
+        <label
+          >Description / responsibilities<textarea
+            formControlName="description"
+            maxlength="2000"
+          ></textarea>
+        </label>
+        @if (kind === 'levels') {
+          <label
+            >Rank<input formControlName="rank" type="number" min="0" max="10000" step="1" /><small
+              >Use your organization's ordering, for example 1 for Junior and 3 for Senior.</small
+            ></label
+          >
+        }
+        @for (field of referenceFields(); track field.key) {
+          <div>
+            <af-record-picker
+              [url]="base + '/' + field.path"
+              [label]="field.label"
+              [disabled]="busy() || selected()?.status === 'archived'"
+              (chosen)="choose(field, $event)"
+            />
+            <p>{{ referenceNames[field.key] || 'Choose a record' }}</p>
+            @if (field.optional) {
+              <button type="button" (click)="choose(field, null)">No reporting position</button>
+            }
+          </div>
+        }
+        <button [disabled]="!valid() || busy() || selected()?.status === 'archived'">
+          {{ busy() ? 'Saving…' : 'Save record' }}
+        </button>
+      </fieldset>
+    </form>
+  </section>
+}
