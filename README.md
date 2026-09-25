@@ -102,8 +102,10 @@ Agents Foundry is evolving into a governed platform for many AI employee roles, 
 plane, agent runtime, execution runtime and declarative role packages kept separate. Phase A
 (generic execution contracts, the thread/run/step/event model, artifacts, Agent Manifest v2 and
 the `agents-foundry/runtime/v1` protocol), Phase B (a versioned, digest-pinned agent catalog
-with organization installations) and Phase C (a separate agent runtime process with a kernel,
-model gateway, signed transport and approval pause/resume) are implemented. Generic runs are
+with organization installations), Phase C (a separate agent runtime process with a kernel,
+model gateway, signed transport and approval pause/resume) and Phase D (the Action Gateway:
+Policy v2, expiring payload-bound approvals, single-use connector execution and Jira issue
+creation) are implemented. Generic runs are
 off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
 
 - [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
@@ -111,8 +113,9 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
   [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0011](docs/adr/0011-runtime-transport-and-workload-identity.md)
+  [0012](docs/adr/0012-action-gateway-execution.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
+- Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 
