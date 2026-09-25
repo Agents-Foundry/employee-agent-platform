@@ -414,7 +414,8 @@ it('backfills legacy identities and leaves employees without login unlinked', ()
       .prepare('INSERT INTO auth_sessions VALUES (?,?,?,?)')
       .run('legacy-session', LOCAL_ISSUER, 'legacy-admin', Date.now() + 60000);
     migrateOrganization(sql, 3);
-    migrateOrganization(sql);
+    // This fixture builds only the identity tables; migration 6 needs the full baseline schema.
+    migrateOrganization(sql, 5);
     const admin = sql.prepare('SELECT user_id FROM employees WHERE id=?').get('legacy-admin')![
       'user_id'
     ];

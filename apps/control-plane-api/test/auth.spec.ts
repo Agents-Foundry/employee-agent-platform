@@ -7,6 +7,7 @@ import request from 'supertest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { ControlPlaneDatabase } from '../src/database.js';
+import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import {
   GoogleSignIn,
   GOOGLE_ISSUER,
@@ -112,8 +113,9 @@ describe('Google Workspace sessions and tenant authorization', () => {
   }
   function assignedAgent(employeeId: string, org: string, admin: string) {
     const pending = db.requestProvisioning(employeeId, provisioning, org);
-    return db.decideProvisioning(pending.id, org, admin, 'APPROVED', 'Pilot').manifest!.payload
-      .agentId;
+    return manifestSubject(
+      db.decideProvisioning(pending.id, org, admin, 'APPROVED', 'Pilot').manifest!.payload,
+    ).agentId;
   }
 
   it('binds a one-use callback to the browser, validates Google identity, and issues an HttpOnly session', async () => {

@@ -15,9 +15,10 @@ import type {
   Organization,
   QaRun,
   QaRunStatus,
+  AgentRunStatus,
   ProvisioningInput,
   ProvisioningRequest,
-  SignedAgentManifest,
+  AnySignedAgentManifest,
   LifecycleEvent,
   Actor,
   AdminAgentInput,
@@ -30,6 +31,10 @@ import { migrateOrganization } from './migrations/index.js';
 import { OrganizationStructureService } from './organization/structure-service.js';
 import { JobArchitectureService } from './organization/job-service.js';
 import { TenancyService } from './organization/tenancy-service.js';
+import { ExecutionService } from './execution/execution-service.js';
+import { buildManifestPayload, type ManifestIssue } from './agents/manifest-v2.js';
+import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
+import { parseSignedManifest } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 
 const ORGANIZATION_ID = 'org_agents_foundry';
 const EMPLOYEE_ID = 'employee_qa_demo';
@@ -53,8 +58,17 @@ export class ControlPlaneDatabase {
   readonly structure: OrganizationStructureService;
   readonly jobs: JobArchitectureService;
   readonly tenancy: TenancyService;
+  readonly execution: ExecutionService;
+  /** ADR 0004: new agents receive agents-foundry/v2 manifests only when explicitly enabled. */
+  readonly manifestV2Issuance: boolean;
 
-  constructor(path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db', seedDemo = true) {
+  constructor(
+    path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db',
+    seedDemo = true,
+    options: { manifestV2Issuance?: boolean } = {},
+  ) {
+    this.manifestV2Issuance =
+      options.manifestV2Issuance ?? process.env['AGENT_MANIFEST_V2_ISSUANCE_ENABLED'] === 'true';
     this.signer =
       path === ':memory:'
         ? new ManifestSigner()
@@ -76,6 +90,9 @@ export class ControlPlaneDatabase {
     this.structure = new OrganizationStructureService(this.db);
     this.jobs = new JobArchitectureService(this.db, this.structure);
     this.tenancy = new TenancyService(this.db, this.structure);
+    this.execution = new ExecutionService(this.db, (agentId, organizationId, employeeId) =>
+      this.getManifest(agentId, organizationId, employeeId),
+    );
     if (seedDemo) this.seed();
   }
 
@@ -925,25 +942,21 @@ export class ControlPlaneDatabase {
       for (const employee of recipients) {
         const agentId = randomUUID(),
           createdAt = now();
-        const manifest = this.signer.sign({
-          apiVersion: 'agents-foundry/v1',
+        const manifest = this.issueManifest({
           manifestId: randomUUID(),
           agentId,
           organizationId: actor.organizationId,
           employeeId: employee.id,
-          blueprint: { id: input.blueprintId, version: input.blueprintVersion },
-          model: {
-            provider: input.provider,
-            model: input.model,
-            credentialMode: input.credentialMode,
-          },
+          issuedAt: createdAt,
+          agentName: input.name,
+          blueprintId: input.blueprintId,
+          blueprintVersion: input.blueprintVersion,
+          provider: input.provider,
+          model: input.model,
+          credentialMode: input.credentialMode,
           answers: input.answers,
           capabilities: structuredClone(qaBlueprint.capabilities),
-          conversationSync: 'REQUIRED',
-          policyVersion: 'foundation-approval-v1',
-          issuedAt: createdAt,
         });
-        if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
         this.db
           .prepare(
             'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -994,7 +1007,11 @@ export class ControlPlaneDatabase {
           'agent.manifest.issued',
           'agent',
           agentId,
-          { manifestId: manifest.payload.manifestId, keyId: manifest.keyId },
+          {
+            manifestId: manifestSubject(manifest.payload).manifestId,
+            apiVersion: manifest.payload.apiVersion,
+            keyId: manifest.keyId,
+          },
           actor.organizationId,
         );
         assignments.push({
@@ -1063,28 +1080,25 @@ export class ControlPlaneDatabase {
         decidedAt: now(),
         decisionReason: reason,
       });
-      let manifest: SignedAgentManifest | undefined;
+      let manifest: AnySignedAgentManifest | undefined;
       if (decision === 'APPROVED') {
         request.agentId = randomUUID();
-        manifest = this.signer.sign({
-          apiVersion: 'agents-foundry/v1',
+        const agentName = `${qaBlueprint.title} · ${request.answers['projectName']}`;
+        manifest = this.issueManifest({
           manifestId: randomUUID(),
           agentId: request.agentId,
           organizationId,
           employeeId: request.employeeId,
-          blueprint: { id: request.blueprintId, version: request.blueprintVersion },
-          model: {
-            provider: request.provider,
-            model: request.model,
-            credentialMode: request.credentialMode,
-          },
+          issuedAt: request.decidedAt!,
+          agentName,
+          blueprintId: request.blueprintId,
+          blueprintVersion: request.blueprintVersion,
+          provider: request.provider,
+          model: request.model,
+          credentialMode: request.credentialMode,
           answers: request.answers,
           capabilities: request.capabilities,
-          conversationSync: 'REQUIRED',
-          policyVersion: 'foundation-approval-v1',
-          issuedAt: request.decidedAt!,
         });
-        if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
         this.db
           .prepare(
             'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -1092,7 +1106,7 @@ export class ControlPlaneDatabase {
           .run(
             request.agentId,
             organizationId,
-            `${qaBlueprint.title} · ${request.answers['projectName']}`,
+            agentName,
             qaBlueprint.department,
             'QA',
             'ACTIVE',
@@ -1111,7 +1125,8 @@ export class ControlPlaneDatabase {
           'agent',
           request.agentId,
           {
-            manifestId: manifest.payload.manifestId,
+            manifestId: manifestSubject(manifest.payload).manifestId,
+            apiVersion: manifest.payload.apiVersion,
             keyId: manifest.keyId,
           },
           organizationId,
@@ -1136,7 +1151,20 @@ export class ControlPlaneDatabase {
     }
   }
 
-  getManifest(agentId: string, organizationId: string, employeeId?: string): SignedAgentManifest {
+  private issueManifest(issue: ManifestIssue): AnySignedAgentManifest {
+    const manifest = this.signer.sign(
+      buildManifestPayload(issue, this.manifestV2Issuance),
+    ) as AnySignedAgentManifest;
+    if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
+    return manifest;
+  }
+
+  /** Fails closed on unknown versions, malformed structure, bad signatures or rebinding. */
+  getManifest(
+    agentId: string,
+    organizationId: string,
+    employeeId?: string,
+  ): AnySignedAgentManifest {
     const row = this.db
       .prepare(
         'SELECT body, employee_id FROM agent_manifests WHERE agent_id = ? AND organization_id = ?',
@@ -1144,8 +1172,20 @@ export class ControlPlaneDatabase {
       .get(agentId, organizationId) as { body: string; employee_id: string } | undefined;
     if (!row || (employeeId && row.employee_id !== employeeId))
       throw new Error('MANIFEST_NOT_FOUND');
-    const manifest = JSON.parse(row.body) as SignedAgentManifest;
-    if (!this.signer.verify(manifest)) throw new Error('MANIFEST_INVALID');
+    let manifest: AnySignedAgentManifest;
+    try {
+      manifest = parseSignedManifest(JSON.parse(row.body));
+    } catch {
+      throw new Error('MANIFEST_INVALID');
+    }
+    const subject = manifestSubject(manifest.payload);
+    if (
+      !this.signer.verify(manifest) ||
+      subject.agentId !== agentId ||
+      subject.organizationId !== organizationId ||
+      subject.employeeId !== row.employee_id
+    )
+      throw new Error('MANIFEST_INVALID');
     return manifest;
   }
 
@@ -1318,11 +1358,18 @@ export class ControlPlaneDatabase {
     },
     organizationId = ORGANIZATION_ID,
     allowDemo = true,
-  ): { run: QaRun; approval: Approval } {
+  ): {
+    run: QaRun;
+    approval: Approval;
+    agentRun: { id: string; threadId: string; status: AgentRunStatus };
+  } {
     const conversation = this.getConversation(input.conversationId, organizationId);
     if (conversation.employeeId !== input.employeeId) throw new Error('CONVERSATION_FORBIDDEN');
-    if (conversation.agentId !== AGENT_ID || !allowDemo)
-      this.getManifest(conversation.agentId, organizationId, input.employeeId);
+    const manifest =
+      conversation.agentId !== AGENT_ID || !allowDemo
+        ? this.getManifest(conversation.agentId, organizationId, input.employeeId)
+        : null;
+    let agentRun: { id: string; threadId: string; status: AgentRunStatus };
     const runId = randomUUID();
     const approvalId = randomUUID();
     const timestamp = now();
@@ -1374,6 +1421,21 @@ export class ControlPlaneDatabase {
         },
         organizationId,
       );
+      // ADR 0003: the generic run is written in the same transaction as the legacy record.
+      agentRun = this.execution.recordLegacyQaRun({
+        organizationId,
+        employeeId: input.employeeId,
+        agentId: conversation.agentId,
+        conversationId: conversation.id,
+        conversationTitle: conversation.title,
+        qaRunId: runId,
+        approvalId,
+        storyKey: input.storyKey,
+        targetUrl: input.targetUrl,
+        plan: input.plan,
+        approvalSummary: input.approvalSummary,
+        manifest,
+      });
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -1382,6 +1444,7 @@ export class ControlPlaneDatabase {
     return {
       run: this.getQaRun(runId, organizationId),
       approval: this.getApproval(approvalId, organizationId),
+      agentRun,
     };
   }
 
@@ -1389,7 +1452,7 @@ export class ControlPlaneDatabase {
     const rows = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
-                risk, summary, status, decided_by, decided_at, created_at
+                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id
          FROM approvals WHERE organization_id = ? ORDER BY created_at DESC`,
       )
       .all(organizationId) as Record<string, unknown>[];
@@ -1405,16 +1468,18 @@ export class ControlPlaneDatabase {
     organizationId = ORGANIZATION_ID,
   ): Approval {
     const timestamp = now();
-    const approval = this.getApproval(id, organizationId);
-    if (approval.requestedBy === actorId) throw new Error('SELF_APPROVAL_FORBIDDEN');
-    if (approval.status !== 'PENDING') throw new Error('APPROVAL_ALREADY_DECIDED');
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      // Read inside the write transaction so concurrent decisions cannot both succeed.
+      const approval = this.getApproval(id, organizationId);
+      if (approval.requestedBy === actorId) throw new Error('SELF_APPROVAL_FORBIDDEN');
+      if (approval.status !== 'PENDING') throw new Error('APPROVAL_ALREADY_DECIDED');
       this.db
         .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?')
         .run(status, actorId, timestamp, id);
       const runStatus: QaRunStatus = status === 'APPROVED' ? 'READY' : 'REJECTED';
       this.db.prepare('UPDATE qa_runs SET status = ? WHERE approval_id = ?').run(runStatus, id);
+      this.execution.onApprovalDecided(organizationId, id, status, actorId);
       this.audit(
         actorId,
         `approval.${status.toLowerCase()}`,
@@ -1459,7 +1524,7 @@ export class ControlPlaneDatabase {
     const row = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
-                risk, summary, status, decided_by, decided_at, created_at FROM approvals WHERE id = ? AND organization_id = ?`,
+                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id FROM approvals WHERE id = ? AND organization_id = ?`,
       )
       .get(id, organizationId) as Record<string, unknown> | undefined;
     if (!row) throw new Error('APPROVAL_NOT_FOUND');
@@ -1698,6 +1763,8 @@ export class ControlPlaneDatabase {
       ...(row['decided_by'] ? { decidedBy: String(row['decided_by']) } : {}),
       ...(row['decided_at'] ? { decidedAt: String(row['decided_at']) } : {}),
       createdAt: String(row['created_at']),
+      ...(row['run_id'] ? { runId: String(row['run_id']) } : {}),
+      ...(row['step_id'] ? { stepId: String(row['step_id']) } : {}),
     };
   }
 }

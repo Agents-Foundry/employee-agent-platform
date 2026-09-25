@@ -83,6 +83,10 @@ The seeded demo agent remains available for the original QA flow. Model preferen
 5. An admin approves or rejects the request in the control plane.
 6. Approval changes the run to `READY`; actual isolated execution is the next milestone.
 
+Each QA request is also recorded as a role-independent generic run (thread, run, steps and
+append-only events), readable through `/api/execution/v1`. Approval re-queues that run for a
+future runtime and rejection cancels it. See [Architecture V2](docs/architecture-v2.md).
+
 No raw provider key is stored. A future vault integration stores secrets and provides only opaque secret references to the control plane.
 
 ## Current milestone boundary
@@ -90,6 +94,19 @@ No raw provider key is stored. A future vault integration stores secrets and pro
 Foundation Milestone 1 intentionally stops before live Jira/Bitbucket connectors, LLM calls, and Playwright execution. Those integrations will be added behind the existing policy and approval contracts so no external write or browser run can bypass governance.
 
 See [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), and the [security model](docs/security.md).
+
+## Architecture V2 (in progress)
+
+Agents Foundry is evolving into a governed platform for many AI employee roles, with the control
+plane, agent runtime, execution runtime and declarative role packages kept separate. Phase A
+(generic execution contracts, the thread/run/step/event model, artifacts, Agent Manifest v2 and
+the `agents-foundry/runtime/v1` protocol) is implemented. No agent runtime executes runs yet.
+
+- [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
+- [Migration plan](docs/migration-plan.md), [runtime protocol](docs/runtime-protocol.md),
+  [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md)
+- ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
+  [0009](docs/adr/0009-role-packages-are-declarative.md)
 
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 

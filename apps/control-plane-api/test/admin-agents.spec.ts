@@ -89,6 +89,8 @@ describe('admin-created agent assignments', () => {
           organizationId: employee.organizationId,
         }),
       ).toBe(true);
+      // Manifest v1 remains the default issued format (ADR 0004).
+      if (manifest.payload.apiVersion !== 'agents-foundry/v1') throw new Error('EXPECTED_V1');
       expect(manifest.payload.capabilities).toContainEqual({
         action: 'qa.execute_playwright',
         outcome: 'REQUIRE_APPROVAL',
