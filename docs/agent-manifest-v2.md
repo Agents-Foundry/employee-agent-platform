@@ -10,9 +10,9 @@ resolved, signed runtime configuration of one employee-assigned agent. Types liv
   Admin-created agents and approved provisioning requests both use it.
 - Verification: the server (`getManifest`) and the desktop (`verifyManifest`) accept v1 and v2.
   Unknown versions fail closed.
-- Resolution: a Phase A compatibility adapter (`apps/control-plane-api/src/agents/manifest-v2.ts`)
-  maps the QA blueprint and questionnaire answers into v2 sections. It is replaced by the
-  catalog in Phase B.
+- Resolution: `apps/control-plane-api/src/agents/manifest-v2.ts` resolves a catalog bundle and
+  validated answers into v2 sections, with no role-specific code. Connectors and MCP servers
+  follow the blueprint's declared answer mappings. See [agent catalog](agent-catalog.md).
 - Runtime use: `run.submit` accepts only v2 manifests. No runtime consumes them yet.
 
 ## Shape
@@ -20,7 +20,8 @@ resolved, signed runtime configuration of one employee-assigned agent. Types liv
 ```yaml
 apiVersion: agents-foundry/v2
 kind: AgentManifest
-metadata: { manifestId, agentId, organizationId, employeeId, issuedAt, blueprint: { id, version } }
+metadata: { manifestId, agentId, organizationId, employeeId, issuedAt,
+            blueprint: { id, version, digest }, installationId? }   # digest and installationId since Phase B
 identity: { name, role: qa-engineer, department: Engineering }
 persona: { profile: qa-engineer-default }
 runtime: { profile: standard-agent, isolation: sandboxed }

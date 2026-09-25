@@ -18,6 +18,6 @@ application security permissions.
 
 ## Consequences
 
-- Phase A's QA compatibility adapter (`apps/control-plane-api/src/agents/manifest-v2.ts`) is a
-  blueprint-to-manifest mapping, not runtime behaviour. The catalog replaces it in Phase B.
+- Phase A's QA compatibility adapter was replaced in Phase B by declarative catalog data and a
+  generic resolver. A test adds a second role purely as data (see `docs/agent-catalog.md`).
 - The Frontend Engineer role (Phase G) is the acceptance test for this ADR.

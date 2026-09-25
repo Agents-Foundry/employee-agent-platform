@@ -49,7 +49,7 @@ Conversation ─┐
 Each subsystem gets its own document in the phase that implements it, so design text does not
 drift from code. Until then these summaries are binding constraints:
 
-- **Catalog (Phase B).** A global `AgentBlueprintVersion` is installed per organization
+- **Catalog (Phase B, implemented; see [agent-catalog.md](agent-catalog.md)).** A global `AgentBlueprintVersion` is installed per organization
   (`OrganizationAgentInstallation`, with connector and project customization) and instantiated per
   employee (`AgentInstance`, `EmployeeAgentAssignment`). The result is resolved into a signed
   `ResolvedAgentManifest`. Blueprint updates create new versions and never mutate active manifests.
