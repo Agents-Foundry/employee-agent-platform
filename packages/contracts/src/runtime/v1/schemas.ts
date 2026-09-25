@@ -260,7 +260,10 @@ export const manifestV2PayloadSchema = z
         organizationId: recordId,
         employeeId: recordId,
         issuedAt: timestamp,
-        blueprint: z.object({ id: z.string().max(120), version: semver }).strict(),
+        blueprint: z
+          .object({ id: z.string().max(120), version: semver, digest: digest.optional() })
+          .strict(),
+        installationId: uuid.optional(),
       })
       .strict(),
     identity: z.object({ name: shortText, role: slug, department: shortText }).strict(),

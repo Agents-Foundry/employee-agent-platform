@@ -23,15 +23,19 @@ import type {
   Actor,
   AdminAgentInput,
   AgentAssignment,
+  CatalogDefinitions,
 } from '@agents-foundry/contracts';
 import type { IdentityEntry } from './identity-directory.js';
 import { ManifestSigner } from './manifest-signing.js';
-import { qaBlueprint } from './blueprints.js';
 import { migrateOrganization } from './migrations/index.js';
 import { OrganizationStructureService } from './organization/structure-service.js';
 import { JobArchitectureService } from './organization/job-service.js';
 import { TenancyService } from './organization/tenancy-service.js';
 import { ExecutionService } from './execution/execution-service.js';
+import { CatalogService, agentLabel } from './catalog/catalog-service.js';
+import { InstallationService } from './catalog/installation-service.js';
+import { OrganizationDomainError } from './organization/structure-service.js';
+import { builtInCatalog } from '../../../packages/catalog/src/index.js';
 import { buildManifestPayload, type ManifestIssue } from './agents/manifest-v2.js';
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { parseSignedManifest } from '../../../packages/contracts/src/runtime/v1/schemas.js';
@@ -59,13 +63,15 @@ export class ControlPlaneDatabase {
   readonly jobs: JobArchitectureService;
   readonly tenancy: TenancyService;
   readonly execution: ExecutionService;
+  readonly catalog: CatalogService;
+  readonly installations: InstallationService;
   /** ADR 0004: new agents receive agents-foundry/v2 manifests only when explicitly enabled. */
   readonly manifestV2Issuance: boolean;
 
   constructor(
     path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db',
     seedDemo = true,
-    options: { manifestV2Issuance?: boolean } = {},
+    options: { manifestV2Issuance?: boolean; catalog?: CatalogDefinitions } = {},
   ) {
     this.manifestV2Issuance =
       options.manifestV2Issuance ?? process.env['AGENT_MANIFEST_V2_ISSUANCE_ENABLED'] === 'true';
@@ -90,6 +96,14 @@ export class ControlPlaneDatabase {
     this.structure = new OrganizationStructureService(this.db);
     this.jobs = new JobArchitectureService(this.db, this.structure);
     this.tenancy = new TenancyService(this.db, this.structure);
+    // Validates and registers the shipped catalog; a mutated released version fails startup.
+    try {
+      this.catalog = new CatalogService(this.db, options.catalog ?? builtInCatalog);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    this.installations = new InstallationService(this.db, this.catalog, this.structure);
     this.execution = new ExecutionService(this.db, (agentId, organizationId, employeeId) =>
       this.getManifest(agentId, organizationId, employeeId),
     );
@@ -856,13 +870,15 @@ export class ControlPlaneDatabase {
         .get(employeeId, organizationId)
     )
       throw new Error('ACTOR_FORBIDDEN');
+    const bundle = this.catalog.bundle(input.blueprintId, input.blueprintVersion);
     const request: ProvisioningRequest = {
       ...input,
+      answers: this.catalog.validateAnswers(bundle, input.answers, 'ALL'),
       id: randomUUID(),
       organizationId,
       employeeId,
       status: 'PENDING',
-      capabilities: structuredClone(qaBlueprint.capabilities),
+      capabilities: bundle.capabilities,
       createdAt: now(),
     };
     this.db.exec('BEGIN IMMEDIATE');
@@ -922,6 +938,19 @@ export class ControlPlaneDatabase {
         this.db.exec('COMMIT');
         return JSON.parse(previous.result) as AgentAssignment[];
       }
+      // Resolved after the replay check: an unchanged retry returns its original result even
+      // if the installation was retired since. Retirement still blocks new agents (trigger).
+      const bundle = this.catalog.bundle(input.blueprintId, input.blueprintVersion);
+      const installation = input.installationId
+        ? this.installations.activeInstallation(actor.organizationId, input.installationId)
+        : null;
+      if (
+        installation &&
+        (installation.blueprintId !== input.blueprintId ||
+          installation.blueprintVersion !== input.blueprintVersion)
+      )
+        throw new OrganizationDomainError(409, 'INSTALLATION_BLUEPRINT_MISMATCH');
+      const answers = this.catalog.resolveAnswers(bundle, installation, input.answers);
       // Check every recipient before creating anything; invitations and disabled users are ineligible.
       const recipients = input.employeeIds.map((employeeId) => {
         const employee = this.db
@@ -949,28 +978,29 @@ export class ControlPlaneDatabase {
           employeeId: employee.id,
           issuedAt: createdAt,
           agentName: input.name,
-          blueprintId: input.blueprintId,
-          blueprintVersion: input.blueprintVersion,
+          bundle,
+          installationId: installation?.id ?? null,
           provider: input.provider,
           model: input.model,
           credentialMode: input.credentialMode,
-          answers: input.answers,
-          capabilities: structuredClone(qaBlueprint.capabilities),
+          answers,
+          capabilities: structuredClone(bundle.capabilities),
         });
         this.db
           .prepare(
-            'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO agents (id, organization_id, name, department, team, status, capabilities, installation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           )
           .run(
             agentId,
             actor.organizationId,
             input.name,
-            qaBlueprint.department,
+            bundle.blueprint.department,
             employee.team,
             'ACTIVE',
             JSON.stringify(
-              qaBlueprint.capabilities.filter((c) => c.outcome !== 'DENY').map((c) => c.action),
+              bundle.capabilities.filter((c) => c.outcome !== 'DENY').map((c) => c.action),
             ),
+            installation?.id ?? null,
           );
         this.db
           .prepare(
@@ -990,6 +1020,8 @@ export class ControlPlaneDatabase {
           {
             blueprintId: input.blueprintId,
             blueprintVersion: input.blueprintVersion,
+            blueprintDigest: bundle.digest,
+            installationId: installation?.id ?? null,
             requestId: input.requestId,
           },
           actor.organizationId,
@@ -1083,7 +1115,8 @@ export class ControlPlaneDatabase {
       let manifest: AnySignedAgentManifest | undefined;
       if (decision === 'APPROVED') {
         request.agentId = randomUUID();
-        const agentName = `${qaBlueprint.title} · ${request.answers['projectName']}`;
+        const bundle = this.catalog.bundle(request.blueprintId, request.blueprintVersion);
+        const agentName = agentLabel(bundle, request.answers);
         manifest = this.issueManifest({
           manifestId: randomUUID(),
           agentId: request.agentId,
@@ -1091,8 +1124,8 @@ export class ControlPlaneDatabase {
           employeeId: request.employeeId,
           issuedAt: request.decidedAt!,
           agentName,
-          blueprintId: request.blueprintId,
-          blueprintVersion: request.blueprintVersion,
+          bundle,
+          installationId: null,
           provider: request.provider,
           model: request.model,
           credentialMode: request.credentialMode,
@@ -1107,8 +1140,8 @@ export class ControlPlaneDatabase {
             request.agentId,
             organizationId,
             agentName,
-            qaBlueprint.department,
-            'QA',
+            bundle.blueprint.department,
+            this.employeeTeam(request.employeeId, organizationId),
             'ACTIVE',
             JSON.stringify(
               request.capabilities.filter((c) => c.outcome !== 'DENY').map((c) => c.action),
@@ -1149,6 +1182,13 @@ export class ControlPlaneDatabase {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  private employeeTeam(employeeId: string, organizationId: string): string {
+    const row = this.db
+      .prepare('SELECT team FROM employees WHERE id = ? AND organization_id = ?')
+      .get(employeeId, organizationId) as { team: string } | undefined;
+    return row?.team ?? '';
   }
 
   private issueManifest(issue: ManifestIssue): AnySignedAgentManifest {
