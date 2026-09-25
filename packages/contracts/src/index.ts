@@ -7,6 +7,8 @@ export type * from './manifest-v2.js';
 export type * from './runtime/v1/protocol.js';
 export * from './runtime/v1/transport.js';
 export type * from './catalog.js';
+export * from './actions.js';
+import type { ActionApprovalStatus } from './actions.js';
 import type { AgentManifestV2Payload } from './manifest-v2.js';
 import type { AgentRunStatus } from './execution.js';
 
@@ -221,10 +223,12 @@ export interface Approval {
   resourceId: Identifier;
   risk: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   summary: string;
-  status: ApprovalStatus;
+  status: ActionApprovalStatus;
   decidedBy?: Identifier;
   decidedAt?: string;
   createdAt: string;
+  /** After this instant a pending or unused approval can no longer be acted on (Phase D). */
+  expiresAt?: string;
   /** Generic run and step this approval pauses, when linked (migration 006). */
   runId?: Identifier;
   stepId?: Identifier;

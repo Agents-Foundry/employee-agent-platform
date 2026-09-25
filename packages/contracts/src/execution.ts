@@ -124,6 +124,7 @@ export const controlPlaneEventTypes = [
   'approval.requested',
   'approval.approved',
   'approval.rejected',
+  'approval.expired',
 ] as const;
 
 /** Events an agent runtime may emit through `agents-foundry/runtime/v1`. */
@@ -315,10 +316,11 @@ export interface RunApprovalSummary {
   id: string;
   action: string;
   risk: ApprovalRisk;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
   stepId: string | null;
   createdAt: Iso8601;
   decidedAt?: Iso8601;
+  expiresAt?: Iso8601;
 }
 
 export interface AgentRunDetail {
