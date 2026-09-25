@@ -1,10 +1,12 @@
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { RuntimeEventEnvelope } from '@agents-foundry/contracts';
 import { ScriptedProvider, type ModelScript } from '../src/models/scripted-provider.js';
 import { EnvironmentCredentialBroker } from '../src/models/model-gateway.js';
 import { ArtifactTool } from '../src/tools/artifact-tool.js';
+import { IssueTrackerTool } from '../src/tools/issue-tracker-tool.js';
+import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
 import type { RuntimeTool } from '../src/tools/runtime-tool.js';
 import { FakeControlPlane, correlation, createHost, signedManifest } from './fixtures.js';
 
@@ -376,5 +378,75 @@ describe('runtime host and native kernel', () => {
     expect(host.activeRuns).toBe(0);
     expect(controlPlane.types(subject.runId)).not.toContain('tool.completed');
     expect(controlPlane.types(subject.runId)).not.toContain('run.completed');
+  });
+
+  it('sends the exact issue payload, then lets the control plane execute it after approval', async () => {
+    const controlPlane = new FakeControlPlane();
+    const subject = correlation();
+    const approvalId = randomUUID();
+    const draft = {
+      projectKey: 'QA',
+      summary: 'Broken total',
+      description: 'Steps',
+      issueType: 'Bug',
+    };
+    controlPlane.decide = (request) => ({
+      requestId: request.requestId,
+      decision: 'APPROVAL_REQUIRED',
+      risk: 'MEDIUM',
+      reason: 'needs approval',
+      approvalId,
+    });
+    controlPlane.submit(subject, signedManifest(subject));
+    const { host } = createHost({
+      controlPlane,
+      provider: new ScriptedProvider('test-provider', once('issue-tracker', draft)),
+      tools: [new IssueTrackerTool()],
+    });
+    await host.pollOnce();
+    await host.drain();
+    const [request] = controlPlane.actions;
+    expect(request).toMatchObject({ action: 'jira.issue.create', parameters: draft });
+    expect(request!.inputDigest).toBe(
+      createHash('sha256').update(canonicalManifest(draft)).digest('hex'),
+    );
+    expect(payloadOf(controlPlane.events, 'tool.requested')).toMatchObject({
+      inputDigest: request!.inputDigest,
+    });
+    expect(controlPlane.executions).toEqual([]);
+
+    controlPlane.resume(subject, approvalId);
+    await host.pollOnce();
+    await host.drain();
+    expect(controlPlane.executions).toEqual([
+      expect.objectContaining({ requestId: request!.requestId, correlation: request!.correlation }),
+    ]);
+    expect(controlPlane.types(subject.runId).at(-1)).toBe('run.completed');
+
+    // A refused execution surfaces its code to the model and fails the step, not the run.
+    const refused = new FakeControlPlane();
+    refused.execute = (execute) => ({
+      requestId: execute.requestId,
+      status: 'FAILED',
+      error: { code: 'SECRET_UNRESOLVED', message: 'The connection credential is unavailable.' },
+    });
+    const second = correlation();
+    refused.submit(second, signedManifest(second));
+    const seen: string[] = [];
+    const other = createHost({
+      controlPlane: refused,
+      provider: new ScriptedProvider('test-provider', (req, turn) => {
+        for (const message of req.messages)
+          for (const block of message.content)
+            if (block.type === 'tool_result') seen.push(block.content);
+        return once('issue-tracker', draft)(req, turn);
+      }),
+      tools: [new IssueTrackerTool()],
+    });
+    await other.host.pollOnce();
+    await other.host.drain();
+    expect(seen).toContain('SECRET_UNRESOLVED: The connection credential is unavailable.');
+    expect(refused.types(second.runId)).toContain('step.failed');
+    expect(refused.types(second.runId).at(-1)).toBe('run.completed');
   });
 });

@@ -2,6 +2,8 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import type {
   AgentManifestV2Payload,
   RuntimeActionDecision,
+  RuntimeActionExecuteRequest,
+  RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeClaimResponse,
   RuntimeCorrelation,
@@ -123,6 +125,18 @@ export class FakeControlPlane implements ControlPlanePort {
   async requestAction(request: RuntimeActionRequest): Promise<RuntimeActionDecision> {
     this.actions.push(request);
     return this.decide(request);
+  }
+
+  readonly executions: RuntimeActionExecuteRequest[] = [];
+  execute: (request: RuntimeActionExecuteRequest) => RuntimeActionExecution = (request) => ({
+    requestId: request.requestId,
+    status: 'SUCCEEDED',
+    result: { issueKey: 'QA-1', url: 'https://jira.example.com/browse/QA-1' },
+  });
+
+  async executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution> {
+    this.executions.push(request);
+    return this.execute(request);
   }
 
   types(runId: string): string[] {

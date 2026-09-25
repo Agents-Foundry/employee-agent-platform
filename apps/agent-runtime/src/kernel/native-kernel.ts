@@ -16,7 +16,7 @@ interface PendingTurn {
   toolUses: ToolUse[];
   results: ModelContent[];
   index: number;
-  awaiting: { approvalId: string; stepId: string; toolCallId: string } | null;
+  awaiting: { approvalId: string; stepId: string; toolCallId: string; requestId: string } | null;
 }
 
 /** Checkpointed between a pause and its resume. Contains conversation content: keep it local. */
@@ -225,10 +225,18 @@ export class NativeKernel implements AgentKernel {
       );
       return result(`Tool ${safeLabel(use.name)} is not available.`, true);
     }
+    // The digest covers the validated input, so it equals the parameters the control plane
+    // checks and binds approvals to.
     let input: unknown;
+    let parseError: unknown = null;
+    try {
+      input = tool.parse(use.input);
+    } catch (error) {
+      parseError = error;
+    }
     let inputDigest: string;
     try {
-      inputDigest = digest(use.input ?? null);
+      inputDigest = digest(parseError ? (use.input ?? null) : (input ?? null));
     } catch {
       inputDigest = digest(null);
     }
@@ -238,18 +246,16 @@ export class NativeKernel implements AgentKernel {
         { toolCallId, toolId: tool.id, toolVersion: tool.version, inputDigest },
         stepId,
       );
-    try {
-      input = tool.parse(use.input);
-    } catch (error) {
+    if (parseError)
       return this.toolFailed(
         context,
         stepId,
         toolCallId,
         0,
-        new RuntimeFailure('TOOL_INPUT_INVALID', invalidInputMessage(error)),
+        new RuntimeFailure('TOOL_INPUT_INVALID', invalidInputMessage(parseError)),
         result,
       );
-    }
+    let requestId = resumed?.requestId ?? null;
     if (!resumed) {
       const action = tool.governedAction(input);
       if (action) {
@@ -260,7 +266,9 @@ export class NativeKernel implements AgentKernel {
           toolVersion: tool.version,
           inputDigest,
           summary: tool.summarize(input).slice(0, 500),
+          ...(tool.sendsParameters ? { parameters: input as Record<string, unknown> } : {}),
         });
+        requestId = decision.requestId;
         if (decision.decision === 'DENIED')
           return this.toolFailed(
             context,
@@ -271,7 +279,12 @@ export class NativeKernel implements AgentKernel {
             result,
           );
         if (decision.decision === 'APPROVAL_REQUIRED') {
-          turn.awaiting = { approvalId: decision.approvalId, stepId, toolCallId };
+          turn.awaiting = {
+            approvalId: decision.approvalId,
+            stepId,
+            toolCallId,
+            requestId: decision.requestId,
+          };
           return { kind: 'paused', approvalId: decision.approvalId };
         }
       }
@@ -285,6 +298,18 @@ export class NativeKernel implements AgentKernel {
         artifacts: context.artifacts,
         registerArtifact: (artifact) => context.emit('artifact.created', { artifact }, stepId),
         signal: context.signal,
+        ...(requestId
+          ? {
+              governedAction: {
+                requestId,
+                execute: () =>
+                  context.executeAction({
+                    requestId,
+                    correlation: { ...context.correlation, stepId, toolCallId },
+                  }),
+              },
+            }
+          : {}),
       });
       state.artifactIds.push(...output.artifactIds);
       await context.emit(
