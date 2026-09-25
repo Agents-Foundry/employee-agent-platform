@@ -25,6 +25,7 @@ import { verifyManifest } from '../../employee-desktop/src/app/verify-manifest.j
 import { createDemoApp, demoRequest } from './helpers.js';
 
 const qa = builtInCatalog.blueprints[0]!;
+const latest = builtInCatalog.blueprints.find((blueprint) => blueprint.version === '1.2.0')!;
 const clone = (): CatalogDefinitions => structuredClone(builtInCatalog);
 const withBlueprint = (change: (blueprint: AgentBlueprintVersionDefinition) => void) => {
   const catalog = clone();
@@ -107,16 +108,17 @@ describe('catalog of record', () => {
         'CATALOG_VERSION_MUTATED: engineering.qa-engineer@1.1.0',
       );
       const next = clone();
-      next.blueprints = [{ ...structuredClone(qa), version: '1.2.0', mission: 'Next version.' }];
+      next.blueprints = [{ ...structuredClone(qa), version: '1.3.0', mission: 'Next version.' }];
       const db = new ControlPlaneDatabase(path, false, { catalog: next });
       try {
-        // 1.1.0 stopped shipping but stays resolvable from the immutable catalog of record.
+        // 1.1.0 and 1.2.0 stopped shipping but stay resolvable from the catalog of record.
         expect(db.catalog.bundle(qa.id, '1.1.0').blueprint.mission).toBe(qa.mission);
         expect(db.catalog.summaries().map((s) => [s.version, s.latest])).toEqual([
-          ['1.2.0', true],
+          ['1.3.0', true],
+          ['1.2.0', false],
           ['1.1.0', false],
         ]);
-        expect(db.catalog.legacyBlueprints().map((b) => b.version)).toEqual(['1.2.0']);
+        expect(db.catalog.legacyBlueprints().map((b) => b.version)).toEqual(['1.3.0']);
         const sql = (db as unknown as { db: DatabaseSync }).db;
         expect(() => sql.prepare("UPDATE catalog_blueprint_versions SET digest='x'").run()).toThrow(
           'CATALOG_VERSION_IMMUTABLE',
@@ -137,13 +139,14 @@ describe('catalog of record', () => {
     try {
       const app = createDemoApp(db);
       const legacy = (await demoRequest(app).get('/api/blueprints').expect(200)).body;
+      // The legacy shape serves the latest version only (1.2.0 since Phase D).
       expect(legacy).toEqual([
         {
           id: 'engineering.qa-engineer',
-          version: '1.1.0',
+          version: '1.2.0',
           title: 'QA Engineer',
           department: 'Engineering',
-          mission: qa.mission,
+          mission: latest.mission,
           skills: [
             'story-analysis',
             'risk-based-test-planning',
@@ -163,11 +166,14 @@ describe('catalog of record', () => {
         },
       ]);
       const summaries = (await demoRequest(app).get('/api/catalog/v1/blueprints').expect(200)).body;
-      expect(summaries).toEqual([expect.objectContaining({ id: qa.id, latest: true })]);
+      expect(summaries).toEqual([
+        expect.objectContaining({ id: qa.id, version: '1.2.0', latest: true }),
+        expect.objectContaining({ id: qa.id, version: '1.1.0', latest: false }),
+      ]);
       const bundle = (
         await demoRequest(app).get(`/api/catalog/v1/blueprints/${qa.id}/versions/1.1.0`).expect(200)
       ).body;
-      expect(bundle.digest).toBe(summaries[0].digest);
+      expect(bundle.digest).toBe(summaries[1].digest);
       expect(bundle.workflows.map((w: { id: string }) => w.id)).toEqual(
         qa.workflows.map((w) => w.id),
       );
@@ -413,7 +419,10 @@ describe('organization installations', () => {
 
   it('rejects an installation for a different blueprint version than requested', async () => {
     const installation = await install();
-    await createAgent({ ...installation, blueprintVersion: '1.2.0' }).expect(400);
+    await createAgent({ ...installation, blueprintVersion: '1.2.0' }).expect(409, {
+      error: 'INSTALLATION_BLUEPRINT_MISMATCH',
+    });
+    await createAgent({ ...installation, blueprintVersion: '9.9.9' }).expect(400);
   });
 });
 

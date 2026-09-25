@@ -10,7 +10,7 @@ error handling and documentation. A type, table or route stub alone does not cou
 | A     | Generic execution contracts, Thread/AgentRun/RunStep/AgentEvent, Artifact, Manifest v2, runtime protocol v1 | Implemented (see below) |
 | B     | Catalog: `AgentBlueprintVersion`, skills, workflows, tool/connector requirements, org installations         | Implemented (see below) |
 | C     | Agent runtime: session, run loop, model abstraction, one tool, approval pause/resume, signed transport      | Implemented (see below) |
-| D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch            | Not started             |
+| D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch            | Implemented (see below) |
 | E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright     | Not started             |
 | F     | QA migration from the static six-step plan to the generic runtime (feature-flagged)                         | Not started             |
 | G     | Frontend Engineer on the same runtime, as the architectural acceptance test                                 | Not started             |
@@ -86,24 +86,52 @@ error handling and documentation. A type, table or route stub alone does not cou
   runs abandoned mid-execution.
 - `EMPLOYEE_BYOK` agents cannot run on a server runtime (fail closed).
 
+## Phase D — delivered
+
+- Action Gateway (`apps/control-plane-api/src/actions`, [action-gateway.md](action-gateway.md),
+  ADR 0012):
+  - control-plane-executed actions with payload-bound, expiring approvals;
+  - single-use execution;
+  - re-authorization at execution time.
+- Policy v2 (`evaluateActionPolicy`). Platform decision, manifest capability,
+  organization overrides (tighten-only) and resource scope. Carries `policyId`,
+  `policyVersion` and conditions.
+- Connectors: `IssueTrackerConnector` with Jira Cloud. Organization connections hold
+  `secret://` references resolved per tenant at dispatch (`CONNECTOR_SECRETS_PATH`).
+- Runtime: the real `issue-tracker` tool replaces the Phase C test double.
+  `POST /runtime/v1/actions/execute` was added, and action requests carry `parameters`.
+- Catalog: QA Engineer 1.2.0 adds `issueTracker.write`. 1.1.0 is unchanged.
+- Admin UI: the governed actions and connections panel. The approval queue shows resource and
+  expiry.
+- Migration 009.
+
+### Phase D limitations
+
+- One control-plane action (`jira.issue.create`) and one connector (Jira Cloud).
+- There is no egress proxy or DNS-rebinding defence. Interrupted dispatches need manual
+  reconciliation.
+- Secrets come from an operator file, not a managed vault.
+
 ## Feature flags
 
-| Flag                                 | Default | Effect                                                                  |
-| ------------------------------------ | ------- | ----------------------------------------------------------------------- |
-| `AGENT_MANIFEST_V2_ISSUANCE_ENABLED` | `false` | New agents receive `agents-foundry/v2` manifests                        |
-| `GENERIC_AGENT_RUNTIME_ENABLED`      | `false` | Employees may start generic runs (`POST /api/execution/v1/runs`)        |
-| `AGENT_RUNTIME_IDENTITIES_PATH`      | unset   | Runtime public keys and scopes; unset means no runtime can authenticate |
+| Flag                                 | Default | Effect                                                                                         |
+| ------------------------------------ | ------- | ---------------------------------------------------------------------------------------------- |
+| `AGENT_MANIFEST_V2_ISSUANCE_ENABLED` | `false` | New agents receive `agents-foundry/v2` manifests                                               |
+| `GENERIC_AGENT_RUNTIME_ENABLED`      | `false` | Employees may start generic runs (`POST /api/execution/v1/runs`)                               |
+| `AGENT_RUNTIME_IDENTITIES_PATH`      | unset   | Runtime public keys and scopes; unset means no runtime can authenticate                        |
+| `CONNECTOR_SECRETS_PATH`             | unset   | Per-organization connector secrets; unset means every governed write fails `SECRET_UNRESOLVED` |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
 
 ## Next recommended phase
 
-Phase D: the Action Gateway. Extend `agent_action_requests` into governed action execution:
+Phase E: `execution-runtime`. Add an `ExecutionProvider` (local first) with:
 
-- contextual Policy v2 (actor, resource, environment, prior approvals);
-- approval expiry;
-- secret resolution by reference;
-- typed connector dispatch (`IssueTrackerConnector` first).
+- workspace ownership;
+- repository checkout;
+- bounded shell and filesystem operations;
+- artifact capture.
 
-Then replace the `issue-tracker` test double with a real, governed tool.
+Browser and Playwright execution follow, so `qa.execute_playwright` and `repository.*` run in
+isolation behind the same gateway decisions.

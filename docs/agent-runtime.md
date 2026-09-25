@@ -10,7 +10,7 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
   - the host;
   - the native kernel;
   - the model gateway with an Anthropic adapter;
-  - one real tool (`artifact`);
+  - two real tools: `artifact`, and `issue-tracker`, which the control plane executes (Phase D);
   - approval pause and resume;
   - file checkpoints and a local artifact store.
 - Not implemented yet:
@@ -113,9 +113,10 @@ accepted only for loopback addresses.
 
 ## Limitations (Phase C)
 
-- One real tool (`artifact`). Governed tools such as `issue-tracker` and `repository` need
-  connectors (Phase D) or the execution runtime (Phase E). The approval path is exercised
-  end to end with a test double bound to `issue-tracker@1.0.0` (`agent-runtime-e2e.spec.ts`).
+- `repository` and `browser` need the execution runtime (Phase E). Their runtime-executed
+  approval path is exercised with a test double bound to `browser@1.0.0`
+  (`agent-runtime-e2e.spec.ts`). `issue-tracker` is real: it is executed by the Action
+  Gateway (see [action-gateway.md](action-gateway.md)).
 - There is no employee UI for starting or following generic runs. The API and the admin
   approvals panel work.
 - Checkpoints are local, so a paused run resumes only on the runtime that paused it.

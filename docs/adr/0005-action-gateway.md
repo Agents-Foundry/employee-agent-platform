@@ -1,6 +1,6 @@
 # ADR 0005: Action Gateway for governed external actions
 
-- Status: Accepted (implementation in Phase D)
+- Status: Accepted (implemented in Phase D; see [ADR 0012](0012-action-gateway-execution.md))
 - Date: 2026-09-23
 
 ## Context

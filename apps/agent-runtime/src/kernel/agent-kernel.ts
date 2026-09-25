@@ -1,5 +1,7 @@
 import type {
   RuntimeActionDecision,
+  RuntimeActionExecuteRequest,
+  RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeCorrelation,
   RuntimeEventPayloads,
@@ -31,6 +33,10 @@ export interface KernelContext {
   requestAction(
     request: Omit<RuntimeActionRequest, 'protocol' | 'requestId'>,
   ): Promise<RuntimeActionDecision>;
+  /** Execute a control-plane-owned action that was allowed or approved (single use). */
+  executeAction(
+    request: Omit<RuntimeActionExecuteRequest, 'protocol'>,
+  ): Promise<RuntimeActionExecution>;
   models: ModelGateway;
   tools: RuntimeTool[];
   artifacts: ArtifactStore;

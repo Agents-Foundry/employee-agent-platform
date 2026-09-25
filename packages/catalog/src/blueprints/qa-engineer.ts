@@ -99,3 +99,20 @@ export const qaEngineer: AgentBlueprintVersionDefinition = {
     },
   ],
 };
+
+/**
+ * QA Engineer 1.2.0 (Phase D). Adds `issueTracker.write`, so approved defect reports can be
+ * filed through the Action Gateway. Everything else is inherited from 1.1.0 unchanged;
+ * agents and installations on 1.1.0 keep that version.
+ */
+export const qaEngineerV1_2: AgentBlueprintVersionDefinition = {
+  ...qaEngineer,
+  version: '1.2.0',
+  mission:
+    'Plan quality checks, collect evidence, and file defects only through approved, governed issue-tracker writes.',
+  connectors: qaEngineer.connectors.map((requirement) =>
+    requirement.capability === 'issueTracker'
+      ? { ...requirement, capabilities: ['issueTracker.read', 'issueTracker.write'] }
+      : requirement,
+  ),
+};

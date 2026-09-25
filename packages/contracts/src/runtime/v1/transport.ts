@@ -1,6 +1,6 @@
 // HTTP transport for agents-foundry/runtime/v1 (Architecture V2 Phase C, ADR 0011).
 // Pure types and constants. Signing and verification happen with node:crypto on each side.
-import type { ApprovalRisk, RuntimeCorrelation } from '../../execution.js';
+import type { ApprovalRisk, ExecutionError, RuntimeCorrelation } from '../../execution.js';
 import type { RuntimeCommand, RuntimeProtocolVersion } from './protocol.js';
 
 /** Workload-identity scheme: every runtime request is signed with the runtime's Ed25519 key. */
@@ -20,6 +20,7 @@ export const runtimeTransportPaths = {
   claim: '/runtime/v1/commands/claim',
   events: '/runtime/v1/events',
   actions: '/runtime/v1/actions',
+  execute: '/runtime/v1/actions/execute',
 } as const;
 
 /**
@@ -70,8 +71,28 @@ export interface RuntimeActionRequest {
   toolId: string;
   toolVersion: string;
   inputDigest: string;
-  /** Human-readable purpose shown to the approver. Never contains secrets. */
+  /** Human-readable purpose from the runtime. Control-plane-executed actions replace it. */
   summary: string;
+  /**
+   * The exact action payload, required for actions the control plane executes (Phase D).
+   * Its canonical SHA-256 must equal `inputDigest`, which binds any approval to this payload.
+   */
+  parameters?: Record<string, unknown>;
+}
+
+/** Ask the control plane to execute an allowed or approved action it owns. Single use. */
+export interface RuntimeActionExecuteRequest {
+  protocol: RuntimeProtocolVersion;
+  requestId: string;
+  correlation: RuntimeCorrelation & { stepId: string; toolCallId: string };
+}
+
+export interface RuntimeActionExecution {
+  requestId: string;
+  status: 'SUCCEEDED' | 'FAILED';
+  /** Non-secret identifiers of what was created, for example an issue key and URL. */
+  result?: Record<string, string>;
+  error?: ExecutionError;
 }
 
 export type RuntimeActionDecision =

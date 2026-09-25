@@ -1,6 +1,8 @@
 import { createHash, randomUUID, sign, type KeyObject } from 'node:crypto';
 import type {
   RuntimeActionDecision,
+  RuntimeActionExecuteRequest,
+  RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeClaimResponse,
   RuntimeEventAck,
@@ -13,6 +15,7 @@ import {
 } from '../../../../packages/contracts/src/runtime/v1/transport.js';
 import {
   parseRuntimeActionDecision,
+  parseRuntimeActionExecution,
   parseRuntimeClaimResponse,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import { ControlPlaneError } from '../errors.js';
@@ -22,6 +25,7 @@ export interface ControlPlanePort {
   claim(): Promise<RuntimeClaimResponse | null>;
   sendEvent(event: RuntimeEventEnvelope): Promise<RuntimeEventAck>;
   requestAction(request: RuntimeActionRequest): Promise<RuntimeActionDecision>;
+  executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution>;
 }
 
 export interface ControlPlaneClientOptions {
@@ -64,6 +68,10 @@ export class ControlPlaneClient implements ControlPlanePort {
 
   async requestAction(request: RuntimeActionRequest): Promise<RuntimeActionDecision> {
     return parseRuntimeActionDecision(await this.post(runtimeTransportPaths.actions, request));
+  }
+
+  async executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution> {
+    return parseRuntimeActionExecution(await this.post(runtimeTransportPaths.execute, request));
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

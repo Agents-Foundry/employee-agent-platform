@@ -251,6 +251,8 @@ export class RuntimeHost {
           protocol: RUNTIME_PROTOCOL_V1,
           requestId: randomUUID(),
         }),
+      executeAction: (request) =>
+        this.options.controlPlane.executeAction({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
       models: this.options.models,
       tools: this.options.tools.forManifest(manifest),
       artifacts: this.options.artifacts,

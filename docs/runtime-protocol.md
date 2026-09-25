@@ -63,7 +63,7 @@ Runtime-emittable types: `run.started`, `run.paused`, `run.resumed`, `run.comple
 `tool.started`, `tool.completed`, `tool.failed`, `artifact.created`.
 
 Control-plane-only types (`run.created`, `user.message`, `approval.requested`,
-`approval.approved`, `approval.rejected`) are rejected with `RUNTIME_EVENT_TYPE_FORBIDDEN`. A
+`approval.approved`, `approval.rejected`, `approval.expired`) are rejected with `RUNTIME_EVENT_TYPE_FORBIDDEN`. A
 runtime cannot record an approval on its own behalf.
 
 ### Ingestion rules (`ExecutionService.ingestRuntimeEvent`)
@@ -118,11 +118,12 @@ Every failure returns the same `401 RUNTIME_UNAUTHENTICATED`.
 
 ### Endpoints
 
-| Route                             | Response                                                                                                                                                                    |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /runtime/v1/commands/claim` | `200 { command, lease }` or `204`. Order: `run.cancel` for held runs the control plane ended, `run.resume` for held runs released by an approval, then a fresh `run.submit` |
-| `POST /runtime/v1/events`         | `201` (or `200` duplicate) `{ eventId, sequence, duplicate }`; only for runs the runtime leases                                                                             |
-| `POST /runtime/v1/actions`        | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
+| Route                              | Response                                                                                                                                                                    |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /runtime/v1/commands/claim`  | `200 { command, lease }` or `204`. Order: `run.cancel` for held runs the control plane ended, `run.resume` for held runs released by an approval, then a fresh `run.submit` |
+| `POST /runtime/v1/events`          | `201` (or `200` duplicate) `{ eventId, sequence, duplicate }`; only for runs the runtime leases                                                                             |
+| `POST /runtime/v1/actions`         | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
+| `POST /runtime/v1/actions/execute` | `{ requestId, status: SUCCEEDED \| FAILED, result?, error? }` for control-plane-executed actions (Phase D)                                                                  |
 
 Leases (`agent_run_leases`) bind a run to one runtime and session. A queued run that never
 started can be reclaimed after 10 minutes. An undelivered command is redelivered to its holder
@@ -147,6 +148,20 @@ Otherwise the outcome is the more restrictive of the policy engine and the manif
 capability. `APPROVAL_REQUIRED` creates the approval and pauses the step and the run in the
 same transaction. Every decision is recorded in `agent_action_requests` and audited as
 `runtime.action.<decision>`.
+
+Since Phase D, actions the control plane executes itself (for example `jira.issue.create`)
+require the `parameters` field. Its canonical SHA-256 must equal `inputDigest`. Approvals for
+these actions:
+
+- expire (`expires_at`, based on risk);
+- carry a summary written by the control plane;
+- are executed once, through `actions/execute`.
+
+The Action Gateway re-authorizes each execution before dispatch. See
+[action-gateway.md](action-gateway.md).
+
+The control-plane-only event `approval.expired` records an unanswered approval passing its
+deadline. The paused run is then cancelled (`APPROVAL_EXPIRED`).
 
 ## Read API (browser-facing)
 

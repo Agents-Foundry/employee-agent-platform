@@ -28,6 +28,8 @@ import {
 } from './protocol.js';
 import type {
   RuntimeActionDecision,
+  RuntimeActionExecuteRequest,
+  RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeClaimResponse,
 } from './transport.js';
@@ -427,6 +429,10 @@ const actionRequestSchema = z
     toolVersion: semver,
     inputDigest: digest,
     summary: z.string().trim().min(1).max(500),
+    parameters: z
+      .record(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/), z.unknown())
+      .refine((value) => Object.keys(value).length <= 50, 'At most 50 parameters.')
+      .optional(),
   })
   .strict();
 
@@ -478,4 +484,39 @@ export function parseRuntimeClaimResponse(input: unknown): RuntimeClaimResponse 
   if (!parsed.success)
     throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
   return { command: parseRuntimeCommand(parsed.data.command), lease: parsed.data.lease };
+}
+
+const executeRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    requestId: uuid,
+    correlation: correlationSchema.extend({ stepId: uuid, toolCallId: uuid }).strict(),
+  })
+  .strict();
+
+/** Parse a runtime's request to execute a control-plane-owned action. */
+export function parseRuntimeActionExecuteRequest(input: unknown): RuntimeActionExecuteRequest {
+  if ((input as { protocol?: unknown } | null)?.protocol !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = executeRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_ACTION_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const executionSchema = z
+  .object({
+    requestId: uuid,
+    status: z.enum(['SUCCEEDED', 'FAILED']),
+    result: z.record(z.string().max(64), z.string().max(2048)).optional(),
+    error: errorSchema.optional(),
+  })
+  .strict();
+
+/** Runtime-side validation of an action execution result. */
+export function parseRuntimeActionExecution(input: unknown): RuntimeActionExecution {
+  const parsed = executionSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
 }

@@ -52,6 +52,7 @@
     <af-job-admin />
     <af-people-admin />
     <af-agent-installations (changed)="agentAdmin.refresh()" />
+    <af-action-governance />
     <af-agent-admin #agentAdmin (created)="refresh()" />
     <section class="metrics" id="overview" aria-label="Workspace summary">
       <article>
@@ -185,10 +186,19 @@
                     ><span>{{ approval.status }}</span>
                   </div>
                   <p>{{ approval.summary }}</p>
-                  <small
-                    >Run {{ approval.resourceId.slice(0, 8) }} ·
-                    {{ approval.createdAt | date: 'medium' }}</small
-                  >
+                  <small>
+                    @if (
+                      approval.resourceType === 'qa_run' || approval.resourceType === 'agent_run'
+                    ) {
+                      Run {{ approval.resourceId.slice(0, 8) }}
+                    } @else {
+                      {{ approval.resourceType }} {{ approval.resourceId }}
+                    }
+                    · {{ approval.createdAt | date: 'medium' }}
+                    @if (approval.expiresAt && approval.status === 'PENDING') {
+                      · Expires {{ approval.expiresAt | date: 'medium' }}
+                    }
+                  </small>
                 </div>
                 @if (approval.status === 'PENDING') {
                   <div class="approval-actions">

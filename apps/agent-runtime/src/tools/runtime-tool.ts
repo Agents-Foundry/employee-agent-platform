@@ -1,5 +1,6 @@
 import type {
   ArtifactRegistration,
+  RuntimeActionExecution,
   RuntimeCorrelation,
   SignedAgentManifestV2,
 } from '@agents-foundry/contracts';
@@ -12,6 +13,12 @@ export interface ToolExecutionContext {
   /** Registers an artifact with the control plane (`artifact.created`) before it is referenced. */
   registerArtifact(artifact: ArtifactRegistration): Promise<void>;
   signal: AbortSignal;
+  /** Present when this invocation's governed action was allowed or approved. */
+  governedAction?: {
+    requestId: string;
+    /** Asks the control plane to perform the action it owns (ADR 0012). Single use. */
+    execute(): Promise<RuntimeActionExecution>;
+  };
 }
 
 export interface ToolOutput {
@@ -29,6 +36,11 @@ export interface RuntimeTool<Input = unknown> {
   readonly version: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
+  /**
+   * The parsed input is the action payload the control plane executes; it is sent with the
+   * action request and bound to any approval by its digest.
+   */
+  readonly sendsParameters?: boolean;
   /** Throws on invalid input; the model sees a validation error, nothing executes. */
   parse(input: unknown): Input;
   /** The governed action this invocation performs, or null for ungoverned local work. */

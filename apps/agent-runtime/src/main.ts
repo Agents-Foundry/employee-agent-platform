@@ -7,6 +7,7 @@ import { EnvironmentCredentialBroker, ModelGateway } from './models/model-gatewa
 import { ScriptedProvider } from './models/scripted-provider.js';
 import { consoleLogger, RuntimeHost } from './runtime-host.js';
 import { ArtifactTool } from './tools/artifact-tool.js';
+import { IssueTrackerTool } from './tools/issue-tracker-tool.js';
 import { LocalArtifactStore } from './tools/artifact-store.js';
 import { ToolRegistry } from './tools/runtime-tool.js';
 import { ControlPlaneClient } from './transport/control-plane-client.js';
@@ -26,7 +27,7 @@ const host = new RuntimeHost({
   verifier: new ManifestVerifier(config.manifestVerificationKey),
   kernel: new NativeKernel(),
   models: new ModelGateway(providers, new EnvironmentCredentialBroker()),
-  tools: new ToolRegistry([new ArtifactTool()]),
+  tools: new ToolRegistry([new ArtifactTool(), new IssueTrackerTool()]),
   artifacts: new LocalArtifactStore(paths.artifacts),
   checkpoints: new FileCheckpointStore(paths.checkpoints),
   concurrency: config.concurrency,

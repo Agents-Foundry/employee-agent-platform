@@ -34,6 +34,10 @@ import { TenancyService } from './organization/tenancy-service.js';
 import { ExecutionService } from './execution/execution-service.js';
 import { RuntimeIdentityRegistry, type RuntimeIdentityConfig } from './runtime/runtime-identity.js';
 import { RuntimeTransportService } from './runtime/runtime-transport-service.js';
+import { ActionGateway } from './actions/action-gateway.js';
+import { ActionPolicyService } from './actions/action-policy-service.js';
+import { ConnectorService } from './actions/connector-service.js';
+import { FileSecretStore, type SecretResolver } from './actions/secrets.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { InstallationService } from './catalog/installation-service.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
@@ -73,6 +77,9 @@ export class ControlPlaneDatabase {
   readonly genericRuntimeEnabled: boolean;
   readonly runtimeIdentities: RuntimeIdentityRegistry;
   readonly runtimeTransport: RuntimeTransportService;
+  readonly connectors: ConnectorService;
+  readonly actionPolicies: ActionPolicyService;
+  readonly actions: ActionGateway;
 
   constructor(
     path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db',
@@ -82,6 +89,12 @@ export class ControlPlaneDatabase {
       catalog?: CatalogDefinitions;
       genericRuntime?: boolean;
       runtimeIdentities?: RuntimeIdentityConfig[];
+      /** Connector secret store; defaults to the operator file at CONNECTOR_SECRETS_PATH. */
+      secrets?: SecretResolver;
+      /** Connector HTTP client (tests). */
+      connectorFetch?: typeof fetch;
+      /** Allow http and private hosts for connector URLs (local testing only). */
+      allowPrivateConnectorUrls?: boolean;
     } = {},
   ) {
     this.genericRuntimeEnabled =
@@ -123,12 +136,31 @@ export class ControlPlaneDatabase {
     this.execution = new ExecutionService(this.db, (agentId, organizationId, employeeId) =>
       this.getManifest(agentId, organizationId, employeeId),
     );
-    this.runtimeTransport = new RuntimeTransportService(this.db, this.execution, {
+    const audit = (
+      actorId: string,
+      eventType: string,
+      resourceType: string,
+      resourceId: string,
+      metadata: object,
+      organizationId: string,
+    ) => this.audit(actorId, eventType, resourceType, resourceId, metadata, organizationId);
+    this.connectors = new ConnectorService(this.db, this.structure, audit, {
+      allowPrivateNetwork: options.allowPrivateConnectorUrls ?? false,
+    });
+    this.actionPolicies = new ActionPolicyService(this.db, this.structure, audit);
+    this.actions = new ActionGateway(this.db, this.execution, {
       loadManifest: (agentId, organizationId, employeeId) =>
         this.getManifest(agentId, organizationId, employeeId),
       bundle: (blueprintId, version) => this.catalog.bundle(blueprintId, version, 404),
-      audit: (actorId, eventType, resourceType, resourceId, metadata, organizationId) =>
-        this.audit(actorId, eventType, resourceType, resourceId, metadata, organizationId),
+      audit,
+      connectors: this.connectors,
+      policies: this.actionPolicies,
+      secrets: options.secrets ?? new FileSecretStore(),
+      ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
+    });
+    this.runtimeTransport = new RuntimeTransportService(this.db, this.execution, {
+      gateway: this.actions,
+      audit,
     });
     if (seedDemo) this.seed();
   }
@@ -1512,10 +1544,11 @@ export class ControlPlaneDatabase {
   }
 
   listApprovals(organizationId = ORGANIZATION_ID, employeeId?: string): Approval[] {
+    this.actions.expireDue();
     const rows = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
-                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id
+                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id, expires_at
          FROM approvals WHERE organization_id = ? ORDER BY created_at DESC`,
       )
       .all(organizationId) as Record<string, unknown>[];
@@ -1531,11 +1564,13 @@ export class ControlPlaneDatabase {
     organizationId = ORGANIZATION_ID,
   ): Approval {
     const timestamp = now();
+    this.actions.expireDue();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       // Read inside the write transaction so concurrent decisions cannot both succeed.
       const approval = this.getApproval(id, organizationId);
       if (approval.requestedBy === actorId) throw new Error('SELF_APPROVAL_FORBIDDEN');
+      if (approval.status === 'EXPIRED') throw new Error('APPROVAL_EXPIRED');
       if (approval.status !== 'PENDING') throw new Error('APPROVAL_ALREADY_DECIDED');
       this.db
         .prepare('UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?')
@@ -1587,7 +1622,7 @@ export class ControlPlaneDatabase {
     const row = this.db
       .prepare(
         `SELECT id, organization_id, requested_by, action, resource_type, resource_id,
-                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id FROM approvals WHERE id = ? AND organization_id = ?`,
+                risk, summary, status, decided_by, decided_at, created_at, run_id, step_id, expires_at FROM approvals WHERE id = ? AND organization_id = ?`,
       )
       .get(id, organizationId) as Record<string, unknown> | undefined;
     if (!row) throw new Error('APPROVAL_NOT_FOUND');
@@ -1822,10 +1857,11 @@ export class ControlPlaneDatabase {
       resourceId: String(row['resource_id']),
       risk: String(row['risk']) as Approval['risk'],
       summary: String(row['summary']),
-      status: String(row['status']) as ApprovalStatus,
+      status: String(row['status']) as Approval['status'],
       ...(row['decided_by'] ? { decidedBy: String(row['decided_by']) } : {}),
       ...(row['decided_at'] ? { decidedAt: String(row['decided_at']) } : {}),
       createdAt: String(row['created_at']),
+      ...(row['expires_at'] ? { expiresAt: String(row['expires_at']) } : {}),
       ...(row['run_id'] ? { runId: String(row['run_id']) } : {}),
       ...(row['step_id'] ? { stepId: String(row['step_id']) } : {}),
     };
