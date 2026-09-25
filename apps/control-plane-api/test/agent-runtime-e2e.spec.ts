@@ -29,13 +29,13 @@ const adminHeaders = {
 const silent = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
 /**
- * Test double bound to the catalog's `issue-tracker@1.0.0` tool. No real connector exists until
- * Phase D, so this only proves the governed pause/resume path; it creates nothing anywhere.
+ * Test double bound to the catalog's `browser@1.0.0` tool. Browser execution belongs to the
+ * execution runtime (Phase E), so this only proves the runtime-executed approval path.
  */
-class FakeIssueDraftTool implements RuntimeTool<{ title: string }> {
-  readonly id = 'issue-tracker';
+class FakeBrowserTool implements RuntimeTool<{ title: string }> {
+  readonly id = 'browser';
   readonly version = '1.0.0';
-  readonly description = 'Create an issue (test double).';
+  readonly description = 'Run browser checks (test double).';
   readonly inputSchema = { type: 'object', properties: { title: { type: 'string' } } };
   executed: string[] = [];
   parse(input: unknown) {
@@ -45,10 +45,10 @@ class FakeIssueDraftTool implements RuntimeTool<{ title: string }> {
       .parse(input);
   }
   governedAction() {
-    return 'jira.issue.create';
+    return 'qa.execute_playwright';
   }
   summarize(input: { title: string }) {
-    return `Create issue "${input.title}"`;
+    return `Run browser check "${input.title}"`;
   }
   async execute(input: { title: string }) {
     this.executed.push(input.title);
@@ -82,7 +82,7 @@ const script = (request: { messages: { content: { type: string }[] }[] }): Model
         {
           type: 'tool_use',
           id: 'toolu_2',
-          name: 'issue-tracker',
+          name: 'browser',
           input: { title: 'Cart total wrong' },
         },
       ],
@@ -100,7 +100,7 @@ describe('agent runtime end to end over the signed transport', () => {
   let db: ControlPlaneDatabase;
   let server: Server;
   let host: RuntimeHost;
-  let issues: FakeIssueDraftTool;
+  let issues: FakeBrowserTool;
   let artifacts: MemoryArtifactStore;
   let checkpoints: MemoryCheckpointStore;
   let agentId: string;
@@ -146,7 +146,7 @@ describe('agent runtime end to end over the signed transport', () => {
     server = await new Promise<Server>((resolve) => {
       const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
     });
-    issues = new FakeIssueDraftTool();
+    issues = new FakeBrowserTool();
     artifacts = new MemoryArtifactStore();
     checkpoints = new MemoryCheckpointStore();
     host = new RuntimeHost({
@@ -198,7 +198,7 @@ describe('agent runtime end to end over the signed transport', () => {
     ]);
     expect(artifacts.items.size).toBe(1);
     const approval = detail.approvals[0]!;
-    expect(approval).toMatchObject({ action: 'jira.issue.create', status: 'PENDING' });
+    expect(approval).toMatchObject({ action: 'qa.execute_playwright', status: 'PENDING' });
 
     // Nothing to do while the approval is pending.
     expect(await host.pollOnce()).toBe(false);

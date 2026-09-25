@@ -15,6 +15,7 @@ import { configureTenancyRoutes } from './organization/tenancy-routes.js';
 import { configureExecutionRoutes } from './execution/execution-routes.js';
 import { configureCatalogRoutes } from './catalog/catalog-routes.js';
 import { configureRuntimeRoutes } from './runtime/runtime-routes.js';
+import { configureActionRoutes } from './actions/action-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 
@@ -159,6 +160,7 @@ export function createApp(
       database.getManifest(agentId, organizationId, employeeId),
   });
   configureCatalogRoutes(app, database.catalog, database.installations, auth);
+  configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
@@ -390,7 +392,10 @@ export function createApp(
     if (error instanceof Error && error.message.endsWith('_NOT_FOUND')) {
       return response.status(404).json({ error: error.message });
     }
-    if (error instanceof Error && error.message === 'APPROVAL_ALREADY_DECIDED') {
+    if (
+      error instanceof Error &&
+      (error.message === 'APPROVAL_ALREADY_DECIDED' || error.message === 'APPROVAL_EXPIRED')
+    ) {
       return response.status(409).json({ error: error.message });
     }
     console.error(error);

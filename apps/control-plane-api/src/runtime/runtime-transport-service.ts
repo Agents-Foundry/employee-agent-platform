@@ -1,21 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type {
-  AnySignedAgentManifest,
-  ApprovalRisk,
-  ResolvedBlueprintBundle,
-  RuntimeActionDecision,
+  RuntimeActionExecution,
+  RuntimeActionRequest,
   RuntimeClaimResponse,
   RuntimeCommand,
   RuntimeEventAck,
 } from '@agents-foundry/contracts';
-import { evaluatePolicy } from '../../../../packages/policy-engine/src/index.js';
 import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
 import { RUNTIME_PROTOCOL_V1 } from '../../../../packages/contracts/src/runtime/v1/protocol.js';
 import {
+  parseRuntimeActionExecuteRequest,
   parseRuntimeActionRequest,
   parseRuntimeEvent,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
+import type { ActionGateway } from '../actions/action-gateway.js';
 import { ExecutionError, type ExecutionService } from '../execution/execution-service.js';
 import { servesOrganization, type RuntimeIdentity } from './runtime-identity.js';
 
@@ -26,16 +25,8 @@ export const RUNTIME_LEASE_MS = 10 * 60_000;
 /** A command delivered but not acted on is redelivered after this (runtime restart). */
 export const COMMAND_REDELIVERY_MS = 60_000;
 
-const outcomeRank = { ALLOW: 0, REQUIRE_APPROVAL: 1, DENY: 2 } as const;
-type Outcome = keyof typeof outcomeRank;
-
 export interface RuntimeTransportDependencies {
-  loadManifest: (
-    agentId: string,
-    organizationId: string,
-    employeeId: string,
-  ) => AnySignedAgentManifest;
-  bundle: (blueprintId: string, version: string) => ResolvedBlueprintBundle;
+  gateway: ActionGateway;
   audit: (
     actorId: string,
     eventType: string,
@@ -44,7 +35,6 @@ export interface RuntimeTransportDependencies {
     metadata: object,
     organizationId: string,
   ) => void;
-  evaluate?: typeof evaluatePolicy;
 }
 
 /**
@@ -53,15 +43,11 @@ export interface RuntimeTransportDependencies {
  * the runtime's message; a runtime can only act on runs it holds a lease for.
  */
 export class RuntimeTransportService {
-  private readonly evaluate: typeof evaluatePolicy;
-
   constructor(
     private readonly db: DatabaseSync,
     private readonly execution: ExecutionService,
     private readonly deps: RuntimeTransportDependencies,
-  ) {
-    this.evaluate = deps.evaluate ?? evaluatePolicy;
-  }
+  ) {}
 
   /** Single-use nonces for signed requests; expired entries are purged opportunistically. */
   consumeNonce(runtimeId: string, nonce: string, expiresAt: number): boolean {
@@ -79,6 +65,8 @@ export class RuntimeTransportService {
    * its runs released by an approval, or a fresh queued run it is authorized to execute.
    */
   claim(runtime: RuntimeIdentity, nowMs = Date.now()): RuntimeClaimResponse | null {
+    // Expired approvals cancel their runs first, so they are delivered as run.cancel below.
+    this.deps.gateway.expireDue(nowMs);
     return this.transaction(() => {
       const nowIso = new Date(nowMs).toISOString();
       const held = this.db
@@ -165,11 +153,8 @@ export class RuntimeTransportService {
     });
   }
 
-  /**
-   * Decide a governed action (Phase C slice of the Action Gateway, ADR 0005). The manifest can
-   * only restrict what the policy engine allows; anything unknown or unverifiable is denied.
-   */
-  requestAction(runtime: RuntimeIdentity, body: unknown): RuntimeActionDecision {
+  /** Decide a governed action through the Action Gateway (ADR 0005, ADR 0012). */
+  requestAction(runtime: RuntimeIdentity, body: unknown): ReturnType<ActionGateway['decide']> {
     const request = parseRuntimeActionRequest(body);
     const requestHash = createHash('sha256').update(canonicalManifest(request)).digest('hex');
     return this.transaction(() => {
@@ -184,161 +169,54 @@ export class RuntimeTransportService {
           existing['request_hash'] !== requestHash
         )
           throw new ExecutionError(409, 'RUNTIME_ACTION_CONFLICT');
-        return this.storedDecision(existing);
+        return this.deps.gateway.storedDecision(existing);
       }
-      if (lease['state'] !== 'ACTIVE') throw new ExecutionError(409, 'RUN_TERMINAL');
-      const run = this.db
-        .prepare('SELECT * FROM agent_runs WHERE id=? AND organization_id=?')
-        .get(request.correlation.runId, organizationId) as Row;
-      const { correlation } = request;
-      if (
-        run['thread_id'] !== correlation.threadId ||
-        run['employee_id'] !== correlation.employeeId ||
-        run['agent_id'] !== correlation.agentId ||
-        correlation.organizationId !== organizationId
-      )
-        throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
-      if (run['status'] !== 'RUNNING') throw new ExecutionError(409, 'RUN_NOT_RUNNING');
-      const step = this.db
-        .prepare('SELECT status FROM agent_run_steps WHERE id=? AND run_id=? AND organization_id=?')
-        .get(correlation.stepId, run['id'], organizationId) as { status: string } | undefined;
-      if (!step) throw new ExecutionError(404, 'STEP_NOT_FOUND');
-      if (step.status !== 'RUNNING') throw new ExecutionError(409, 'STEP_NOT_RUNNING');
-
-      const verdict = this.decide(run, request);
-      const approvalId = verdict.outcome === 'REQUIRE_APPROVAL' ? randomUUID() : null;
-      const createdAt = new Date().toISOString();
-      if (approvalId) {
-        this.db
-          .prepare(
-            `INSERT INTO approvals (id, organization_id, requested_by, action, resource_type, resource_id,
-             risk, summary, status, created_at, run_id, step_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-          )
-          .run(
-            approvalId,
-            organizationId,
-            String(run['employee_id']),
-            request.action,
-            'agent_run',
-            String(run['id']),
-            verdict.risk,
-            request.summary,
-            'PENDING',
-            createdAt,
-            String(run['id']),
-            correlation.stepId,
-          );
-        this.execution.pauseForApproval(organizationId, String(run['id']), correlation.stepId, {
-          id: approvalId,
-          action: request.action,
-          risk: verdict.risk,
-          summary: request.summary,
-        });
-      }
-      const decision =
-        verdict.outcome === 'ALLOW'
-          ? 'ALLOWED'
-          : verdict.outcome === 'DENY'
-            ? 'DENIED'
-            : 'APPROVAL_REQUIRED';
-      this.db
-        .prepare(
-          `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
-           request_hash, decision, risk, reason, approval_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
-          request.requestId,
-          organizationId,
-          String(run['id']),
-          correlation.stepId,
-          runtime.id,
-          request.action,
-          request.toolId,
-          requestHash,
-          decision,
-          verdict.risk,
-          verdict.reason,
-          approvalId,
-          createdAt,
-        );
-      this.deps.audit(
-        String(run['agent_id']),
-        `runtime.action.${decision.toLowerCase()}`,
-        'agent_run',
-        String(run['id']),
-        {
-          action: request.action,
-          toolId: request.toolId,
-          runtimeId: runtime.id,
-          requestId: request.requestId,
-          ...(approvalId ? { approvalId } : {}),
-        },
-        organizationId,
-      );
-      return this.storedDecision(
-        this.db
-          .prepare('SELECT * FROM agent_action_requests WHERE id=?')
-          .get(request.requestId) as Row,
-      );
+      const { run } = this.runningStep(runtime, request.correlation);
+      return this.deps.gateway.decide(runtime.id, run, request, requestHash);
     });
   }
 
-  private decide(
-    run: Row,
-    request: ReturnType<typeof parseRuntimeActionRequest>,
-  ): { outcome: Outcome; risk: ApprovalRisk; reason: string } {
-    const deny = (reason: string, risk: ApprovalRisk = 'CRITICAL') => ({
-      outcome: 'DENY' as const,
-      risk,
-      reason,
+  /**
+   * Execute a control-plane-owned action the runtime was allowed or approved to perform
+   * (ADR 0012). Single use: the dispatch is committed before the connector is called and a
+   * retry returns the recorded outcome instead of calling the connector again.
+   */
+  async executeAction(runtime: RuntimeIdentity, body: unknown): Promise<RuntimeActionExecution> {
+    const request = parseRuntimeActionExecuteRequest(body);
+    const plan = this.transaction(() => {
+      const { run } = this.runningStep(runtime, request.correlation);
+      return this.deps.gateway.prepareExecution(run, request.requestId, request.correlation.stepId);
     });
-    let manifest: AnySignedAgentManifest;
-    try {
-      manifest = this.deps.loadManifest(
-        String(run['agent_id']),
-        String(run['organization_id']),
-        String(run['employee_id']),
-      );
-    } catch {
-      return deny('MANIFEST_INVALID');
-    }
-    const payload = manifest.payload;
+    if (plan.kind === 'done') return plan.execution;
+    const outcome = await this.deps.gateway.dispatch(plan.dispatch);
+    return this.transaction(() => this.deps.gateway.completeExecution(plan.dispatch, outcome));
+  }
+
+  /** Lease, correlation, run and step checks shared by action requests and executions. */
+  private runningStep(
+    runtime: RuntimeIdentity,
+    correlation: RuntimeActionRequest['correlation'],
+  ): { run: Row; lease: Row } {
+    const lease = this.ownedLease(runtime, correlation.runId);
+    const organizationId = String(lease['organization_id']);
+    if (lease['state'] !== 'ACTIVE') throw new ExecutionError(409, 'RUN_TERMINAL');
+    const run = this.db
+      .prepare('SELECT * FROM agent_runs WHERE id=? AND organization_id=?')
+      .get(correlation.runId, organizationId) as Row;
     if (
-      payload.apiVersion !== 'agents-foundry/v2' ||
-      payload.metadata.manifestId !== run['manifest_id']
+      run['thread_id'] !== correlation.threadId ||
+      run['employee_id'] !== correlation.employeeId ||
+      run['agent_id'] !== correlation.agentId ||
+      correlation.organizationId !== organizationId
     )
-      return deny('MANIFEST_INVALID');
-    if (!payload.tools.includes(request.toolId)) return deny('TOOL_NOT_IN_MANIFEST');
-    let bundle: ResolvedBlueprintBundle;
-    try {
-      bundle = this.deps.bundle(payload.metadata.blueprint.id, payload.metadata.blueprint.version);
-    } catch {
-      return deny('BLUEPRINT_UNAVAILABLE');
-    }
-    if (!payload.metadata.blueprint.digest || bundle.digest !== payload.metadata.blueprint.digest)
-      return deny('BLUEPRINT_DIGEST_MISMATCH');
-    const tool = bundle.tools.find((candidate) => candidate.id === request.toolId);
-    if (!tool || tool.version !== request.toolVersion) return deny('TOOL_VERSION_MISMATCH');
-    if (!tool.governedActions.includes(request.action)) return deny('ACTION_NOT_GOVERNED_BY_TOOL');
-    const capability = payload.policies.capabilities.find(
-      (candidate) => candidate.action === request.action,
-    );
-    if (!capability) return deny('ACTION_NOT_IN_MANIFEST');
-    let policy: ReturnType<typeof evaluatePolicy>;
-    try {
-      policy = this.evaluate(request.action);
-    } catch {
-      return deny('POLICY_UNAVAILABLE');
-    }
-    const outcome =
-      outcomeRank[capability.outcome] > outcomeRank[policy.outcome]
-        ? capability.outcome
-        : policy.outcome;
-    return {
-      outcome,
-      risk: policy.risk,
-      reason: outcome === policy.outcome ? policy.reason : 'Restricted by the agent manifest.',
-    };
+      throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
+    if (run['status'] !== 'RUNNING') throw new ExecutionError(409, 'RUN_NOT_RUNNING');
+    const step = this.db
+      .prepare('SELECT status FROM agent_run_steps WHERE id=? AND run_id=? AND organization_id=?')
+      .get(correlation.stepId, run['id'], organizationId) as { status: string } | undefined;
+    if (!step) throw new ExecutionError(404, 'STEP_NOT_FOUND');
+    if (step.status !== 'RUNNING') throw new ExecutionError(409, 'STEP_NOT_RUNNING');
+    return { run, lease };
   }
 
   private claimQueued(runtime: RuntimeIdentity, nowMs: number): RuntimeClaimResponse | null {
@@ -496,18 +374,6 @@ export class RuntimeTransportService {
         `UPDATE agent_run_leases SET state='CLOSED', closed_at=?, heartbeat_at=? WHERE run_id=? AND state='ACTIVE'`,
       )
       .run(nowIso, nowIso, runId);
-  }
-
-  private storedDecision(row: Row): RuntimeActionDecision {
-    const base = {
-      requestId: String(row['id']),
-      risk: String(row['risk']) as ApprovalRisk,
-      reason: String(row['reason']),
-    };
-    const decision = String(row['decision']);
-    if (decision === 'APPROVAL_REQUIRED')
-      return { ...base, decision, approvalId: String(row['approval_id']) };
-    return { ...base, decision: decision === 'ALLOWED' ? 'ALLOWED' : 'DENIED' };
   }
 
   private transaction<T>(work: () => T): T {

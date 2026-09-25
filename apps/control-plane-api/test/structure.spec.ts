@@ -96,7 +96,7 @@ it('upgrades populated version-four memberships without losing IDs or tenant key
       .get();
     expect(upgraded).toEqual({ id: membership, startedAt: stamp, endedAt: null });
     expect(sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(8);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(9);
   } finally {
     sql.close();
   }
@@ -386,7 +386,7 @@ it('applies migrations once, persists changes, and enforces cross-tenant keys an
     expect(db.structure.list(actor, {}).total).toBe(2);
     sql = new DatabaseSync(path);
     sql.exec('PRAGMA foreign_keys=ON');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(8);
+    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(9);
     expect(() =>
       sql!
         .prepare('UPDATE organizational_units SET organization_id=? WHERE id=?')

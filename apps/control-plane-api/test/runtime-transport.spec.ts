@@ -368,7 +368,7 @@ describe('runtime transport', () => {
       await runtimePost(
         app,
         '/runtime/v1/actions',
-        action('jira.issue.create', 'issue-tracker'),
+        action('qa.execute_playwright', 'browser'),
       ).expect(200)
     ).body;
     expect(governed).toMatchObject({ decision: 'APPROVAL_REQUIRED', risk: 'MEDIUM' });
@@ -382,7 +382,7 @@ describe('runtime transport', () => {
     expect(paused.approvals).toEqual([
       expect.objectContaining({
         id: governed.approvalId,
-        action: 'jira.issue.create',
+        action: 'qa.execute_playwright',
         stepId,
         status: 'PENDING',
       }),
@@ -466,7 +466,7 @@ describe('runtime transport', () => {
       await runtimePost(
         app,
         '/runtime/v1/actions',
-        action('jira.issue.create', 'issue-tracker'),
+        action('qa.execute_playwright', 'browser'),
       ).expect(200)
     ).body;
     await request(app)

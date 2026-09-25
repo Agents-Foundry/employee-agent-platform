@@ -341,6 +341,29 @@ export class ExecutionService {
     return this.readableRun(actor, runId, false);
   }
 
+  /** An approval expired unused: the run it paused is cancelled (fail closed, ADR 0012). */
+  onApprovalExpired(organizationId: string, approvalId: string): void {
+    this.transaction(() => {
+      const link = this.db
+        .prepare('SELECT run_id, step_id FROM approvals WHERE id=? AND organization_id=?')
+        .get(approvalId, organizationId) as
+        { run_id: string | null; step_id: string | null } | undefined;
+      if (!link?.run_id) return;
+      const run = this.runRow(organizationId, link.run_id);
+      const scope = { organizationId, threadId: run.threadId, runId: run.id };
+      this.appendEvent(
+        scope,
+        'approval.expired',
+        'CONTROL_PLANE',
+        null,
+        { approvalId },
+        link.step_id ?? undefined,
+      );
+      if (run.status === 'WAITING_FOR_APPROVAL')
+        this.cancelRun(organizationId, run.id, 'APPROVAL_EXPIRED', null);
+    });
+  }
+
   /**
    * Validate and record one runtime-emitted event (agents-foundry/runtime/v1).
    * The caller must authenticate the runtime and supply the tenant it is authorized for.
@@ -542,7 +565,7 @@ export class ExecutionService {
       .all(run.id, actor.organizationId) as Row[];
     const approvals = this.db
       .prepare(
-        `SELECT id, action, risk, status, step_id, created_at, decided_at FROM approvals
+        `SELECT id, action, risk, status, step_id, created_at, decided_at, expires_at FROM approvals
          WHERE run_id=? AND organization_id=? ORDER BY created_at, rowid`,
       )
       .all(run.id, actor.organizationId) as Row[];
@@ -562,6 +585,7 @@ export class ExecutionService {
         stepId: row['step_id'] === null ? null : String(row['step_id']),
         createdAt: String(row['created_at']),
         ...(row['decided_at'] ? { decidedAt: String(row['decided_at']) } : {}),
+        ...(row['expires_at'] ? { expiresAt: String(row['expires_at']) } : {}),
       })),
       artifacts: artifacts.map((row) => this.mapArtifact(row)),
     };
