@@ -1,6 +1,6 @@
 # ADR 0006: Agent kernel adapter boundary
 
-- Status: Accepted (implementation in Phase C)
+- Status: Accepted (implemented in Phase C: `apps/agent-runtime/src/kernel`, `NativeKernel`)
 - Date: 2026-09-23
 
 ## Context

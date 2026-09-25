@@ -10,18 +10,22 @@
     "start:employee": "ng serve employee-desktop --port 4300",
     "tauri:dev": "tauri dev --config apps/employee-desktop/src-tauri/tauri.conf.json",
     "tauri:build": "tauri build --config apps/employee-desktop/src-tauri/tauri.conf.json",
-    "build": "npm run build:admin && npm run build:employee && npm run build:api",
+    "dev:runtime": "npm run dev --workspace @agents-foundry/agent-runtime",
+    "build": "npm run build:admin && npm run build:employee && npm run build:api && npm run build:runtime",
     "build:admin": "ng build control-plane-web",
     "build:employee": "ng build employee-desktop",
     "build:api": "npm run build --workspace @agents-foundry/control-plane-api",
-    "test": "npm run test:web && npm run test:api",
+    "build:runtime": "npm run build --workspace @agents-foundry/agent-runtime",
+    "test": "npm run test:web && npm run test:api && npm run test:runtime",
     "test:web": "ng test control-plane-web --watch=false && ng test employee-desktop --watch=false",
     "test:api": "npm run test --workspace @agents-foundry/control-plane-api",
+    "test:runtime": "npm run test --workspace @agents-foundry/agent-runtime",
     "check": "npm run build && npm run test"
   },
   "private": true,
   "workspaces": [
-    "apps/control-plane-api"
+    "apps/control-plane-api",
+    "apps/agent-runtime"
   ],
   "packageManager": "npm@11.9.0",
   "dependencies": {

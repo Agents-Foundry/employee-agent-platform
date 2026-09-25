@@ -31,6 +31,7 @@ apps/
   control-plane-api/   Express API and central SQLite development store
   control-plane-web/   Angular admin control plane
   employee-desktop/    Angular employee UI plus Tauri shell
+  agent-runtime/       Separate agent runtime process (kernel, model gateway, tools)
 packages/
   contracts/           Shared API and domain contracts
   policy-engine/       Fail-closed governed-action decisions
@@ -100,15 +101,18 @@ See [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), and the [s
 Agents Foundry is evolving into a governed platform for many AI employee roles, with the control
 plane, agent runtime, execution runtime and declarative role packages kept separate. Phase A
 (generic execution contracts, the thread/run/step/event model, artifacts, Agent Manifest v2 and
-the `agents-foundry/runtime/v1` protocol) and Phase B (a versioned, digest-pinned agent catalog
-with organization installations) are implemented. No agent runtime executes runs yet.
+the `agents-foundry/runtime/v1` protocol), Phase B (a versioned, digest-pinned agent catalog
+with organization installations) and Phase C (a separate agent runtime process with a kernel,
+model gateway, signed transport and approval pause/resume) are implemented. Generic runs are
+off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
 
 - [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
 - [Migration plan](docs/migration-plan.md), [runtime protocol](docs/runtime-protocol.md),
   [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
   [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0010](docs/adr/0010-catalog-of-record.md)
+  [0011](docs/adr/0011-runtime-transport-and-workload-identity.md)
+- Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 

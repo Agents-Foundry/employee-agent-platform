@@ -1,0 +1,23 @@
+{
+  "name": "@agents-foundry/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agents Foundry agent runtime: executes governed runs over agents-foundry/runtime/v1.",
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=../../.env src/main.ts",
+    "start": "node --env-file-if-exists=../../.env dist/apps/agent-runtime/src/main.js",
+    "keygen": "tsx src/keygen.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.2",
+    "vitest": "^4.0.8"
+  }
+}

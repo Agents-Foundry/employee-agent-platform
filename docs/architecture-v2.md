@@ -5,7 +5,7 @@ Agents Foundry is an operating system for governed AI employees. Four concerns s
 | Concern               | Decides                                                                           | Lives in                                       |
 | --------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
 | **Control plane**     | Who the employee is, its organization, permitted work, resources, approvals, secrets, policies, retained evidence | `employee-agent-platform` (this repository) |
-| **Agent runtime**     | How the employee reasons, uses skills, tools, models and MCP, and manages context  | `agent-runtime` (Phase C)                      |
+| **Agent runtime**     | How the employee reasons, uses skills, tools, models and MCP, and manages context  | `apps/agent-runtime` (Phase C, ADR 0011)       |
 | **Execution runtime** | Where potentially dangerous work executes                                          | `execution-runtime` (Phase E)                  |
 | **Role packages**     | What kind of employee it is                                                        | `<role>-agent` repositories (declarative)      |
 
@@ -42,7 +42,8 @@ Conversation ─┐
 - [Artifacts](artifacts.md): evidence metadata and storage references.
 - [Migration plan](migration-plan.md): phases, flags and exit criteria.
 - [Gap analysis](architecture-v2-gap-analysis.md): repository-grounded baseline.
-- ADRs [0002](adr/0002-separate-agent-runtime-from-control-plane.md)–[0009](adr/0009-role-packages-are-declarative.md).
+- [Agent runtime](agent-runtime.md): host, kernel, model gateway, tools and transport (Phase C).
+- ADRs [0002](adr/0002-separate-agent-runtime-from-control-plane.md)–[0011](adr/0011-runtime-transport-and-workload-identity.md).
 
 ## Subsystem designs (not implemented)
 
@@ -60,7 +61,7 @@ drift from code. Until then these summaries are binding constraints:
 - **MCP (Phase C+).** `McpServerDefinition`, `McpInstallation`, `McpToolDefinition`,
   `McpRuntimeConnection`. MCP tools are filtered by manifest, organization policy, employee
   permissions and scope. An unknown MCP tool is denied.
-- **Model gateway (Phase C).** `ModelProfile` / `ModelProvider` / `ModelCapability` /
+- **Model gateway (Phase C, minimal slice implemented; see [agent-runtime.md](agent-runtime.md)).** `ModelProfile` / `ModelProvider` / `ModelCapability` /
   `ModelRoutingPolicy`. Roles request profiles, not SDKs. Credential mode stays `EMPLOYEE_BYOK` or
   `ORGANIZATION_MANAGED`. The database stores secret references only, and the runtime receives
   short-lived or brokered credentials.
