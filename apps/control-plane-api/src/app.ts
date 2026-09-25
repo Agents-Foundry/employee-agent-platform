@@ -6,7 +6,6 @@ import { z } from 'zod';
 import type { QaRunRequest, QaRunResponse } from '@agents-foundry/contracts';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { ControlPlaneDatabase } from './database.js';
-import { qaBlueprint, validateAnswers } from './blueprints.js';
 import { configureAuth, loadAuthConfig, type AuthConfig, type GoogleSignIn } from './auth.js';
 import { configureOrganizationRoutes } from './organization-routes.js';
 import { configureStructureRoutes } from './organization/structure-routes.js';
@@ -14,13 +13,15 @@ import { OrganizationDomainError } from './organization/structure-service.js';
 import { configureJobRoutes } from './organization/job-routes.js';
 import { configureTenancyRoutes } from './organization/tenancy-routes.js';
 import { configureExecutionRoutes } from './execution/execution-routes.js';
+import { configureCatalogRoutes } from './catalog/catalog-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 
 const provisioningSchema = z
   .object({
-    blueprintId: z.literal(qaBlueprint.id),
-    blueprintVersion: z.literal(qaBlueprint.version),
+    // Existence, answers and capabilities are resolved against the catalog of record.
+    blueprintId: z.string().min(1).max(120),
+    blueprintVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
     provider: z
       .string()
       .trim()
@@ -150,12 +151,15 @@ export function createApp(
   configureJobRoutes(app, database.jobs, auth);
   configureTenancyRoutes(app, database, auth);
   configureExecutionRoutes(app, database.execution);
+  configureCatalogRoutes(app, database.catalog, database.installations, auth);
 
   app.get('/api/bootstrap', (_request, response) => {
     response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
   });
 
-  app.get('/api/blueprints', (_request, response) => response.json([qaBlueprint]));
+  app.get('/api/blueprints', (_request, response) =>
+    response.json(database.catalog.legacyBlueprints()),
+  );
   app.get('/api/organization/agents', (_request, response) => {
     const actor = response.locals['actor'];
     if (auth.mode !== 'password' || actor.role !== 'ADMIN')
@@ -169,6 +173,7 @@ export function createApp(
     const input = provisioningSchema
       .extend({
         requestId: z.string().uuid(),
+        installationId: z.string().uuid().optional(),
         name: z.string().trim().min(1).max(120),
         employeeIds: z
           .array(z.string().uuid())
@@ -179,7 +184,6 @@ export function createApp(
       })
       .strict()
       .parse(request.body);
-    input.answers = validateAnswers(input.answers);
     try {
       return response.status(201).json(database.createAssignedAgents(actor, input));
     } catch (error) {
@@ -205,7 +209,6 @@ export function createApp(
     if (actor.role !== 'EMPLOYEE')
       return response.status(403).json({ error: 'EMPLOYEE_ROLE_REQUIRED' });
     const input = provisioningSchema.parse(request.body);
-    input.answers = validateAnswers(input.answers);
     return response
       .status(201)
       .json(database.requestProvisioning(actor.id, input, actor.organizationId));

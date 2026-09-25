@@ -23,7 +23,10 @@ export interface AgentManifestV2Payload {
     organizationId: string;
     employeeId: string;
     issuedAt: string;
-    blueprint: VersionedReference;
+    /** `digest` pins the exact catalog bundle (Phase B); absent on Phase A manifests. */
+    blueprint: VersionedReference & { digest?: string };
+    /** Organization installation the agent was created from, when any. */
+    installationId?: string;
   };
   identity: { name: string; role: string; department: string };
   persona: { profile: string };

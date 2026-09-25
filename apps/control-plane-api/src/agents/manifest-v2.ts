@@ -2,15 +2,14 @@ import type {
   AgentManifestPayload,
   AgentManifestV2Payload,
   AnyAgentManifestPayload,
-  ConnectorRequirement,
   KeySource,
   ManifestCapability,
+  ResolvedBlueprintBundle,
 } from '@agents-foundry/contracts';
-import { qaBlueprint } from '../blueprints.js';
 
 export const POLICY_VERSION = 'foundation-approval-v1';
 
-/** Fields every issued manifest resolves, whichever version is signed. */
+/** Everything an issued manifest resolves, whichever version is signed. */
 export interface ManifestIssue {
   manifestId: string;
   agentId: string;
@@ -18,79 +17,20 @@ export interface ManifestIssue {
   employeeId: string;
   issuedAt: string;
   agentName: string;
-  blueprintId: string;
-  blueprintVersion: string;
+  bundle: ResolvedBlueprintBundle;
+  installationId: string | null;
   provider: string;
   model: string;
   credentialMode: KeySource;
   answers: Record<string, string | string[]>;
+  /** Fixed at request time for employee requests; policy outcomes otherwise. */
   capabilities: ManifestCapability[];
 }
 
-type RoleSections = Omit<
-  AgentManifestV2Payload,
-  | 'apiVersion'
-  | 'kind'
-  | 'metadata'
-  | 'identity'
-  | 'model'
-  | 'policies'
-  | 'configuration'
-  | 'conversationSync'
-> & { role: string; department: string; modelProfile: string; policyProfile: string };
-
-const providerIds: Record<string, string> = {
-  Jira: 'jira',
-  'Azure DevOps': 'azure-devops',
-  Linear: 'linear',
-  Bitbucket: 'bitbucket',
-  GitHub: 'github',
-  GitLab: 'gitlab',
-};
-
-function selections(answers: Record<string, string | string[]>, key: string): string[] {
-  const value = answers[key];
+function selections(answers: Record<string, string | string[]>, questionId: string): string[] {
+  const value = answers[questionId];
   return Array.isArray(value) ? value : [];
 }
-
-/**
- * Phase A compatibility adapter (ADR 0009): declarative v2 sections for blueprints that predate
- * the catalog. Phase B replaces this registry with versioned catalog entries; it is data, not
- * runtime behaviour, and nothing downstream branches on the role.
- */
-const blueprintSections: Record<
-  string,
-  (answers: Record<string, string | string[]>) => RoleSections
-> = {
-  [qaBlueprint.id]: (answers) => {
-    const connectors: ConnectorRequirement[] = [
-      ...selections(answers, 'issueTracker').map((name) => ({
-        id: providerIds[name]!,
-        capabilities: ['issueTracker.read'],
-      })),
-      ...selections(answers, 'sourceControl').map((name) => ({
-        id: providerIds[name]!,
-        capabilities: ['sourceControl.read'],
-      })),
-    ];
-    return {
-      role: 'qa-engineer',
-      department: qaBlueprint.department,
-      modelProfile: 'qa-default',
-      policyProfile: 'qa-standard',
-      persona: { profile: 'qa-engineer-default' },
-      runtime: { profile: 'standard-agent', isolation: 'sandboxed' },
-      skills: qaBlueprint.skills.map((id) => ({ id, version: '1.0.0' })),
-      tools: ['repository', 'browser', 'artifact'],
-      connectors,
-      mcp: selections(answers, 'testingTechnologies').includes('Playwright') ? ['playwright'] : [],
-      memory: { profile: 'project-employee-memory' },
-      knowledge: { sources: ['assigned-repositories', 'issue-tracker-project'] },
-      workflows: ['validate-story', 'sanity-test', 'regression-test', 'post-release-validation'],
-      evaluations: { suite: 'qa-engineer-v1' },
-    };
-  },
-};
 
 export function buildManifestV1(issue: ManifestIssue): AgentManifestPayload {
   return {
@@ -99,7 +39,7 @@ export function buildManifestV1(issue: ManifestIssue): AgentManifestPayload {
     agentId: issue.agentId,
     organizationId: issue.organizationId,
     employeeId: issue.employeeId,
-    blueprint: { id: issue.blueprintId, version: issue.blueprintVersion },
+    blueprint: { id: issue.bundle.blueprint.id, version: issue.bundle.blueprint.version },
     model: { provider: issue.provider, model: issue.model, credentialMode: issue.credentialMode },
     answers: issue.answers,
     capabilities: issue.capabilities,
@@ -109,12 +49,27 @@ export function buildManifestV1(issue: ManifestIssue): AgentManifestPayload {
   };
 }
 
+/**
+ * Resolve a catalog bundle and validated answers into a v2 manifest (ADR 0004, ADR 0009).
+ * Entirely data-driven: connectors and MCP servers follow the blueprint's declared answer
+ * mappings, so a new role needs a new catalog entry, not a code change here.
+ */
 export function buildManifestV2(issue: ManifestIssue): AgentManifestV2Payload {
-  const resolve = Object.hasOwn(blueprintSections, issue.blueprintId)
-    ? blueprintSections[issue.blueprintId]
-    : undefined;
-  if (!resolve) throw new Error('BLUEPRINT_UNSUPPORTED');
-  const { role, department, modelProfile, policyProfile, ...sections } = resolve(issue.answers);
+  const { blueprint, digest } = issue.bundle;
+  const connectors = blueprint.connectors.flatMap((requirement) =>
+    selections(issue.answers, requirement.selection.questionId).map((option) => {
+      const id = requirement.selection.providers[option];
+      if (!id) throw new Error('CONNECTOR_SELECTION_UNMAPPED');
+      return { id, capabilities: [...requirement.capabilities] };
+    }),
+  );
+  const mcp = blueprint.mcp
+    .filter(
+      ({ whenAnswer }) =>
+        !whenAnswer ||
+        selections(issue.answers, whenAnswer.questionId).includes(whenAnswer.includes),
+    )
+    .map(({ id }) => id);
   return {
     apiVersion: 'agents-foundry/v2',
     kind: 'AgentManifest',
@@ -124,21 +79,31 @@ export function buildManifestV2(issue: ManifestIssue): AgentManifestV2Payload {
       organizationId: issue.organizationId,
       employeeId: issue.employeeId,
       issuedAt: issue.issuedAt,
-      blueprint: { id: issue.blueprintId, version: issue.blueprintVersion },
+      blueprint: { id: blueprint.id, version: blueprint.version, digest },
+      ...(issue.installationId ? { installationId: issue.installationId } : {}),
     },
-    identity: { name: issue.agentName, role, department },
-    ...sections,
+    identity: { name: issue.agentName, role: blueprint.role, department: blueprint.department },
+    persona: { ...blueprint.persona },
+    runtime: { ...blueprint.runtime },
     model: {
-      profile: modelProfile,
+      profile: blueprint.model.profile,
       provider: issue.provider,
       model: issue.model,
       credentialMode: issue.credentialMode,
     },
+    skills: blueprint.skills.map(({ id, version }) => ({ id, version })),
+    tools: blueprint.tools.map(({ id }) => id),
+    connectors,
+    mcp,
+    memory: { ...blueprint.memory },
+    knowledge: { sources: [...blueprint.knowledge.sources] },
     policies: {
-      profile: policyProfile,
+      profile: blueprint.policy.profile,
       policyVersion: POLICY_VERSION,
       capabilities: issue.capabilities,
     },
+    workflows: blueprint.workflows.map(({ id }) => id),
+    evaluations: { ...blueprint.evaluations },
     configuration: issue.answers,
     conversationSync: 'REQUIRED',
   };
