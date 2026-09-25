@@ -51,7 +51,8 @@
     <af-structure-admin />
     <af-job-admin />
     <af-people-admin />
-    <af-agent-admin (created)="refresh()" />
+    <af-agent-installations (changed)="agentAdmin.refresh()" />
+    <af-agent-admin #agentAdmin (created)="refresh()" />
     <section class="metrics" id="overview" aria-label="Workspace summary">
       <article>
         <div class="metric-icon violet">✦</div>

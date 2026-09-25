@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { API_URL } from '../../../../packages/web-auth/src/session';
 import { OrganizationAdmin } from './organization-admin';
 import { AgentAdmin } from './agent-admin';
+import { AgentInstallations } from './agent-installations';
 import { StructureAdmin } from './organization/structure-admin';
 import { JobAdmin } from './organization/job-admin';
 import { TenantAdmin } from './organization/tenant-admin';
@@ -23,6 +24,7 @@ import type {
     FormsModule,
     OrganizationAdmin,
     AgentAdmin,
+    AgentInstallations,
     StructureAdmin,
     JobAdmin,
     TenantAdmin,
