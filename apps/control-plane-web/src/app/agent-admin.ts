@@ -8,6 +8,7 @@ import type {
   AgentAssignment,
   AgentBlueprint,
   KeySource,
+  OrganizationAgentInstallation,
 } from '@agents-foundry/contracts';
 import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session';
 
@@ -49,6 +50,24 @@ interface Recipient {
               maxlength="120"
               [disabled]="busy()"
           /></label>
+          <label
+            >Start from installation<select
+              name="installationId"
+              [(ngModel)]="installationId"
+              [disabled]="busy()"
+            >
+              <option value="">None (answer every setting)</option>
+              @for (installation of matchingInstallations(definition); track installation.id) {
+                <option [value]="installation.id">{{ installation.name }}</option>
+              }
+            </select></label
+          >
+          @if (selectedInstallation(); as installation) {
+            <p>
+              Organization settings come from {{ installation.name }} and cannot be changed per
+              agent.
+            </p>
+          }
           <fieldset [disabled]="busy()">
             <legend>Assign to active employees (up to 25)</legend>
             @for (employee of recipients(); track employee.id) {
@@ -66,7 +85,7 @@ interface Recipient {
               </p>
             }
           </fieldset>
-          @for (question of definition.questionnaire; track question.id) {
+          @for (question of agentQuestions(definition); track question.id) {
             @if (question.type === 'multiselect') {
               <fieldset [disabled]="busy()">
                 <legend>{{ question.label }}</legend>
@@ -257,6 +276,7 @@ export class AgentAdmin implements OnInit {
   readonly blueprint = signal<AgentBlueprint | null>(null);
   readonly recipients = signal<Recipient[]>([]);
   readonly assignments = signal<AgentAssignment[]>([]);
+  readonly installations = signal<OrganizationAgentInstallation[]>([]);
   readonly busy = signal(false);
   readonly loading = signal(false);
   readonly error = signal('');
@@ -267,6 +287,7 @@ export class AgentAdmin implements OnInit {
   credentialMode: KeySource = 'ORGANIZATION_MANAGED';
   answers: Record<string, string | string[]> = {};
   selected: string[] = [];
+  installationId = '';
   private pending: { fingerprint: string; requestId: string } | null = null;
   ngOnInit() {
     if (this.auth.config()?.mode === 'password') void this.refresh();
@@ -275,6 +296,19 @@ export class AgentAdmin implements OnInit {
     this.selected = checked
       ? [...new Set([...this.selected, id])]
       : this.selected.filter((value) => value !== id);
+  }
+  matchingInstallations(blueprint: AgentBlueprint) {
+    return this.installations().filter(
+      (item) => item.blueprintId === blueprint.id && item.blueprintVersion === blueprint.version,
+    );
+  }
+  selectedInstallation() {
+    return this.installations().find((item) => item.id === this.installationId) ?? null;
+  }
+  /** Questions an installation already answers are inherited, not asked again. */
+  agentQuestions(blueprint: AgentBlueprint) {
+    const inherited = this.selectedInstallation()?.configuration ?? {};
+    return blueprint.questionnaire.filter((question) => !Object.hasOwn(inherited, question.id));
   }
   toggle(id: string, option: string, checked: boolean) {
     const current = Array.isArray(this.answers[id]) ? (this.answers[id] as string[]) : [];
@@ -287,11 +321,18 @@ export class AgentAdmin implements OnInit {
     this.loading.set(true);
     this.error.set('');
     try {
-      const [blueprints, recipients, assignments] = await Promise.all([
+      const [blueprints, recipients, assignments, installations] = await Promise.all([
         firstValueFrom(this.http.get<AgentBlueprint[]>(`${API_URL}/blueprints`)),
         firstValueFrom(this.http.get<Recipient[]>(`${API_URL}/organization/members`)),
         firstValueFrom(this.http.get<AgentAssignment[]>(`${API_URL}/organization/agents`)),
+        firstValueFrom(
+          this.http.get<OrganizationAgentInstallation[]>(
+            `${API_URL}/organization/agent-installations`,
+          ),
+        ),
       ]);
+      this.installations.set(installations);
+      if (!this.selectedInstallation()) this.installationId = '';
       this.blueprint.set(blueprints[0] ?? null);
       this.recipients.set(
         recipients.filter((member) => member.role === 'EMPLOYEE' && member.status === 'ACTIVE'),
@@ -316,7 +357,10 @@ export class AgentAdmin implements OnInit {
       this.selected.length > 25
     )
       return;
+    const installation = this.selectedInstallation();
+    const asked = new Set(this.agentQuestions(blueprint).map((question) => question.id));
     const body: Omit<AdminAgentInput, 'requestId'> = {
+      ...(installation ? { installationId: installation.id } : {}),
       name: this.name.trim(),
       employeeIds: [...this.selected].sort(),
       blueprintId: blueprint.id,
@@ -324,7 +368,9 @@ export class AgentAdmin implements OnInit {
       provider: this.provider,
       model: this.model,
       credentialMode: this.credentialMode,
-      answers: structuredClone(this.answers),
+      answers: Object.fromEntries(
+        Object.entries(structuredClone(this.answers)).filter(([id]) => asked.has(id)),
+      ),
     };
     const fingerprint = JSON.stringify(body);
     if (this.pending?.fingerprint !== fingerprint)
