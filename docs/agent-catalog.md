@@ -26,7 +26,8 @@ Not implemented yet:
 - Loading role packages from external repositories.
 - A catalog publishing and promotion workflow.
 - Per-employee agent editing or re-issuing.
-- Runtime use of skills, tools and workflows. Nothing executes them until Phase C.
+- Runtime use of skills and workflows beyond prompting. Phase C executes catalog tools that
+  have a runtime implementation (`artifact`) and governs their actions (ADR 0011).
 - Editing installations in the UI. Updates are API-only: `PUT /api/organization/agent-installations/:id`.
 
 ## Definitions

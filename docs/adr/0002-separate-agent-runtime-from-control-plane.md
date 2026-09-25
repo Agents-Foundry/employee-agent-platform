@@ -16,8 +16,9 @@ The control plane orchestrates; a separate agent runtime executes. The control p
 identity, organizations, catalog, provisioning, signed manifests, policy, approvals, audit and
 run records. The runtime owns reasoning loops, context, model access, skills, tools and MCP
 clients. They communicate only through the versioned protocol `agents-foundry/runtime/v1`
-(`packages/contracts/src/runtime/v1`). The runtime starts as contracts in this repository and
-moves to the `agent-runtime` repository once a working kernel exists (Phase C).
+(`packages/contracts/src/runtime/v1`). The runtime starts as contracts in this repository. Phase C adds it as the separate
+workspace `apps/agent-runtime`, which moves to its own repository once contracts are
+published (ADR 0011).
 
 ## Consequences
 
