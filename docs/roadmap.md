@@ -56,7 +56,7 @@ Phased evolution toward a generic governed AI employee platform. See `migration-
 
 - Phase A — generic execution contracts, thread/run/step/event persistence, artifacts, Agent
   Manifest v2 (flagged) and the runtime protocol v1 (implemented; no runtime executes yet)
-- Phase B — versioned agent catalog and organization installations (pending)
+- Phase B — versioned, digest-pinned agent catalog and organization installations (implemented)
 - Phases C–G — agent runtime, Action Gateway, execution runtime, QA migration, and the Frontend
   Engineer as the second-role acceptance test (pending)
 
