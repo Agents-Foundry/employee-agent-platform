@@ -5,6 +5,7 @@ export * from './artifacts.js';
 export * from './run-lifecycle.js';
 export type * from './manifest-v2.js';
 export type * from './runtime/v1/protocol.js';
+export type * from './catalog.js';
 import type { AgentManifestV2Payload } from './manifest-v2.js';
 import type { AgentRunStatus } from './execution.js';
 
@@ -115,6 +116,8 @@ export interface ProvisioningRequest extends ProvisioningInput {
 
 export interface AdminAgentInput extends ProvisioningInput {
   requestId: string;
+  /** Organization installation to inherit INSTALLATION-scoped answers from (Phase B). */
+  installationId?: string;
   name: string;
   employeeIds: string[];
 }

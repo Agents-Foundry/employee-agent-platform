@@ -57,3 +57,8 @@ export function evaluatePolicy(action: string): PolicyDecision {
   }
   return { ...decisions[action as GovernedAction] };
 }
+
+/** True only for actions with an explicit decision; catalogs may not declare anything else. */
+export function isKnownAction(action: string): boolean {
+  return Object.hasOwn(decisions, action);
+}

@@ -589,7 +589,7 @@ describe('migration 006 upgrade', () => {
         INSERT INTO approvals (id,organization_id,requested_by,action,resource_type,resource_id,risk,summary,status,created_at)
           VALUES ('p','o','e','qa.execute_playwright','qa_run','q','MEDIUM','s','PENDING','2026-01-01');
         INSERT INTO qa_runs VALUES ('q','o','e','c','S-1','https://x.example','AWAITING_APPROVAL','[]','p','2026-01-01');`);
-      migrateOrganization(sql);
+      migrateOrganization(sql, 6);
       expect(sql.prepare('SELECT max(version) AS v FROM schema_migrations').get()?.['v']).toBe(6);
       expect(sql.prepare('SELECT status, run_id FROM approvals').get()).toEqual({
         status: 'PENDING',
@@ -597,7 +597,7 @@ describe('migration 006 upgrade', () => {
       });
       expect(sql.prepare('SELECT count(*) AS n FROM qa_runs').get()?.['n']).toBe(1);
       expect(sql.prepare('SELECT count(*) AS n FROM agent_runs').get()?.['n']).toBe(0);
-      migrateOrganization(sql);
+      migrateOrganization(sql, 6);
       expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()?.['n']).toBe(6);
     } finally {
       sql.close();

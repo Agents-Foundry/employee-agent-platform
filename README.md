@@ -100,13 +100,15 @@ See [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), and the [s
 Agents Foundry is evolving into a governed platform for many AI employee roles, with the control
 plane, agent runtime, execution runtime and declarative role packages kept separate. Phase A
 (generic execution contracts, the thread/run/step/event model, artifacts, Agent Manifest v2 and
-the `agents-foundry/runtime/v1` protocol) is implemented. No agent runtime executes runs yet.
+the `agents-foundry/runtime/v1` protocol) and Phase B (a versioned, digest-pinned agent catalog
+with organization installations) are implemented. No agent runtime executes runs yet.
 
 - [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
 - [Migration plan](docs/migration-plan.md), [runtime protocol](docs/runtime-protocol.md),
-  [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md)
+  [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
+  [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0009](docs/adr/0009-role-packages-are-declarative.md)
+  [0010](docs/adr/0010-catalog-of-record.md)
 
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 

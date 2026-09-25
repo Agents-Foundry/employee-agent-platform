@@ -8,7 +8,7 @@ error handling and documentation. A type, table or route stub alone does not cou
 | Phase | Scope                                                                                         | Status          |
 | ----- | --------------------------------------------------------------------------------------------- | --------------- |
 | A     | Generic execution contracts, Thread/AgentRun/RunStep/AgentEvent, Artifact, Manifest v2, runtime protocol v1 | Implemented (see below) |
-| B     | Catalog: `AgentBlueprintVersion`, skills, workflows, tool/connector requirements, org installations | Not started     |
+| B     | Catalog: `AgentBlueprintVersion`, skills, workflows, tool/connector requirements, org installations | Implemented (see below) |
 | C     | `agent-runtime` repository: session, run loop, model abstraction, one tool, approval pause/resume | Not started     |
 | D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch | Not started     |
 | E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright | Not started |
@@ -35,6 +35,28 @@ error handling and documentation. A type, table or route stub alone does not cou
 - No runtime-ingestion HTTP endpoint (it requires workload identity, Phase C).
 - No UI for the run timeline yet. The employee app still shows the legacy QA result.
 
+## Phase B — delivered
+
+- Declarative catalog package (`packages/catalog`): QA Engineer 1.1.0 plus four skills, four
+  tools and four workflows. Strict schemas live in `packages/contracts/src/catalog-schemas.ts`.
+- Startup validation of cross-references and policy actions. Migration 007 registers an
+  immutable catalog of record pinned by digest (ADR 0010).
+- Organization installations (migration 007, `InstallationService`, admin API and panel).
+  Admin agent creation can start from an installation. `agents.installation_id` is set and
+  enforced by a trigger.
+- The generic manifest resolver replaces the Phase A QA adapter. `qaBlueprint` and
+  `blueprints.ts` are removed; `/api/blueprints` is served from the catalog in its legacy shape.
+- Provisioning and admin creation accept any registered blueprint version.
+
+### Phase B limitations
+
+- Role packages are built in. Loading them from external repositories, and a
+  publish/promotion workflow, are future work.
+- Installation editing is API-only in the UI. Existing agents cannot be moved to a new
+  installation or blueprint version; create new agents instead.
+- The employee provisioning request form still uses the latest blueprint and full
+  questionnaire; it does not select installations.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                  |
@@ -47,6 +69,7 @@ deny into an allow.
 
 ## Next recommended phase
 
-Phase B, followed immediately by a Phase C spike. The runtime protocol is only proven once a
-real process speaks it. Phase B supplies the versioned catalog that Manifest v2 resolves from, and
-removes the hard-coded QA adapter.
+Phase C: create the `agent-runtime` repository with an `AgentKernel` boundary, a model gateway
+and one tool. Add an authenticated runtime transport that submits queued runs and ingests
+`runtime/v1` events through the existing service. The runtime should consume v2 manifests,
+because they now carry pinned skills, tools and workflows.
