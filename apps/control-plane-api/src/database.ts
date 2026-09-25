@@ -32,6 +32,8 @@ import { OrganizationStructureService } from './organization/structure-service.j
 import { JobArchitectureService } from './organization/job-service.js';
 import { TenancyService } from './organization/tenancy-service.js';
 import { ExecutionService } from './execution/execution-service.js';
+import { RuntimeIdentityRegistry, type RuntimeIdentityConfig } from './runtime/runtime-identity.js';
+import { RuntimeTransportService } from './runtime/runtime-transport-service.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { InstallationService } from './catalog/installation-service.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
@@ -67,12 +69,26 @@ export class ControlPlaneDatabase {
   readonly installations: InstallationService;
   /** ADR 0004: new agents receive agents-foundry/v2 manifests only when explicitly enabled. */
   readonly manifestV2Issuance: boolean;
+  /** Phase C: employees may start generic runs for runtimes only when explicitly enabled. */
+  readonly genericRuntimeEnabled: boolean;
+  readonly runtimeIdentities: RuntimeIdentityRegistry;
+  readonly runtimeTransport: RuntimeTransportService;
 
   constructor(
     path = process.env['DATABASE_PATH'] ?? '.data/agents-foundry.db',
     seedDemo = true,
-    options: { manifestV2Issuance?: boolean; catalog?: CatalogDefinitions } = {},
+    options: {
+      manifestV2Issuance?: boolean;
+      catalog?: CatalogDefinitions;
+      genericRuntime?: boolean;
+      runtimeIdentities?: RuntimeIdentityConfig[];
+    } = {},
   ) {
+    this.genericRuntimeEnabled =
+      options.genericRuntime ?? process.env['GENERIC_AGENT_RUNTIME_ENABLED'] === 'true';
+    this.runtimeIdentities = options.runtimeIdentities
+      ? new RuntimeIdentityRegistry(options.runtimeIdentities)
+      : RuntimeIdentityRegistry.fromEnvironment();
     this.manifestV2Issuance =
       options.manifestV2Issuance ?? process.env['AGENT_MANIFEST_V2_ISSUANCE_ENABLED'] === 'true';
     this.signer =
@@ -107,6 +123,13 @@ export class ControlPlaneDatabase {
     this.execution = new ExecutionService(this.db, (agentId, organizationId, employeeId) =>
       this.getManifest(agentId, organizationId, employeeId),
     );
+    this.runtimeTransport = new RuntimeTransportService(this.db, this.execution, {
+      loadManifest: (agentId, organizationId, employeeId) =>
+        this.getManifest(agentId, organizationId, employeeId),
+      bundle: (blueprintId, version) => this.catalog.bundle(blueprintId, version, 404),
+      audit: (actorId, eventType, resourceType, resourceId, metadata, organizationId) =>
+        this.audit(actorId, eventType, resourceType, resourceId, metadata, organizationId),
+    });
     if (seedDemo) this.seed();
   }
 

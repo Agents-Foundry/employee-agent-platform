@@ -7,6 +7,7 @@ import { accountLinkingSql } from './004-account-linking.js';
 import { unitHeadsMembershipDatesSql } from './005-unit-heads-membership-dates.js';
 import { agentExecutionSql } from './006-agent-execution.js';
 import { agentCatalogSql } from './007-agent-catalog.js';
+import { runtimeTransportSql } from './008-runtime-transport.js';
 
 export function migrateOrganization(
   db: DatabaseSync,
@@ -23,6 +24,7 @@ export function migrateOrganization(
     { version: 5, name: 'unit-heads-membership-dates', sql: unitHeadsMembershipDatesSql },
     { version: 6, name: 'agent-execution', sql: agentExecutionSql },
     { version: 7, name: 'agent-catalog', sql: agentCatalogSql },
+    { version: 8, name: 'runtime-transport', sql: runtimeTransportSql },
   ];
   for (const migration of migrations) {
     if (migration.version > throughVersion) break;

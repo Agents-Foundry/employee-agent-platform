@@ -14,6 +14,7 @@ import { configureJobRoutes } from './organization/job-routes.js';
 import { configureTenancyRoutes } from './organization/tenancy-routes.js';
 import { configureExecutionRoutes } from './execution/execution-routes.js';
 import { configureCatalogRoutes } from './catalog/catalog-routes.js';
+import { configureRuntimeRoutes } from './runtime/runtime-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 
@@ -122,6 +123,8 @@ export function createApp(
       return callback(new Error('ORIGIN_FORBIDDEN'));
     }),
   );
+  // Signed runtime transport: its own body parser, limits and authentication (ADR 0011).
+  configureRuntimeRoutes(app, database.runtimeIdentities, database.runtimeTransport);
   app.use(express.json({ limit: '64kb' }));
   app.use(
     rateLimit({
@@ -150,7 +153,11 @@ export function createApp(
   configureStructureRoutes(app, database.structure, auth);
   configureJobRoutes(app, database.jobs, auth);
   configureTenancyRoutes(app, database, auth);
-  configureExecutionRoutes(app, database.execution);
+  configureExecutionRoutes(app, database.execution, {
+    genericRuntimeEnabled: database.genericRuntimeEnabled,
+    loadManifest: (agentId, organizationId, employeeId) =>
+      database.getManifest(agentId, organizationId, employeeId),
+  });
   configureCatalogRoutes(app, database.catalog, database.installations, auth);
 
   app.get('/api/bootstrap', (_request, response) => {

@@ -269,6 +269,79 @@ export class ExecutionService {
   }
 
   /**
+   * Pause a running run on a governed action that requires approval (ADR 0005, ADR 0011).
+   * The approval row already exists in the caller's transaction; the step and run move to
+   * WAITING_FOR_APPROVAL atomically with it, so no decision can race the pause.
+   */
+  pauseForApproval(
+    organizationId: string,
+    runId: string,
+    stepId: string,
+    approval: { id: string; action: string; risk: string; summary: string },
+  ): void {
+    this.transaction(() => {
+      const run = this.runRow(organizationId, runId);
+      if (run.status !== 'RUNNING') throw new ExecutionError(409, 'RUN_NOT_RUNNING');
+      const scope = { organizationId, threadId: run.threadId, runId };
+      const step = this.stepRow(organizationId, runId, stepId);
+      this.transitionStep(organizationId, step.id, 'WAITING_FOR_APPROVAL');
+      this.appendEvent(
+        scope,
+        'approval.requested',
+        'CONTROL_PLANE',
+        run.agentId,
+        {
+          approvalId: approval.id,
+          action: approval.action,
+          risk: approval.risk,
+          summary: approval.summary,
+        },
+        step.id,
+      );
+      this.transitionRun(scope, 'WAITING_FOR_APPROVAL', 'APPROVAL_REQUIRED');
+      this.appendEvent(scope, 'run.paused', 'CONTROL_PLANE', null, {
+        reason: 'APPROVAL_REQUIRED',
+        approvalId: approval.id,
+      });
+    });
+  }
+
+  /** Cancel a non-terminal run; a runtime holding it receives `run.cancel` on its next claim. */
+  cancelRun(
+    organizationId: string,
+    runId: string,
+    reason: string,
+    actorId: string | null,
+  ): AgentRun {
+    return this.transaction(() => {
+      const run = this.runRow(organizationId, runId);
+      if (!canTransitionRun(run.status, 'CANCELLED')) throw new ExecutionError(409, 'RUN_TERMINAL');
+      const scope = { organizationId, threadId: run.threadId, runId };
+      const open = this.db
+        .prepare(
+          `SELECT id FROM agent_run_steps WHERE run_id=? AND organization_id=?
+           AND status IN ('PENDING','RUNNING','WAITING_FOR_APPROVAL')`,
+        )
+        .all(runId, organizationId) as { id: string }[];
+      for (const step of open) this.transitionStep(organizationId, step.id, 'CANCELLED');
+      this.transitionRun(scope, 'CANCELLED', reason);
+      this.appendEvent(scope, 'run.cancelled', 'CONTROL_PLANE', actorId, { reason });
+      return this.mapRun(this.db.prepare('SELECT * FROM agent_runs WHERE id=?').get(runId) as Row);
+    });
+  }
+
+  /** The owning employee cancels their own run. */
+  cancelOwnRun(actor: Actor, runId: string): AgentRun {
+    const run = this.readableRun(actor, runId, false);
+    return this.cancelRun(actor.organizationId, run.id, 'CANCELLED_BY_EMPLOYEE', actor.id);
+  }
+
+  /** Employee-facing run view (no runtime bookkeeping). */
+  getOwnRun(actor: Actor, runId: string): AgentRun {
+    return this.readableRun(actor, runId, false);
+  }
+
+  /**
    * Validate and record one runtime-emitted event (agents-foundry/runtime/v1).
    * The caller must authenticate the runtime and supply the tenant it is authorized for.
    */
@@ -312,6 +385,21 @@ export class ExecutionService {
       if (!decision.accepted) throw new ExecutionError(409, decision.code);
       const scope = { organizationId, threadId: run.threadId, runId: run.id };
       const stepId = envelope.stepId;
+      if (envelope.type === 'run.resumed') {
+        // The runtime must name the approval that released the run; the approved step restarts.
+        const approval = this.db
+          .prepare(
+            `SELECT step_id FROM approvals WHERE id=? AND organization_id=? AND run_id=? AND status='APPROVED'`,
+          )
+          .get(envelope.payload.approvalId, organizationId, run.id) as
+          { step_id: string | null } | undefined;
+        if (!approval) throw new ExecutionError(409, 'RUNTIME_APPROVAL_MISMATCH');
+        if (
+          approval.step_id &&
+          this.stepRow(organizationId, run.id, approval.step_id).status === 'PENDING'
+        )
+          this.transitionStep(organizationId, approval.step_id, 'RUNNING');
+      }
       if (envelope.type === 'step.started') {
         if (this.db.prepare('SELECT 1 FROM agent_run_steps WHERE id=?').get(stepId!))
           throw new ExecutionError(409, 'STEP_ALREADY_EXISTS');
