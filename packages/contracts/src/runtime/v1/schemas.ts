@@ -26,6 +26,11 @@ import {
   type RuntimeEventEnvelope,
   type RuntimeEventPayloads,
 } from './protocol.js';
+import type {
+  RuntimeActionDecision,
+  RuntimeActionRequest,
+  RuntimeClaimResponse,
+} from './transport.js';
 
 /** Upper bound for one serialized event or command. */
 export const MAX_RUNTIME_MESSAGE_BYTES = 256 * 1024;
@@ -38,6 +43,8 @@ export class RuntimeProtocolError extends Error {
       | 'RUNTIME_EVENT_INVALID'
       | 'RUNTIME_EVENT_TYPE_FORBIDDEN'
       | 'RUNTIME_COMMAND_INVALID'
+      | 'RUNTIME_ACTION_INVALID'
+      | 'RUNTIME_RESPONSE_INVALID'
       | 'MANIFEST_INVALID',
     readonly issues: readonly string[] = [],
   ) {
@@ -406,4 +413,69 @@ export function parseRuntimeCommand(input: unknown): RuntimeCommand {
   )
     throw new RuntimeProtocolError('RUNTIME_COMMAND_INVALID', ['correlation: manifest mismatch']);
   return command;
+}
+
+const actionName = z.string().regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,5}$/);
+const risk = z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
+const actionRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    requestId: uuid,
+    correlation: correlationSchema.extend({ stepId: uuid, toolCallId: uuid }).strict(),
+    action: actionName,
+    toolId: slug,
+    toolVersion: semver,
+    inputDigest: digest,
+    summary: z.string().trim().min(1).max(500),
+  })
+  .strict();
+
+/** Parse a runtime's governed-action request (transport, ADR 0011). */
+export function parseRuntimeActionRequest(input: unknown): RuntimeActionRequest {
+  if (messageSize(input) > MAX_RUNTIME_MESSAGE_BYTES)
+    throw new RuntimeProtocolError('RUNTIME_MESSAGE_TOO_LARGE');
+  if ((input as { protocol?: unknown } | null)?.protocol !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = actionRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_ACTION_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const decisionBase = { requestId: uuid, risk, reason: z.string().max(500) };
+const actionDecisionSchema = z.discriminatedUnion('decision', [
+  z.object({ ...decisionBase, decision: z.literal('ALLOWED') }).strict(),
+  z.object({ ...decisionBase, decision: z.literal('DENIED') }).strict(),
+  z
+    .object({ ...decisionBase, decision: z.literal('APPROVAL_REQUIRED'), approvalId: uuid })
+    .strict(),
+]);
+
+/** Runtime-side validation of a control-plane action decision; anything malformed is a denial. */
+export function parseRuntimeActionDecision(input: unknown): RuntimeActionDecision {
+  const parsed = actionDecisionSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const claimResponseSchema = z
+  .object({
+    command: z.unknown(),
+    lease: z
+      .object({
+        sessionId: uuid,
+        runtimeSequence: z.number().int().min(0).max(1_000_000),
+        leaseExpiresAt: timestamp,
+      })
+      .strict(),
+  })
+  .strict();
+
+/** Runtime-side validation of a claim response; the command is parsed strictly as well. */
+export function parseRuntimeClaimResponse(input: unknown): RuntimeClaimResponse {
+  const parsed = claimResponseSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return { command: parseRuntimeCommand(parsed.data.command), lease: parsed.data.lease };
 }
