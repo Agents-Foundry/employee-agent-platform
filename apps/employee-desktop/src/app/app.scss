@@ -467,6 +467,36 @@ header {
   margin: 0;
   line-height: 1.5;
 }
+.generic-run .approval-note + .approval-note {
+  margin-top: 6px;
+}
+.run-steps li small {
+  color: #8b94a7;
+  font-size: 8px;
+  margin-left: 4px;
+}
+.run-steps li[data-status='FAILED'],
+.run-steps li[data-status='CANCELLED'] {
+  color: #b54747;
+}
+.run-steps li[data-status='WAITING_FOR_APPROVAL'] {
+  color: #bd7217;
+}
+.cancel-run {
+  font-size: 8px;
+  border: 1px solid #e3d6d6;
+  background: white;
+  color: #b54747;
+  border-radius: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.run-evidence {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 8px;
+  color: #59647a;
+}
 .composer {
   width: min(760px, calc(100% - 48px));
   position: absolute;
