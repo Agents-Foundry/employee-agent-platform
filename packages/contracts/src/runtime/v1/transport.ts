@@ -21,6 +21,7 @@ export const runtimeTransportPaths = {
   events: '/runtime/v1/events',
   actions: '/runtime/v1/actions',
   execute: '/runtime/v1/actions/execute',
+  grant: '/runtime/v1/actions/grant',
 } as const;
 
 /**
@@ -86,6 +87,12 @@ export interface RuntimeActionExecuteRequest {
   requestId: string;
   correlation: RuntimeCorrelation & { stepId: string; toolCallId: string };
 }
+
+/**
+ * Ask for a signed execution grant for an allowed or approved action that an execution
+ * runtime performs (Phase E, ADR 0013). Same shape as an execute request.
+ */
+export type RuntimeActionGrantRequest = RuntimeActionExecuteRequest;
 
 export interface RuntimeActionExecution {
   requestId: string;

@@ -8,6 +8,7 @@ export type * from './runtime/v1/protocol.js';
 export * from './runtime/v1/transport.js';
 export type * from './catalog.js';
 export * from './actions.js';
+export * from './execution-runtime/v1/protocol.js';
 import type { ActionApprovalStatus } from './actions.js';
 import type { AgentManifestV2Payload } from './manifest-v2.js';
 import type { AgentRunStatus } from './execution.js';
