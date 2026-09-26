@@ -10,6 +10,8 @@ import {
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
+  ExecutionGrantPayload,
+  SignedExecutionGrant,
   AnyAgentManifestPayload,
   AnySignedAgentManifest,
   ManifestVerificationKey,
@@ -19,6 +21,7 @@ import {
   canonicalManifest,
   isSupportedManifestVersion,
 } from '../../../packages/contracts/src/manifest.js';
+import { executionGrantSigningInput } from '../../../packages/contracts/src/execution-runtime/v1/protocol.js';
 
 export class ManifestSigner {
   private readonly privateKey: KeyObject;
@@ -68,6 +71,21 @@ export class ManifestSigner {
       signature: sign(null, Buffer.from(canonicalManifest(snapshot)), this.privateKey).toString(
         'base64',
       ),
+    };
+  }
+
+  /** Execution grants share the key but sign a domain-separated input (ADR 0013). */
+  signExecutionGrant(payload: ExecutionGrantPayload): SignedExecutionGrant {
+    const snapshot = structuredClone(payload);
+    return {
+      payload: snapshot,
+      algorithm: 'Ed25519',
+      keyId: this.verificationKey.keyId,
+      signature: sign(
+        null,
+        Buffer.from(executionGrantSigningInput(snapshot)),
+        this.privateKey,
+      ).toString('base64'),
     };
   }
 

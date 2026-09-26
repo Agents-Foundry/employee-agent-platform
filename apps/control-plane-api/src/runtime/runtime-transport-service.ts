@@ -6,6 +6,7 @@ import type {
   RuntimeClaimResponse,
   RuntimeCommand,
   RuntimeEventAck,
+  SignedExecutionGrant,
 } from '@agents-foundry/contracts';
 import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
 import { RUNTIME_PROTOCOL_V1 } from '../../../../packages/contracts/src/runtime/v1/protocol.js';
@@ -190,6 +191,24 @@ export class RuntimeTransportService {
     if (plan.kind === 'done') return plan.execution;
     const outcome = await this.deps.gateway.dispatch(plan.dispatch);
     return this.transaction(() => this.deps.gateway.completeExecution(plan.dispatch, outcome));
+  }
+
+  /** Issue the signed grant for an execution-runtime action (ADR 0013). */
+  issueGrant(runtime: RuntimeIdentity, body: unknown): SignedExecutionGrant {
+    const request = parseRuntimeActionExecuteRequest(body);
+    return this.transaction(() => {
+      const { run } = this.runningStep(runtime, request.correlation);
+      const { correlation } = request;
+      return this.deps.gateway.issueGrant(run, request.requestId, {
+        organizationId: correlation.organizationId,
+        employeeId: correlation.employeeId,
+        agentId: correlation.agentId,
+        threadId: correlation.threadId,
+        runId: correlation.runId,
+        stepId: correlation.stepId,
+        toolCallId: correlation.toolCallId,
+      });
+    });
   }
 
   /** Lease, correlation, run and step checks shared by action requests and executions. */

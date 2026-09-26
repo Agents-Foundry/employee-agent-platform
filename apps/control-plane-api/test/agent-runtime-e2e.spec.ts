@@ -32,27 +32,30 @@ const silent = { info: () => undefined, warn: () => undefined, error: () => unde
  * Test double bound to the catalog's `browser@1.0.0` tool. Browser execution belongs to the
  * execution runtime (Phase E), so this only proves the runtime-executed approval path.
  */
-class FakeBrowserTool implements RuntimeTool<{ title: string }> {
+type PlaywrightRun = { kind: 'playwright.run'; project: string; baseUrl: string };
+
+class FakeBrowserTool implements RuntimeTool<PlaywrightRun> {
   readonly id = 'browser';
   readonly version = '1.0.0';
   readonly description = 'Run browser checks (test double).';
-  readonly inputSchema = { type: 'object', properties: { title: { type: 'string' } } };
+  readonly inputSchema = { type: 'object' };
+  readonly sendsParameters = true;
   executed: string[] = [];
   parse(input: unknown) {
     return z
-      .object({ title: z.string().min(1) })
+      .object({ kind: z.literal('playwright.run'), project: z.string(), baseUrl: z.string() })
       .strict()
       .parse(input);
   }
   governedAction() {
     return 'qa.execute_playwright';
   }
-  summarize(input: { title: string }) {
-    return `Run browser check "${input.title}"`;
+  summarize(input: PlaywrightRun) {
+    return `Run ${input.project}`;
   }
-  async execute(input: { title: string }) {
-    this.executed.push(input.title);
-    return { output: `Created test issue ${input.title}`, artifactIds: [] };
+  async execute(input: PlaywrightRun) {
+    this.executed.push(input.project);
+    return { output: `Ran ${input.project}`, artifactIds: [] };
   }
 }
 
@@ -83,7 +86,11 @@ const script = (request: { messages: { content: { type: string }[] }[] }): Model
           type: 'tool_use',
           id: 'toolu_2',
           name: 'browser',
-          input: { title: 'Cart total wrong' },
+          input: {
+            kind: 'playwright.run',
+            project: 'cart-smoke',
+            baseUrl: 'https://qa.example.com/cart',
+          },
         },
       ],
       stopReason: 'tool_use',
@@ -212,7 +219,7 @@ describe('agent runtime end to end over the signed transport', () => {
 
     detail = db.execution.getRun(employee, run.id);
     expect(detail.run).toMatchObject({ status: 'COMPLETED' });
-    expect(issues.executed).toEqual(['Cart total wrong']);
+    expect(issues.executed).toEqual(['cart-smoke']);
     expect(checkpoints.items.size).toBe(0);
     expect(detail.steps.every((step) => step.status === 'COMPLETED')).toBe(true);
     expect(detail.steps.map((step) => step.kind)).toEqual([
