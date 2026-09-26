@@ -4,8 +4,8 @@ export default defineConfig({
   test: {
     include: ['test/**/*.spec.ts'],
     exclude: ['dist/**', 'node_modules/**'],
-    // Real git and child processes: Windows process start-up is slow.
-    testTimeout: 60_000,
+    // Real git, child processes and Docker containers: Windows process start-up is slow.
+    testTimeout: 180_000,
     hookTimeout: 60_000,
   },
 });

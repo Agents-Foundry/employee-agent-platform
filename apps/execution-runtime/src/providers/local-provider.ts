@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
-import { mkdir, open, realpath, stat, writeFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { lstat, mkdir, open, realpath, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
 import { runProcess, type ProcessResult } from '../process-runner.js';
 import type {
@@ -21,7 +21,7 @@ export interface LocalProviderOptions {
 
 const MODEL_OUTPUT_LIMIT = 20_000;
 
-class OperationFailure extends Error {
+export class OperationFailure extends Error {
   constructor(
     readonly code: string,
     message: string,
@@ -30,10 +30,11 @@ class OperationFailure extends Error {
   }
 }
 
+const contained = (path: string, base: string) => path === base || path.startsWith(base + sep);
+
 /** Resolve a validated workspace-relative path and prove, after symlinks, it stays inside. */
-async function inside(root: string, relative: string, mustExist: boolean): Promise<string> {
+export async function inside(root: string, relative: string, mustExist: boolean): Promise<string> {
   const target = resolve(root, ...relative.split('/').filter((part) => part !== '.'));
-  const contained = (path: string, base: string) => path === base || path.startsWith(base + sep);
   if (!contained(target, root)) throw new OperationFailure('PATH_OUTSIDE_WORKSPACE', relative);
   if (!mustExist) return target;
   let real: string;
@@ -50,7 +51,7 @@ async function inside(root: string, relative: string, mustExist: boolean): Promi
   return real;
 }
 
-function bounded(text: string): { output: string; truncated: boolean } {
+export function bounded(text: string): { output: string; truncated: boolean } {
   return text.length > MODEL_OUTPUT_LIMIT
     ? { output: text.slice(0, MODEL_OUTPUT_LIMIT), truncated: true }
     : { output: text, truncated: false };
@@ -84,6 +85,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
           return await this.status(workspace, operation.path, limits, signal);
         case 'file.read':
           return await this.read(workspace, operation.path);
+        case 'file.write':
+          return await this.write(workspace, operation.path, operation.content);
         case 'playwright.run':
           return await this.playwright(workspace, operation, limits, signal);
         default:
@@ -165,32 +168,6 @@ export class LocalExecutionProvider implements ExecutionProvider {
     });
   }
 
-  private failedProcess(result: ProcessResult, code: string, what: string): ProviderOutcome {
-    const logs = this.logs(result, `${code.toLowerCase()}.log`);
-    return {
-      status: result.timedOut ? 'TIMED_OUT' : 'FAILED',
-      ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
-      error: {
-        code: result.timedOut ? 'OPERATION_TIMED_OUT' : code,
-        message: `${what} ${result.timedOut ? 'timed out' : `exited with ${result.exitCode}`}.`,
-      },
-      ...bounded(result.stderr.trim() || result.stdout.trim()),
-      artifacts: logs,
-    };
-  }
-
-  private logs(result: ProcessResult, name: string): ProducedArtifact[] {
-    const text = [
-      result.stdout && `stdout:\n${result.stdout}`,
-      result.stderr && `stderr:\n${result.stderr}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-    return text
-      ? [{ name, type: 'log', mediaType: 'text/plain', content: Buffer.from(text, 'utf8') }]
-      : [];
-  }
-
   private async checkout(
     workspace: WorkspaceHandle,
     operation: Extract<ExecutionOperation, { kind: 'git.checkout' }>,
@@ -228,7 +205,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
       signal,
     );
     if (clone.exitCode !== 0 || clone.timedOut)
-      return this.failedProcess(clone, 'GIT_CHECKOUT_FAILED', 'git clone');
+      return failedProcess(clone, 'GIT_CHECKOUT_FAILED', 'git clone');
     const head = await this.git(workspace, ['rev-parse', 'HEAD'], target, limits, signal);
     const commit = head.stdout.trim();
     return {
@@ -236,7 +213,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
       exitCode: 0,
       output: `Checked out ${operation.ref} of ${operation.repositoryUrl} into ${operation.path} at ${commit}.`,
       truncated: false,
-      artifacts: this.logs(clone, 'git-checkout.log'),
+      artifacts: processLogs(clone, 'git-checkout.log'),
     };
   }
 
@@ -255,7 +232,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
       signal,
     );
     if (result.exitCode !== 0 || result.timedOut)
-      return this.failedProcess(result, 'GIT_STATUS_FAILED', 'git status');
+      return failedProcess(result, 'GIT_STATUS_FAILED', 'git status');
     return { status: 'SUCCEEDED', exitCode: 0, ...bounded(result.stdout), artifacts: [] };
   }
 
@@ -279,6 +256,44 @@ export class LocalExecutionProvider implements ExecutionProvider {
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * Write text inside the workspace. The deepest existing ancestor is resolved through symlinks
+   * and must stay inside the workspace before any directory is created, and an existing
+   * symlink is never written through.
+   */
+  private async write(
+    workspace: WorkspaceHandle,
+    path: string,
+    content: string,
+  ): Promise<ProviderOutcome> {
+    const target = await inside(workspace.root, path, false);
+    const root = await realpath(workspace.root);
+    let ancestor = dirname(target);
+    while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+    if (!contained(await realpath(ancestor), root))
+      throw new OperationFailure(
+        'PATH_OUTSIDE_WORKSPACE',
+        `${path} resolves outside the workspace.`,
+      );
+    const existing = await lstat(target).catch(() => null);
+    if (existing && !existing.isFile())
+      throw new OperationFailure('NOT_A_FILE', `${path} exists and is not a regular file.`);
+    await mkdir(dirname(target), { recursive: true });
+    if (!contained(await realpath(dirname(target)), root))
+      throw new OperationFailure(
+        'PATH_OUTSIDE_WORKSPACE',
+        `${path} resolves outside the workspace.`,
+      );
+    const bytes = Buffer.from(content, 'utf8');
+    await writeFile(target, bytes);
+    return {
+      status: 'SUCCEEDED',
+      output: `${existing ? 'Updated' : 'Created'} ${path} (${bytes.byteLength} bytes).`,
+      truncated: false,
+      artifacts: [],
+    };
   }
 
   private async playwright(
@@ -317,34 +332,69 @@ export class LocalExecutionProvider implements ExecutionProvider {
         signal,
       },
     );
-    if (result.timedOut) return this.failedProcess(result, 'PLAYWRIGHT_FAILED', 'Playwright');
-    let stats: { expected?: number; unexpected?: number; flaky?: number; skipped?: number } = {};
-    try {
-      stats = (JSON.parse(result.stdout) as { stats?: typeof stats }).stats ?? {};
-    } catch {
-      return this.failedProcess(result, 'PLAYWRIGHT_REPORT_INVALID', 'Playwright');
-    }
-    const summary =
-      `Playwright project ${operation.project} against ${new URL(operation.baseUrl).origin}: ` +
-      `${stats.expected ?? 0} passed, ${stats.unexpected ?? 0} failed, ` +
-      `${stats.flaky ?? 0} flaky, ${stats.skipped ?? 0} skipped.`;
-    const artifacts: ProducedArtifact[] = [
-      {
-        name: 'playwright-report.json',
-        type: 'test_report',
-        mediaType: 'application/json',
-        content: Buffer.from(result.stdout, 'utf8'),
-      },
-      ...(result.stderr ? this.logs({ ...result, stdout: '' }, 'playwright-stderr.log') : []),
-    ];
-    const failed = result.exitCode !== 0 || (stats.unexpected ?? 0) > 0;
-    return {
-      status: failed ? 'FAILED' : 'SUCCEEDED',
-      ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
-      ...(failed ? { error: { code: 'PLAYWRIGHT_TESTS_FAILED', message: summary } } : {}),
-      output: summary,
-      truncated: result.truncated,
-      artifacts,
-    };
+    return playwrightOutcome(result, operation);
   }
+}
+
+/** Collect a process's output as a log artifact (none when it printed nothing). */
+export function processLogs(result: ProcessResult, name: string): ProducedArtifact[] {
+  const text = [
+    result.stdout && `stdout:\n${result.stdout}`,
+    result.stderr && `stderr:\n${result.stderr}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return text
+    ? [{ name, type: 'log', mediaType: 'text/plain', content: Buffer.from(text, 'utf8') }]
+    : [];
+}
+
+/** Outcome of a process that failed or timed out, with its output kept as evidence. */
+export function failedProcess(result: ProcessResult, code: string, what: string): ProviderOutcome {
+  return {
+    status: result.timedOut ? 'TIMED_OUT' : 'FAILED',
+    ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+    error: {
+      code: result.timedOut ? 'OPERATION_TIMED_OUT' : code,
+      message: `${what} ${result.timedOut ? 'timed out' : `exited with ${result.exitCode}`}.`,
+    },
+    ...bounded(result.stderr.trim() || result.stdout.trim()),
+    artifacts: processLogs(result, `${code.toLowerCase()}.log`),
+  };
+}
+
+/** Interpret a `--reporter=json` Playwright run, wherever it ran. */
+export function playwrightOutcome(
+  result: ProcessResult,
+  operation: Extract<ExecutionOperation, { kind: 'playwright.run' }>,
+): ProviderOutcome {
+  if (result.timedOut) return failedProcess(result, 'PLAYWRIGHT_FAILED', 'Playwright');
+  let stats: { expected?: number; unexpected?: number; flaky?: number; skipped?: number } = {};
+  try {
+    stats = (JSON.parse(result.stdout) as { stats?: typeof stats }).stats ?? {};
+  } catch {
+    return failedProcess(result, 'PLAYWRIGHT_REPORT_INVALID', 'Playwright');
+  }
+  const summary =
+    `Playwright project ${operation.project} against ${new URL(operation.baseUrl).origin}: ` +
+    `${stats.expected ?? 0} passed, ${stats.unexpected ?? 0} failed, ` +
+    `${stats.flaky ?? 0} flaky, ${stats.skipped ?? 0} skipped.`;
+  const artifacts: ProducedArtifact[] = [
+    {
+      name: 'playwright-report.json',
+      type: 'test_report',
+      mediaType: 'application/json',
+      content: Buffer.from(result.stdout, 'utf8'),
+    },
+    ...(result.stderr ? processLogs({ ...result, stdout: '' }, 'playwright-stderr.log') : []),
+  ];
+  const failed = result.exitCode !== 0 || (stats.unexpected ?? 0) > 0;
+  return {
+    status: failed ? 'FAILED' : 'SUCCEEDED',
+    ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+    ...(failed ? { error: { code: 'PLAYWRIGHT_TESTS_FAILED', message: summary } } : {}),
+    output: summary,
+    truncated: result.truncated,
+    artifacts,
+  };
 }

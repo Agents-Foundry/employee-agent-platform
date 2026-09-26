@@ -24,6 +24,8 @@ export class ExecutionProtocolError extends Error {
 }
 
 const uuid = z.uuid();
+/** Largest single file write; keeps each request inside the runtime message limits. */
+export const MAX_WRITE_BYTES = 128 * 1024;
 const recordId = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const timestamp = z.iso.datetime({ offset: true });
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -74,8 +76,13 @@ export const executionOperationSchema = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('file.write'),
-      path: workspacePathSchema,
-      contentArtifactId: uuid,
+      path: workspacePathSchema.refine((value) => value !== '.', 'write needs a file path'),
+      content: z
+        .string()
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= MAX_WRITE_BYTES,
+          `content must be at most ${MAX_WRITE_BYTES} bytes`,
+        ),
     })
     .strict(),
   z

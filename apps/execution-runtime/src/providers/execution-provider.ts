@@ -25,6 +25,9 @@ export interface ProviderOutcome {
   artifacts: ProducedArtifact[];
 }
 
+export type EnforcedLimit =
+  'timeout' | 'output' | 'filesystem' | 'environment' | 'cpu' | 'memory' | 'processes' | 'network';
+
 /**
  * Where dangerous work runs (ADR 0007). Providers declare the isolation they deliver; a
  * grant that requires stronger isolation than the provider offers is refused before any work.
@@ -33,7 +36,7 @@ export interface ExecutionProvider {
   readonly id: string;
   readonly isolation: 'sandboxed' | 'local';
   /** Limits this provider actually enforces; everything else is documented, not assumed. */
-  readonly enforces: readonly ('timeout' | 'output' | 'filesystem' | 'environment')[];
+  readonly enforces: readonly EnforcedLimit[];
   execute(
     workspace: WorkspaceHandle,
     operation: ExecutionOperation,
