@@ -32,6 +32,7 @@ apps/
   control-plane-web/   Angular admin control plane
   employee-desktop/    Angular employee UI plus Tauri shell
   agent-runtime/       Separate agent runtime process (kernel, model gateway, tools)
+  execution-runtime/   Separate execution process (workspaces, git, Playwright) behind grants
 packages/
   contracts/           Shared API and domain contracts
   policy-engine/       Fail-closed governed-action decisions
@@ -105,7 +106,8 @@ the `agents-foundry/runtime/v1` protocol), Phase B (a versioned, digest-pinned a
 with organization installations), Phase C (a separate agent runtime process with a kernel,
 model gateway, signed transport and approval pause/resume) and Phase D (the Action Gateway:
 Policy v2, expiring payload-bound approvals, single-use connector execution and Jira issue
-creation) are implemented. Generic runs are
+creation) and Phase E (a separate execution runtime that runs git and Playwright only under
+control-plane-signed, single-use grants) are implemented. Generic runs are
 off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
 
 - [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
@@ -113,9 +115,10 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
   [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0012](docs/adr/0012-action-gateway-execution.md)
+  [0013](docs/adr/0013-execution-grants.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
+- Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)
 
 See [provisioning design](docs/provisioning.md) for API routes, signing-key persistence, and the local-demo trust boundary.
 

@@ -44,7 +44,8 @@ Conversation ─┐
 - [Gap analysis](architecture-v2-gap-analysis.md): repository-grounded baseline.
 - [Agent runtime](agent-runtime.md): host, kernel, model gateway, tools and transport (Phase C).
 - [Action Gateway](action-gateway.md): governed action decisions, approvals, execution and connectors (Phase D).
-- ADRs [0002](adr/0002-separate-agent-runtime-from-control-plane.md)–[0012](adr/0012-action-gateway-execution.md).
+- [Execution runtime](execution-runtime.md): signed grants, workspaces and the local provider (Phase E).
+- ADRs [0002](adr/0002-separate-agent-runtime-from-control-plane.md)–[0013](adr/0013-execution-grants.md).
 
 ## Subsystem designs (not implemented)
 
@@ -70,7 +71,7 @@ drift from code. Until then these summaries are binding constraints:
   organization, agent, task, resource, environment, manifest and prior approvals. Output is
   `ALLOW | REQUIRE_APPROVAL | DENY` plus risk, reason, `policyId`, `policyVersion` and conditions.
   Unknown actions are denied, and an unavailable policy engine denies governed writes.
-- **Execution runtime (Phase E).** `ExecutionProvider` (`LocalExecutionProvider` first) with
+- **Execution runtime (Phase E, implemented with a local provider; see [execution-runtime.md](execution-runtime.md)).** `ExecutionProvider` (`LocalExecutionProvider` first) with
   timeouts, CPU, memory, process, filesystem and network limits, workspace ownership and audit.
 - **Memory and context (Phase C+).** `MemoryProvider` interfaces per scope (conversation,
   thread, project, employee, organization, skill). A Context Manager assembles bounded context
