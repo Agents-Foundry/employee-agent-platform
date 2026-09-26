@@ -11,7 +11,7 @@ error handling and documentation. A type, table or route stub alone does not cou
 | B     | Catalog: `AgentBlueprintVersion`, skills, workflows, tool/connector requirements, org installations         | Implemented (see below) |
 | C     | Agent runtime: session, run loop, model abstraction, one tool, approval pause/resume, signed transport      | Implemented (see below) |
 | D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch            | Implemented (see below) |
-| E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright     | Not started             |
+| E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright     | Implemented (see below) |
 | F     | QA migration from the static six-step plan to the generic runtime (feature-flagged)                         | Not started             |
 | G     | Frontend Engineer on the same runtime, as the architectural acceptance test                                 | Not started             |
 
@@ -112,6 +112,31 @@ error handling and documentation. A type, table or route stub alone does not cou
   reconciliation.
 - Secrets come from an operator file, not a managed vault.
 
+## Phase E — delivered
+
+- `apps/execution-runtime`: a separate process and workspace ([execution-runtime.md](execution-runtime.md),
+  ADR 0013). It contains:
+  - grant verification against the pinned control-plane key;
+  - single-use grants with idempotent replay;
+  - per-thread workspaces with explicit `WORKSPACE_LOST`;
+  - `LocalExecutionProvider`: git checkout and status, file read and Playwright, with path
+    confinement, a scrubbed environment, argument lists, process-tree timeouts and output caps;
+  - evidence stored as artifacts.
+- Control plane: execution grants (`POST /runtime/v1/actions/grant`, migration 010). Execution
+  actions require the exact operation as `parameters`. Checkout scope is the configured
+  repository and Playwright scope the configured QA origin. Approvers see a summary the
+  control plane writes.
+- Agent runtime: `repository` and `browser` tools that obtain a grant, then call the
+  execution runtime. They are offered only when `EXECUTION_RUNTIME_URL` is set.
+- The Phase C/D test doubles for runtime-executed actions now send real operations.
+
+### Phase E limitations
+
+- There is no sandboxing provider. Sandboxed agents run only with
+  `EXECUTION_ALLOW_UNSANDBOXED=true`.
+- There is no dependency installation, and private repositories are not supported.
+  `command` and `file.write` are never granted.
+
 ## Feature flags
 
 | Flag                                 | Default | Effect                                                                                         |
@@ -120,18 +145,19 @@ error handling and documentation. A type, table or route stub alone does not cou
 | `GENERIC_AGENT_RUNTIME_ENABLED`      | `false` | Employees may start generic runs (`POST /api/execution/v1/runs`)                               |
 | `AGENT_RUNTIME_IDENTITIES_PATH`      | unset   | Runtime public keys and scopes; unset means no runtime can authenticate                        |
 | `CONNECTOR_SECRETS_PATH`             | unset   | Per-organization connector secrets; unset means every governed write fails `SECRET_UNRESOLVED` |
+| `EXECUTION_ALLOW_UNSANDBOXED`        | `false` | Execution runtime accepts sandboxed grants on the local provider (development only)            |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
 
 ## Next recommended phase
 
-Phase E: `execution-runtime`. Add an `ExecutionProvider` (local first) with:
+Phase F: QA migration. Move the legacy `/api/qa/runs` static plan onto the generic runtime,
+behind a feature flag:
 
-- workspace ownership;
-- repository checkout;
-- bounded shell and filesystem operations;
-- artifact capture.
+- a validate-story workflow that checks out the repository, runs Playwright after approval and
+  drafts defects through the Action Gateway;
+- the employee app following run events instead of the legacy QA record.
 
-Browser and Playwright execution follow, so `qa.execute_playwright` and `repository.*` run in
-isolation behind the same gateway decisions.
+In parallel, add a sandboxing `ExecutionProvider` (container with egress limited to the grant's
+allow-list) so sandboxed agents no longer need `EXECUTION_ALLOW_UNSANDBOXED`.

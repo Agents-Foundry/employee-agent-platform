@@ -9,6 +9,7 @@ import { agentExecutionSql } from './006-agent-execution.js';
 import { agentCatalogSql } from './007-agent-catalog.js';
 import { runtimeTransportSql } from './008-runtime-transport.js';
 import { actionGatewaySql } from './009-action-gateway.js';
+import { executionGrantsSql } from './010-execution-grants.js';
 
 export function migrateOrganization(
   db: DatabaseSync,
@@ -27,6 +28,7 @@ export function migrateOrganization(
     { version: 7, name: 'agent-catalog', sql: agentCatalogSql },
     { version: 8, name: 'runtime-transport', sql: runtimeTransportSql },
     { version: 9, name: 'action-gateway', sql: actionGatewaySql },
+    { version: 10, name: 'execution-grants', sql: executionGrantsSql },
   ];
   for (const migration of migrations) {
     if (migration.version > throughVersion) break;

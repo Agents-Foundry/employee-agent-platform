@@ -307,6 +307,11 @@ export class NativeKernel implements AgentKernel {
                     requestId,
                     correlation: { ...context.correlation, stepId, toolCallId },
                   }),
+                grant: () =>
+                  context.requestGrant({
+                    requestId,
+                    correlation: { ...context.correlation, stepId, toolCallId },
+                  }),
               },
             }
           : {}),

@@ -2,6 +2,7 @@ import type {
   ArtifactRegistration,
   RuntimeActionExecution,
   RuntimeCorrelation,
+  SignedExecutionGrant,
   SignedAgentManifestV2,
 } from '@agents-foundry/contracts';
 import type { ArtifactStore } from './artifact-store.js';
@@ -18,6 +19,8 @@ export interface ToolExecutionContext {
     requestId: string;
     /** Asks the control plane to perform the action it owns (ADR 0012). Single use. */
     execute(): Promise<RuntimeActionExecution>;
+    /** Obtains the signed grant an execution runtime requires (ADR 0013). */
+    grant(): Promise<SignedExecutionGrant>;
   };
 }
 

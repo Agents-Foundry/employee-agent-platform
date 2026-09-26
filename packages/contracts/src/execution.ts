@@ -276,7 +276,8 @@ export type ExecutionOperation =
   | { kind: 'file.write'; path: string; contentArtifactId: string }
   | { kind: 'git.checkout'; repositoryUrl: string; ref: string; path: string }
   | { kind: 'git.status'; path: string }
-  | { kind: 'playwright.run'; project: string; baseUrl: string };
+  /** `path` is the workspace-relative project directory (default: workspace root). */
+  | { kind: 'playwright.run'; project: string; baseUrl: string; path?: string };
 
 export interface ExecutionRequest {
   id: string;

@@ -156,6 +156,7 @@ export class ControlPlaneDatabase {
       connectors: this.connectors,
       policies: this.actionPolicies,
       secrets: options.secrets ?? new FileSecretStore(),
+      signGrant: (payload) => this.signer.signExecutionGrant(payload),
       ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
     });
     this.runtimeTransport = new RuntimeTransportService(this.db, this.execution, {

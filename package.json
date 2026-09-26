@@ -11,21 +11,25 @@
     "tauri:dev": "tauri dev --config apps/employee-desktop/src-tauri/tauri.conf.json",
     "tauri:build": "tauri build --config apps/employee-desktop/src-tauri/tauri.conf.json",
     "dev:runtime": "npm run dev --workspace @agents-foundry/agent-runtime",
-    "build": "npm run build:admin && npm run build:employee && npm run build:api && npm run build:runtime",
+    "dev:execution": "npm run dev --workspace @agents-foundry/execution-runtime",
+    "build": "npm run build:admin && npm run build:employee && npm run build:api && npm run build:runtime && npm run build:execution",
     "build:admin": "ng build control-plane-web",
     "build:employee": "ng build employee-desktop",
     "build:api": "npm run build --workspace @agents-foundry/control-plane-api",
     "build:runtime": "npm run build --workspace @agents-foundry/agent-runtime",
-    "test": "npm run test:web && npm run test:api && npm run test:runtime",
+    "build:execution": "npm run build --workspace @agents-foundry/execution-runtime",
+    "test": "npm run test:web && npm run test:api && npm run test:runtime && npm run test:execution",
     "test:web": "ng test control-plane-web --watch=false && ng test employee-desktop --watch=false",
     "test:api": "npm run test --workspace @agents-foundry/control-plane-api",
     "test:runtime": "npm run test --workspace @agents-foundry/agent-runtime",
+    "test:execution": "npm run test --workspace @agents-foundry/execution-runtime",
     "check": "npm run build && npm run test"
   },
   "private": true,
   "workspaces": [
     "apps/control-plane-api",
-    "apps/agent-runtime"
+    "apps/agent-runtime",
+    "apps/execution-runtime"
   ],
   "packageManager": "npm@11.9.0",
   "dependencies": {

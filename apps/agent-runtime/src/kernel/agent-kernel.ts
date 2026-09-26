@@ -7,6 +7,7 @@ import type {
   RuntimeEventPayloads,
   RuntimeEventType,
   SignedAgentManifestV2,
+  SignedExecutionGrant,
   TaskSpec,
 } from '@agents-foundry/contracts';
 import type { RuntimeFailure } from '../errors.js';
@@ -37,6 +38,10 @@ export interface KernelContext {
   executeAction(
     request: Omit<RuntimeActionExecuteRequest, 'protocol'>,
   ): Promise<RuntimeActionExecution>;
+  /** Obtain the signed execution grant for an allowed or approved execution-runtime action. */
+  requestGrant(
+    request: Omit<RuntimeActionExecuteRequest, 'protocol'>,
+  ): Promise<SignedExecutionGrant>;
   models: ModelGateway;
   tools: RuntimeTool[];
   artifacts: ArtifactStore;

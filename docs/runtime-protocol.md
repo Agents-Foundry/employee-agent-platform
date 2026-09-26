@@ -124,6 +124,7 @@ Every failure returns the same `401 RUNTIME_UNAUTHENTICATED`.
 | `POST /runtime/v1/events`          | `201` (or `200` duplicate) `{ eventId, sequence, duplicate }`; only for runs the runtime leases                                                                             |
 | `POST /runtime/v1/actions`         | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
 | `POST /runtime/v1/actions/execute` | `{ requestId, status: SUCCEEDED \| FAILED, result?, error? }` for control-plane-executed actions (Phase D)                                                                  |
+| `POST /runtime/v1/actions/grant`   | Signed single-use execution grant for an allowed or approved execution-runtime action (Phase E, ADR 0013)                                                                   |
 
 Leases (`agent_run_leases`) bind a run to one runtime and session. A queued run that never
 started can be reclaimed after 10 minutes. An undelivered command is redelivered to its holder

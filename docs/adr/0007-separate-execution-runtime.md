@@ -1,6 +1,6 @@
 # ADR 0007: Separate execution runtime
 
-- Status: Accepted (implementation in Phase E)
+- Status: Accepted (implemented in Phase E; see [ADR 0013](0013-execution-grants.md))
 - Date: 2026-09-23
 
 ## Context

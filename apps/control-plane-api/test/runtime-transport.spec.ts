@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AnySignedAgentManifest } from '@agents-foundry/contracts';
 import { createDemoApp as createApp, demoRequest } from './helpers.js';
 import { ControlPlaneDatabase } from '../src/database.js';
-import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
+import { canonicalManifest, manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import {
   runtimeAuthHeaders,
   runtimeSigningInput,
@@ -173,17 +173,32 @@ describe('runtime transport', () => {
       '/runtime/v1/events',
       event('step.started', { kind: 'TOOL', title: 'Tool call' }, stepId),
     ).expect(201);
-    const action = (actionName: string, toolId: string, extra: object = {}) => ({
-      protocol: 'agents-foundry/runtime/v1',
-      requestId: randomUUID(),
-      correlation: { ...correlation, stepId, toolCallId: randomUUID() },
-      action: actionName,
-      toolId,
-      toolVersion: '1.0.0',
-      inputDigest: 'a'.repeat(64),
-      summary: `Perform ${actionName}`,
-      ...extra,
-    });
+    // Execution-runtime actions carry the exact operation they authorize (Phase E).
+    const operations: Record<string, object> = {
+      'repository.read': { kind: 'git.status', path: 'repo' },
+      'qa.execute_playwright': {
+        kind: 'playwright.run',
+        project: 'smoke',
+        baseUrl: 'https://qa.example.com/cart',
+      },
+    };
+    const action = (actionName: string, toolId: string, extra: object = {}) => {
+      const parameters = operations[actionName];
+      return {
+        protocol: 'agents-foundry/runtime/v1',
+        requestId: randomUUID(),
+        correlation: { ...correlation, stepId, toolCallId: randomUUID() },
+        action: actionName,
+        toolId,
+        toolVersion: '1.0.0',
+        inputDigest: parameters
+          ? createHash('sha256').update(canonicalManifest(parameters)).digest('hex')
+          : 'a'.repeat(64),
+        summary: `Perform ${actionName}`,
+        ...(parameters ? { parameters } : {}),
+        ...extra,
+      };
+    };
     return {
       claim,
       stepId,
