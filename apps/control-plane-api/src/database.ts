@@ -19,6 +19,10 @@ import type {
   ProvisioningInput,
   ProvisioningRequest,
   AnySignedAgentManifest,
+  ResolvedBlueprintBundle,
+  WorkflowDefinition,
+  GenericQaRunResponse,
+  TaskSpec,
   LifecycleEvent,
   Actor,
   AdminAgentInput,
@@ -49,6 +53,7 @@ import { parseSignedManifest } from '../../../packages/contracts/src/runtime/v1/
 const ORGANIZATION_ID = 'org_agents_foundry';
 const EMPLOYEE_ID = 'employee_qa_demo';
 const AGENT_ID = 'agent_qa_engineer';
+const QA_WORKFLOW = 'validate-story';
 
 function now(): string {
   return new Date().toISOString();
@@ -75,6 +80,8 @@ export class ControlPlaneDatabase {
   readonly manifestV2Issuance: boolean;
   /** Phase C: employees may start generic runs for runtimes only when explicitly enabled. */
   readonly genericRuntimeEnabled: boolean;
+  /** Phase F: `/api/qa/runs` queues generic validate-story runs for eligible agents. */
+  readonly qaGenericRuntimeEnabled: boolean;
   readonly runtimeIdentities: RuntimeIdentityRegistry;
   readonly runtimeTransport: RuntimeTransportService;
   readonly connectors: ConnectorService;
@@ -88,6 +95,7 @@ export class ControlPlaneDatabase {
       manifestV2Issuance?: boolean;
       catalog?: CatalogDefinitions;
       genericRuntime?: boolean;
+      qaGenericRuntime?: boolean;
       runtimeIdentities?: RuntimeIdentityConfig[];
       /** Connector secret store; defaults to the operator file at CONNECTOR_SECRETS_PATH. */
       secrets?: SecretResolver;
@@ -99,6 +107,8 @@ export class ControlPlaneDatabase {
   ) {
     this.genericRuntimeEnabled =
       options.genericRuntime ?? process.env['GENERIC_AGENT_RUNTIME_ENABLED'] === 'true';
+    this.qaGenericRuntimeEnabled =
+      options.qaGenericRuntime ?? process.env['QA_GENERIC_RUNTIME_ENABLED'] === 'true';
     this.runtimeIdentities = options.runtimeIdentities
       ? new RuntimeIdentityRegistry(options.runtimeIdentities)
       : RuntimeIdentityRegistry.fromEnvironment();
@@ -133,8 +143,16 @@ export class ControlPlaneDatabase {
       throw error;
     }
     this.installations = new InstallationService(this.db, this.catalog, this.structure);
-    this.execution = new ExecutionService(this.db, (agentId, organizationId, employeeId) =>
-      this.getManifest(agentId, organizationId, employeeId),
+    this.execution = new ExecutionService(
+      this.db,
+      (agentId, organizationId, employeeId) =>
+        this.getManifest(agentId, organizationId, employeeId),
+      {
+        resolveWorkflow: (manifest, workflowId) => this.pinnedWorkflow(manifest, workflowId),
+        conversationMessage: (organizationId, conversationId, content) => {
+          this.addMessage(conversationId, 'AGENT', content, organizationId);
+        },
+      },
     );
     const audit = (
       actorId: string,
@@ -164,6 +182,24 @@ export class ControlPlaneDatabase {
       audit,
     });
     if (seedDemo) this.seed();
+  }
+
+  /** A workflow from the exact catalog bundle the manifest pins; undefined if anything differs. */
+  pinnedWorkflow(
+    manifest: AnySignedAgentManifest,
+    workflowId: string,
+  ): WorkflowDefinition | undefined {
+    if (manifest.payload.apiVersion !== 'agents-foundry/v2') return undefined;
+    const { blueprint } = manifest.payload.metadata;
+    if (!blueprint.digest || !manifest.payload.workflows.includes(workflowId)) return undefined;
+    let bundle: ResolvedBlueprintBundle;
+    try {
+      bundle = this.catalog.bundle(blueprint.id, blueprint.version, 404);
+    } catch {
+      return undefined;
+    }
+    if (bundle.digest !== blueprint.digest) return undefined;
+    return bundle.workflows.find((workflow) => workflow.id === workflowId);
   }
 
   syncIdentities(issuer: string, entries: IdentityEntry[]): void {
@@ -1441,6 +1477,85 @@ export class ControlPlaneDatabase {
       organizationId,
     );
     return { id, conversationId, author, content, createdAt: timestamp };
+  }
+
+  /**
+   * Phase F: queue a generic `validate-story` run instead of the legacy static plan. Returns
+   * null when the agent is not eligible (no v2 manifest, or the workflow is not in its pinned
+   * catalog bundle); the caller then uses the legacy path, which executes nothing.
+   */
+  createGenericQaRun(
+    input: {
+      employeeId: string;
+      conversationId: string;
+      storyKey: string;
+      targetUrl: string;
+      instructions?: string;
+    },
+    organizationId: string,
+    allowDemo: boolean,
+  ): GenericQaRunResponse | null {
+    const conversation = this.getConversation(input.conversationId, organizationId);
+    if (conversation.employeeId !== input.employeeId) throw new Error('CONVERSATION_FORBIDDEN');
+    if (conversation.agentId === AGENT_ID && allowDemo) return null;
+    const manifest = this.getManifest(conversation.agentId, organizationId, input.employeeId);
+    if (
+      manifest.payload.apiVersion !== 'agents-foundry/v2' ||
+      !this.pinnedWorkflow(manifest, QA_WORKFLOW)
+    )
+      return null;
+    // Checked again by Policy v2 for every browser run; refused here so nothing is queued.
+    const qaUrl = manifest.payload.configuration['qaUrl'];
+    if (typeof qaUrl !== 'string' || new URL(qaUrl).origin !== new URL(input.targetUrl).origin)
+      throw new OrganizationDomainError(400, 'TARGET_OUT_OF_SCOPE');
+    const origin = new URL(input.targetUrl).origin;
+    const task: TaskSpec = {
+      objective:
+        `Validate ${input.storyKey} against ${origin}: read the story and its acceptance ` +
+        'criteria, check out the configured repository, run the Playwright checks, and file ' +
+        'defects for failures you can evidence.',
+      workflow: QA_WORKFLOW,
+      workItem: { system: 'issue-tracker', key: input.storyKey },
+      inputs: {
+        targetUrl: input.targetUrl,
+        ...(input.instructions ? { instructions: input.instructions } : {}),
+      },
+    };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const run = this.execution.createRun({
+        organizationId,
+        employeeId: input.employeeId,
+        agentId: conversation.agentId,
+        title: `${input.storyKey} QA validation`,
+        task,
+        manifest,
+        conversation: { id: conversation.id, title: conversation.title },
+      });
+      this.audit(
+        input.employeeId,
+        'qa_run.requested',
+        'agent_run',
+        run.id,
+        { storyKey: input.storyKey, mode: 'GENERIC_RUNTIME' },
+        organizationId,
+      );
+      this.addMessage(
+        conversation.id,
+        'AGENT',
+        `I queued the ${QA_WORKFLOW} workflow for ${input.storyKey}. Browser runs and defect ` +
+          'filing will each wait for approval.',
+        organizationId,
+      );
+      this.db.exec('COMMIT');
+      return {
+        mode: 'GENERIC_RUNTIME',
+        agentRun: { id: run.id, threadId: run.threadId, status: run.status },
+      };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   createQaRun(

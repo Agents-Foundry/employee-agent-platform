@@ -1,13 +1,15 @@
 import { DatePipe } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import type {
   BootstrapResponse,
   Conversation,
   ConversationDetail,
-  QaRunResponse,
+  QaRunResult,
+  AgentRunDetail,
+  AgentRunStatus,
   AgentBlueprint,
   ProvisioningRequest,
   KeySource,
@@ -21,13 +23,18 @@ import {
 } from '../../../../packages/contracts/src/manifest.js';
 import { API_URL } from '../../../../packages/web-auth/src/session';
 
+const TERMINAL_RUN_STATUSES: readonly AgentRunStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
+
 @Component({
   imports: [DatePipe, FormsModule],
   selector: 'app-root',
   styleUrl: './app.scss',
   templateUrl: './app.html',
 })
-export class App implements OnInit {
+export class App implements OnInit, OnDestroy {
+  /** How often a followed generic run is refreshed while it is not terminal. */
+  static followIntervalMs = 2000;
+
   private readonly http = inject(HttpClient);
   private readonly apiUrl = API_URL;
 
@@ -36,7 +43,23 @@ export class App implements OnInit {
   protected readonly activeConversation = signal<ConversationDetail | null>(null);
   protected readonly busy = signal(false);
   protected readonly error = signal('');
-  protected readonly lastRun = signal<QaRunResponse | null>(null);
+  protected readonly lastRun = signal<QaRunResult | null>(null);
+  /** Legacy static plan: shown as a plan card that waits for one approval. */
+  protected readonly legacyRun = computed(() => {
+    const run = this.lastRun();
+    return run?.mode === 'LEGACY_STATIC_PLAN' ? run : null;
+  });
+  /** Generic runtime run (Phase F), followed through the execution API. */
+  protected readonly runDetail = signal<AgentRunDetail | null>(null);
+  protected readonly pendingApprovals = computed(
+    () => this.runDetail()?.approvals.filter((approval) => approval.status === 'PENDING') ?? [],
+  );
+  protected readonly runActive = computed(() => {
+    const detail = this.runDetail();
+    return !!detail && !TERMINAL_RUN_STATUSES.includes(detail.run.status);
+  });
+  private followedRunId: string | null = null;
+  private followTimer: ReturnType<typeof setTimeout> | null = null;
   protected readonly blueprint = signal<AgentBlueprint | null>(null);
   protected readonly provisioning = signal<ProvisioningRequest[]>([]);
   protected readonly provisioningBusy = signal(false);
@@ -180,12 +203,83 @@ export class App implements OnInit {
     void this.initialize();
   }
 
+  ngOnDestroy(): void {
+    this.stopFollowing();
+  }
+
   protected async startNewConversation(): Promise<void> {
+    this.stopFollowing();
     this.activeConversation.set(null);
     this.lastRun.set(null);
   }
 
+  /** Follow a generic run until it ends; the conversation reloads when the run changes. */
+  private async followRun(runId: string): Promise<void> {
+    this.stopFollowing();
+    this.followedRunId = runId;
+    await this.refreshRun(runId);
+  }
+
+  private stopFollowing(): void {
+    if (this.followTimer) clearTimeout(this.followTimer);
+    this.followTimer = null;
+    this.followedRunId = null;
+    this.runDetail.set(null);
+  }
+
+  private async refreshRun(runId: string): Promise<void> {
+    this.followTimer = null;
+    let detail: AgentRunDetail;
+    try {
+      detail = await firstValueFrom(
+        this.http.get<AgentRunDetail>(`${this.apiUrl}/execution/v1/runs/${runId}`),
+      );
+    } catch {
+      if (this.followedRunId === runId) this.error.set('The run status could not be refreshed.');
+      return;
+    }
+    if (this.followedRunId !== runId) return;
+    const previous = this.runDetail();
+    this.runDetail.set(detail);
+    if (
+      previous &&
+      (previous.run.status !== detail.run.status || previous.steps.length !== detail.steps.length)
+    )
+      await this.reloadConversation();
+    if (TERMINAL_RUN_STATUSES.includes(detail.run.status)) return;
+    this.followTimer = setTimeout(() => void this.refreshRun(runId), App.followIntervalMs);
+  }
+
+  private async reloadConversation(): Promise<void> {
+    const conversation = this.activeConversation();
+    if (!conversation) return;
+    try {
+      const detail = await firstValueFrom(
+        this.http.get<ConversationDetail>(`${this.apiUrl}/conversations/${conversation.id}`),
+      );
+      if (this.activeConversation()?.id === detail.id) this.activeConversation.set(detail);
+    } catch {
+      this.error.set('The conversation could not be refreshed.');
+    }
+  }
+
+  protected async cancelRun(): Promise<void> {
+    const runId = this.followedRunId;
+    if (!runId) return;
+    try {
+      await firstValueFrom(this.http.post(`${this.apiUrl}/execution/v1/runs/${runId}/cancel`, {}));
+    } catch {
+      this.error.set('The run could not be cancelled.');
+    }
+    if (this.followTimer) clearTimeout(this.followTimer);
+    await this.refreshRun(runId);
+  }
+
   protected async selectConversation(conversation: Conversation): Promise<void> {
+    if (this.activeConversation()?.id !== conversation.id) {
+      this.stopFollowing();
+      this.lastRun.set(null);
+    }
     try {
       const detail = await firstValueFrom(
         this.http.get<ConversationDetail>(`${this.apiUrl}/conversations/${conversation.id}`),
@@ -231,16 +325,18 @@ export class App implements OnInit {
         }),
       );
       const result = await firstValueFrom(
-        this.http.post<QaRunResponse>(`${this.apiUrl}/qa/runs`, {
+        this.http.post<QaRunResult>(`${this.apiUrl}/qa/runs`, {
           employeeId: this.bootstrap()!.employee.id,
           conversationId: conversation.id,
           storyKey: this.storyKey.trim().toUpperCase(),
           targetUrl: this.targetUrl.trim(),
+          instructions: this.prompt.trim().slice(0, 2000),
         }),
       );
       this.lastRun.set(result);
       await this.selectConversation(conversation);
       await this.loadConversations();
+      if (result.mode === 'GENERIC_RUNTIME') await this.followRun(result.agentRun.id);
     } catch {
       this.error.set('The request failed. Check the story key, target URL, and API connection.');
     } finally {

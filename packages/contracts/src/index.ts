@@ -265,11 +265,30 @@ export interface QaRunRequest {
   conversationId: Identifier;
   storyKey: string;
   targetUrl: string;
+  /** Employee guidance for the agent; used by generic-runtime QA runs only. */
+  instructions?: string;
 }
 
+/** How `POST /api/qa/runs` handled a request (Phase F). */
+export type QaRunMode = 'LEGACY_STATIC_PLAN' | 'GENERIC_RUNTIME';
+
+/** Legacy static plan: nothing executes; the whole run waits for one approval. */
 export interface QaRunResponse {
+  mode: 'LEGACY_STATIC_PLAN';
   run: QaRun;
   approval: Approval;
   /** Generic run recorded alongside the legacy QA run. Read via /api/execution/v1. */
   agentRun?: { id: Identifier; threadId: Identifier; status: AgentRunStatus };
 }
+
+/**
+ * Generic runtime (`QA_GENERIC_RUNTIME_ENABLED`): a queued `validate-story` run that an agent
+ * runtime executes. Each governed step is decided, and approved where required, as it happens;
+ * follow it through `/api/execution/v1/runs/:id/events`.
+ */
+export interface GenericQaRunResponse {
+  mode: 'GENERIC_RUNTIME';
+  agentRun: { id: Identifier; threadId: Identifier; status: AgentRunStatus };
+}
+
+export type QaRunResult = QaRunResponse | GenericQaRunResponse;

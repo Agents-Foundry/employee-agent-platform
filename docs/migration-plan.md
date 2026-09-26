@@ -12,7 +12,7 @@ error handling and documentation. A type, table or route stub alone does not cou
 | C     | Agent runtime: session, run loop, model abstraction, one tool, approval pause/resume, signed transport      | Implemented (see below) |
 | D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch            | Implemented (see below) |
 | E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright     | Implemented (see below) |
-| F     | QA migration from the static six-step plan to the generic runtime (feature-flagged)                         | Not started             |
+| F     | QA migration from the static six-step plan to the generic runtime (feature-flagged)                         | Implemented (see below) |
 | G     | Frontend Engineer on the same runtime, as the architectural acceptance test                                 | Not started             |
 
 ## Phase A — delivered
@@ -137,6 +137,34 @@ error handling and documentation. A type, table or route stub alone does not cou
 - There is no dependency installation, and private repositories are not supported.
   `command` and `file.write` are never granted.
 
+## Phase F — delivered
+
+- `QA_GENERIC_RUNTIME_ENABLED`: `POST /api/qa/runs` queues a `validate-story` run on the
+  generic runtime for agents whose v2 manifest pins that workflow (`mode: GENERIC_RUNTIME`).
+  Everything else keeps the legacy static plan (`mode: LEGACY_STATIC_PLAN`). Targets outside
+  the configured QA origin are refused (`TARGET_OUT_OF_SCOPE`). See
+  [ADR 0014](adr/0014-qa-on-the-generic-runtime.md).
+- `run.submit` carries the task's `workflow`, resolved from the pinned catalog bundle. Runs
+  naming an ungranted workflow are cancelled (`MANIFEST_INVALID`). The native kernel renders
+  any workflow as numbered guidance, with no role-specific code.
+- `jira.read`: a governed, allow-by-default control-plane action that reads one work item in
+  an allowed project. The audit trail keeps only the key. The `issue-tracker` tool reads or
+  files, and fences work-item text as data.
+- Conversation threads: one thread per conversation, at most one active run, and a persistent
+  workspace. Approvals and outcomes are mirrored into the conversation.
+- Employee app: follows generic runs (status, steps, pending approvals, evidence, cancel).
+- End-to-end test (`qa-generic-runtime.spec.ts`) across the control plane, agent runtime,
+  execution runtime and a fake Jira: read story → checkout → Playwright (approved) → file
+  defect (approved) → report.
+
+### Phase F limitations
+
+- The workflow is guidance to the model; step order is not enforced by policy.
+- Real execution still needs `EXECUTION_ALLOW_UNSANDBOXED=true`: there is no sandboxing
+  provider yet.
+- The employee app polls run state every 2 seconds; there is no push channel.
+- Legacy QA records (`qa_runs`) are kept and are still written when the flag is off.
+
 ## Feature flags
 
 | Flag                                 | Default | Effect                                                                                         |
@@ -146,18 +174,15 @@ error handling and documentation. A type, table or route stub alone does not cou
 | `AGENT_RUNTIME_IDENTITIES_PATH`      | unset   | Runtime public keys and scopes; unset means no runtime can authenticate                        |
 | `CONNECTOR_SECRETS_PATH`             | unset   | Per-organization connector secrets; unset means every governed write fails `SECRET_UNRESOLVED` |
 | `EXECUTION_ALLOW_UNSANDBOXED`        | `false` | Execution runtime accepts sandboxed grants on the local provider (development only)            |
+| `QA_GENERIC_RUNTIME_ENABLED`         | `false` | `/api/qa/runs` queues generic `validate-story` runs for eligible agents                        |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
 
 ## Next recommended phase
 
-Phase F: QA migration. Move the legacy `/api/qa/runs` static plan onto the generic runtime,
-behind a feature flag:
-
-- a validate-story workflow that checks out the repository, runs Playwright after approval and
-  drafts defects through the Action Gateway;
-- the employee app following run events instead of the legacy QA record.
-
-In parallel, add a sandboxing `ExecutionProvider` (container with egress limited to the grant's
-allow-list) so sandboxed agents no longer need `EXECUTION_ALLOW_UNSANDBOXED`.
+Phase G: the Frontend Engineer on the same runtime, as the architectural acceptance test. It
+should be a new role package (blueprint, skills, workflows) with no runtime or control-plane
+branches. It needs a governed `repository.pull_request.create` path and `file.write` /
+`command` grants with a sandboxing `ExecutionProvider` (a container with egress limited to the
+grant's allow-list).

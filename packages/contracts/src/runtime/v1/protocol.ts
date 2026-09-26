@@ -9,6 +9,7 @@ import type {
   TaskSpec,
   WorkspaceBinding,
 } from '../../execution.js';
+import type { WorkflowDefinition } from '../../catalog.js';
 import type { SignedAgentManifestV2 } from '../../index.js';
 
 export const RUNTIME_PROTOCOL_V1 = 'agents-foundry/runtime/v1' as const;
@@ -31,6 +32,12 @@ export interface RunSubmitCommand extends CommandBase {
     runtimeProfile: string;
     manifest: SignedAgentManifestV2;
     workspace: WorkspaceBinding | null;
+    /**
+     * The task's workflow resolved by the control plane from the agent's pinned catalog
+     * bundle (Phase F). Guidance for the kernel only: every step's action is still decided by
+     * the control plane when requested. Absent when the task names no workflow.
+     */
+    workflow?: WorkflowDefinition;
   };
 }
 

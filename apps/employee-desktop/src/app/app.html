@@ -223,7 +223,50 @@
               </div>
             </article>
           }
-          @if (lastRun(); as result) {
+          @if (runDetail(); as detail) {
+            <section class="run-card generic-run" aria-live="polite">
+              <div class="run-title">
+                <span>{{ runActive() ? '…' : detail.run.status === 'COMPLETED' ? '✓' : '!' }}</span>
+                <div>
+                  <strong
+                    >{{ detail.run.task.workflow ?? 'Agent run' }}
+                    {{ detail.run.task.workItem?.key ?? '' }}</strong
+                  ><small
+                    >{{ detail.run.status
+                    }}{{ detail.run.statusReason ? ' · ' + detail.run.statusReason : '' }}</small
+                  >
+                </div>
+                @if (runActive()) {
+                  <button type="button" class="cancel-run" (click)="cancelRun()">Cancel run</button>
+                }
+              </div>
+              <ol class="run-steps">
+                @for (step of detail.steps; track step.id) {
+                  <li [attr.data-status]="step.status">
+                    {{ step.title }} <small>{{ step.status }}</small>
+                  </li>
+                }
+              </ol>
+              @for (approval of pendingApprovals(); track approval.id) {
+                <div class="approval-note">
+                  <span>!</span>
+                  <p>
+                    Waiting for approval <strong>{{ approval.id.slice(0, 8) }}</strong> ({{
+                      approval.action
+                    }}, {{ approval.risk }} risk) in the Admin control plane.
+                  </p>
+                </div>
+              }
+              @if (detail.artifacts.length) {
+                <ul class="run-evidence">
+                  @for (artifact of detail.artifacts; track artifact.id) {
+                    <li>Evidence: {{ artifact.name }} ({{ artifact.type }})</li>
+                  }
+                </ul>
+              }
+            </section>
+          }
+          @if (legacyRun(); as result) {
             <section class="run-card">
               <div class="run-title">
                 <span>✓</span>

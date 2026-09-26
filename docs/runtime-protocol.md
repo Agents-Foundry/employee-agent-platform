@@ -17,17 +17,21 @@ type. Removing or re-typing a field requires `runtime/v2`.
 
 ## Commands (control plane → runtime)
 
-| Type         | Purpose                                           | Key fields                                                                    |
-| ------------ | ------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `run.submit` | Start a queued run                                | `run.task`, `run.runtimeProfile`, signed **v2** manifest, `workspace` binding |
-| `run.resume` | Deliver a human approval decision to a paused run | `approval.approvalId`, `decision`, `decidedAt`                                |
-| `run.cancel` | Stop a run                                        | `reason`                                                                      |
+| Type         | Purpose                                           | Key fields                                                                                             |
+| ------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `run.submit` | Start a queued run                                | `run.task`, `run.runtimeProfile`, signed **v2** manifest, `workspace` binding, optional `run.workflow` |
+| `run.resume` | Deliver a human approval decision to a paused run | `approval.approvalId`, `decision`, `decidedAt`                                                         |
+| `run.cancel` | Stop a run                                        | `reason`                                                                                               |
 
 Every command has a `commandId`, `issuedAt` and full `correlation`. `run.submit` requires an
 Agent Manifest v2, and the parser checks that the manifest's organization, employee and agent
 match the correlation. The runtime must verify the manifest signature before acting.
 `ExecutionService.buildRunSubmitCommand` produces the command and parses it before returning.
 Runs whose agents only have a v1 manifest are refused (`RUNTIME_MANIFEST_V2_REQUIRED`).
+When the task names a workflow, `run.workflow` carries its definition, resolved from the
+catalog bundle the manifest pins (Phase F, ADR 0014). Its `id` must equal `task.workflow`.
+A workflow the bundle does not grant cancels the run instead of submitting it. The
+definition is guidance for the kernel; it grants nothing.
 
 ## Events (runtime → control plane)
 

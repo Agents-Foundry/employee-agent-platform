@@ -106,4 +106,116 @@ describe('App', () => {
     expect(fixture.nativeElement.textContent).toContain('Pilot · PENDING');
     http.verify();
   });
+
+  it('follows a generic-runtime QA run until it ends and reloads the conversation', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const api = 'http://localhost:4100/api';
+    App.followIntervalMs = 1;
+    fixture.detectChanges();
+    http.expectOne(`${api}/bootstrap`).flush({
+      organization: { id: 'org' },
+      employee: { id: 'employee', organizationId: 'org' },
+      agents: [{ id: 'agent_qa_engineer', name: 'QA', status: 'ACTIVE' }],
+    });
+    await fixture.whenStable();
+    http.expectOne(`${api}/blueprints`).flush([]);
+    await fixture.whenStable();
+    http.expectOne(`${api}/provisioning`).flush([]);
+    await fixture.whenStable();
+    await vi.waitFor(() => http.expectOne((req) => req.url.endsWith('/conversations')).flush([]));
+    await fixture.whenStable();
+
+    const conversation = {
+      id: 'conversation-1',
+      employeeId: 'employee',
+      agentId: 'agent_qa_engineer',
+      title: 'QA-7',
+      messages: [],
+    };
+    (
+      fixture.componentInstance as unknown as { activeConversation: { set(v: unknown): void } }
+    ).activeConversation.set(conversation);
+    const submitted = (
+      fixture.componentInstance as unknown as { submit(): Promise<void> }
+    ).submit();
+    http.expectOne(`${api}/conversations/conversation-1/messages`).flush({});
+    await vi.waitFor(() => {
+      const start = http.expectOne(`${api}/qa/runs`);
+      expect(start.request.body.instructions).toContain('Analyze the story');
+      start.flush({
+        mode: 'GENERIC_RUNTIME',
+        agentRun: { id: 'run-1', threadId: 'thread-1', status: 'QUEUED' },
+      });
+    });
+    await vi.waitFor(() =>
+      http.expectOne(`${api}/conversations/conversation-1`).flush(conversation),
+    );
+    await vi.waitFor(() => http.expectOne((req) => req.url.endsWith('/conversations')).flush([]));
+    const detail = (status: string, steps: object[], approvals: object[]) => ({
+      run: {
+        id: 'run-1',
+        status,
+        statusReason: null,
+        task: { objective: 'x', workflow: 'validate-story', workItem: { key: 'QA-7' }, inputs: {} },
+      },
+      steps,
+      approvals,
+      artifacts: [],
+    });
+    await vi.waitFor(() =>
+      http
+        .expectOne(`${api}/execution/v1/runs/run-1`)
+        .flush(
+          detail(
+            'WAITING_FOR_APPROVAL',
+            [{ id: 's1', title: 'Tool call: browser', status: 'WAITING_FOR_APPROVAL' }],
+            [
+              {
+                id: 'abcdef1234',
+                action: 'qa.execute_playwright',
+                risk: 'MEDIUM',
+                status: 'PENDING',
+              },
+            ],
+          ),
+        ),
+    );
+    await submitted;
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const text = () => fixture.nativeElement.textContent as string;
+    expect(text()).toContain('validate-story QA-7');
+    expect(text()).toContain('Waiting for approval abcdef12');
+    expect(text()).toContain('Cancel run');
+
+    await vi.waitFor(() =>
+      http
+        .expectOne(`${api}/execution/v1/runs/run-1`)
+        .flush(
+          detail('COMPLETED', [{ id: 's1', title: 'Tool call: browser', status: 'COMPLETED' }], []),
+        ),
+    );
+    await vi.waitFor(() =>
+      http.expectOne(`${api}/conversations/conversation-1`).flush({
+        ...conversation,
+        messages: [
+          {
+            id: 'm1',
+            author: 'AGENT',
+            content: 'QA-7 validated.',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    );
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(text()).toContain('QA-7 validated.');
+    expect(text()).not.toContain('Cancel run');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    http.expectNone(`${api}/execution/v1/runs/run-1`);
+    http.verify();
+    App.followIntervalMs = 2000;
+  });
 });

@@ -9,6 +9,7 @@ import type {
   SignedAgentManifestV2,
   SignedExecutionGrant,
   TaskSpec,
+  WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import type { RuntimeFailure } from '../errors.js';
 import type { ModelGateway } from '../models/model-gateway.js';
@@ -29,6 +30,8 @@ export type EmitEvent = <K extends Exclude<RuntimeEventType, `run.${string}`>>(
 export interface KernelContext {
   correlation: RuntimeCorrelation;
   task: TaskSpec;
+  /** The task's workflow, resolved by the control plane from the pinned catalog (guidance). */
+  workflow?: WorkflowDefinition;
   manifest: SignedAgentManifestV2;
   emit: EmitEvent;
   requestAction(

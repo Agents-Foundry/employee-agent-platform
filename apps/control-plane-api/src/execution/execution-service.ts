@@ -20,6 +20,7 @@ import type {
   TaskSpec,
   Thread,
   ThreadDetail,
+  WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import {
   APPROVAL_GRANTED,
@@ -76,6 +77,19 @@ export interface LegacyQaRunInput {
   manifest: AnySignedAgentManifest | null;
 }
 
+export interface ExecutionServiceOptions {
+  /**
+   * Resolve a workflow from the manifest's pinned catalog bundle. Returns undefined when the
+   * manifest does not grant it; the run is then never submitted (fail closed).
+   */
+  resolveWorkflow?: (
+    manifest: AnySignedAgentManifest,
+    workflowId: string,
+  ) => WorkflowDefinition | undefined;
+  /** Append an agent message to a conversation (caller's transaction). */
+  conversationMessage?: (organizationId: string, conversationId: string, content: string) => void;
+}
+
 /**
  * Tenant-scoped persistence for threads, runs, steps, events and artifacts.
  * Every query binds `organization_id`; reads additionally enforce employee ownership.
@@ -89,6 +103,7 @@ export class ExecutionService {
       organizationId: string,
       employeeId: string,
     ) => AnySignedAgentManifest,
+    private readonly options: ExecutionServiceOptions = {},
   ) {}
 
   /**
@@ -103,6 +118,8 @@ export class ExecutionService {
     task: TaskSpec;
     manifest: AnySignedAgentManifest;
     threadId?: string;
+    /** Run in the conversation's thread (created on first use); its outcome syncs back. */
+    conversation?: { id: string; title: string };
   }): AgentRun {
     const manifest = manifestReference(input.manifest);
     const subject = manifestSubject(input.manifest.payload);
@@ -133,6 +150,8 @@ export class ExecutionService {
             .get(threadId)
         )
           throw new ExecutionError(409, 'THREAD_HAS_ACTIVE_RUN');
+      } else if (input.conversation) {
+        threadId = this.conversationThread(input, input.conversation);
       } else threadId = this.insertThread(input, null, input.title);
       const runId = this.insertRun({
         ...input,
@@ -303,6 +322,10 @@ export class ExecutionService {
         reason: 'APPROVAL_REQUIRED',
         approvalId: approval.id,
       });
+      this.syncConversation(
+        scope,
+        `Waiting for approval ${approval.id.slice(0, 8)}: ${approval.summary}`,
+      );
     });
   }
 
@@ -326,6 +349,7 @@ export class ExecutionService {
       for (const step of open) this.transitionStep(organizationId, step.id, 'CANCELLED');
       this.transitionRun(scope, 'CANCELLED', reason);
       this.appendEvent(scope, 'run.cancelled', 'CONTROL_PLANE', actorId, { reason });
+      this.syncConversation(scope, `The run was cancelled (${reason}).`);
       return this.mapRun(this.db.prepare('SELECT * FROM agent_runs WHERE id=?').get(runId) as Row);
     });
   }
@@ -497,6 +521,14 @@ export class ExecutionService {
         occurredAt: envelope.occurredAt,
         payloadHash,
       });
+      if (envelope.type === 'run.completed') this.syncConversation(scope, envelope.payload.summary);
+      else if (envelope.type === 'run.failed')
+        this.syncConversation(
+          scope,
+          `The run failed: ${envelope.payload.error.code}. ${envelope.payload.error.message}`,
+        );
+      else if (envelope.type === 'run.cancelled')
+        this.syncConversation(scope, `The run was cancelled (${envelope.payload.reason}).`);
       return {
         event: this.mapEvent(
           this.db.prepare('SELECT * FROM agent_events WHERE id=?').get(id) as Row,
@@ -519,6 +551,13 @@ export class ExecutionService {
       manifest.payload.metadata.manifestId !== run.manifest.manifestId
     )
       throw new ExecutionError(409, 'MANIFEST_INVALID');
+    let workflow: WorkflowDefinition | undefined;
+    if (run.task.workflow) {
+      workflow = manifest.payload.workflows.includes(run.task.workflow)
+        ? this.options.resolveWorkflow?.(manifest, run.task.workflow)
+        : undefined;
+      if (!workflow) throw new ExecutionError(409, 'MANIFEST_INVALID');
+    }
     return parseRuntimeCommand({
       protocol: RUNTIME_PROTOCOL_V1,
       type: 'run.submit',
@@ -538,6 +577,7 @@ export class ExecutionService {
         runtimeProfile: run.runtimeProfile,
         manifest,
         workspace: null,
+        ...(workflow ? { workflow } : {}),
       },
     }) as RunSubmitCommand;
   }
@@ -626,6 +666,54 @@ export class ExecutionService {
   }
 
   /** Reuse the conversation's latest idle thread; a busy thread gets a sibling (one active run each). */
+  /**
+   * The conversation's thread for a generic run. One thread per conversation keeps the
+   * execution workspace (which is per thread); a thread with an active run is refused.
+   */
+  private conversationThread(
+    owner: { organizationId: string; employeeId: string; agentId: string },
+    conversation: { id: string; title: string },
+  ): string {
+    const thread = this.db
+      .prepare(
+        `SELECT id FROM agent_threads WHERE organization_id=? AND conversation_id=? AND agent_id=? AND employee_id=?
+         AND status='ACTIVE' ORDER BY updated_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(owner.organizationId, conversation.id, owner.agentId, owner.employeeId) as
+      { id: string } | undefined;
+    if (!thread) return this.insertThread(owner, conversation.id, conversation.title);
+    if (
+      this.db
+        .prepare(
+          `SELECT 1 FROM agent_runs WHERE thread_id=? AND status IN ('QUEUED','RUNNING','WAITING_FOR_APPROVAL')`,
+        )
+        .get(thread.id)
+    )
+      throw new ExecutionError(409, 'THREAD_HAS_ACTIVE_RUN');
+    this.db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(), thread.id);
+    return thread.id;
+  }
+
+  /** Mirror a generic run's outcome into its conversation (conversationSync: REQUIRED). */
+  private syncConversation(
+    scope: { organizationId: string; threadId: string; runId: string },
+    content: string,
+  ): void {
+    if (!this.options.conversationMessage) return;
+    const link = this.db
+      .prepare(
+        `SELECT t.conversation_id FROM agent_threads t JOIN agent_runs r ON r.thread_id=t.id
+         WHERE r.id=? AND r.organization_id=? AND r.legacy_qa_run_id IS NULL`,
+      )
+      .get(scope.runId, scope.organizationId) as { conversation_id: string | null } | undefined;
+    if (!link?.conversation_id) return;
+    this.options.conversationMessage(
+      scope.organizationId,
+      link.conversation_id,
+      content.slice(0, 20_000),
+    );
+  }
+
   private threadForConversation(input: LegacyQaRunInput): string {
     const idle = this.db
       .prepare(

@@ -62,6 +62,7 @@ const qaRunSchema = z.object({
   targetUrl: z.url().refine((url) => ['http:', 'https:'].includes(new URL(url).protocol), {
     message: 'Only HTTP(S) targets are allowed.',
   }),
+  instructions: z.string().trim().min(1).max(2000).optional(),
 });
 
 const approvalDecisionSchema = z.object({
@@ -314,6 +315,14 @@ export function createApp(
     if (actor.role !== 'EMPLOYEE' || input.employeeId !== actor.id)
       return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
     database.getConversation(input.conversationId, actor.organizationId, actor.id);
+    if (database.qaGenericRuntimeEnabled) {
+      const generic = database.createGenericQaRun(
+        input,
+        actor.organizationId,
+        auth.mode === 'demo',
+      );
+      if (generic) return response.status(202).json(generic);
+    }
     const policy = evaluatePolicy('qa.execute_playwright');
     if (policy.outcome !== 'REQUIRE_APPROVAL') {
       return response.status(500).json({ error: 'POLICY_CONFIGURATION_ERROR' });
@@ -326,15 +335,17 @@ export function createApp(
       'Capture trace, screenshots, console, and network evidence',
       'Draft defects for human review; never publish automatically',
     ];
-    const result: QaRunResponse = database.createQaRun(
+    const { instructions: _unused, ...legacyInput } = input;
+    const legacy = database.createQaRun(
       {
-        ...input,
+        ...legacyInput,
         plan,
         approvalSummary: `Approve isolated Playwright execution for ${input.storyKey} against ${input.targetUrl}.`,
       },
       actor.organizationId,
       auth.mode === 'demo',
     );
+    const result: QaRunResponse = { mode: 'LEGACY_STATIC_PLAN', ...legacy };
     database.addMessage(
       input.conversationId,
       'AGENT',

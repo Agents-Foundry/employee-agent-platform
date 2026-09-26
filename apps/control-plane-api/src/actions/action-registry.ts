@@ -27,6 +27,20 @@ export interface ControlPlaneAction<P = Record<string, unknown>> {
   /** Written by the control plane from validated parameters; shown to approvers. */
   summary(parameters: P): string;
   dispatch(context: DispatchContext, parameters: P): Promise<Record<string, string>>;
+  /**
+   * What the audit log keeps of a successful result. Reads return work-item content, which
+   * belongs to the run, not to the audit trail. Defaults to the whole result.
+   */
+  auditResult?(result: Record<string, string>): Record<string, string>;
+}
+
+function jiraConnector(context: DispatchContext): JiraIssueTrackerConnector {
+  return new JiraIssueTrackerConnector({
+    baseUrl: context.baseUrl,
+    token: context.secret,
+    ...(context.settings.authEmail ? { authEmail: context.settings.authEmail } : {}),
+    ...(context.fetch ? { fetch: context.fetch } : {}),
+  });
 }
 
 const nonBlank = (max: number) =>
@@ -58,19 +72,44 @@ const jiraIssueCreate: ControlPlaneAction<IssueDraftParameters> = {
       500,
     ),
   async dispatch(context, parameters) {
-    const connector = new JiraIssueTrackerConnector({
-      baseUrl: context.baseUrl,
-      token: context.secret,
-      ...(context.settings.authEmail ? { authEmail: context.settings.authEmail } : {}),
-      ...(context.fetch ? { fetch: context.fetch } : {}),
-    });
-    const issue = await connector.createIssue(parameters, context.signal);
+    const issue = await jiraConnector(context).createIssue(parameters, context.signal);
     return { issueKey: issue.key, url: issue.url };
   },
 };
 
+const issueReference = z
+  .object({ issueKey: z.string().regex(/^[A-Z][A-Z0-9]{1,9}-[1-9]\d{0,8}$/) })
+  .strict();
+type IssueReferenceParameters = z.infer<typeof issueReference>;
+
+/** Read one work item (Phase F): the story a QA run validates. Allowed projects only. */
+const jiraRead: ControlPlaneAction<IssueReferenceParameters> = {
+  action: 'jira.read',
+  connectorProvider: 'jira',
+  requiredCapability: 'issueTracker.read',
+  parameters: issueReference,
+  resource: (parameters) => ({ type: 'issue-tracker.issue', id: parameters.issueKey }),
+  inScope: (parameters, settings) =>
+    settings.allowedProjects.includes(parameters.issueKey.split('-')[0]!),
+  summary: (parameters) => `Read Jira issue ${parameters.issueKey}`,
+  async dispatch(context, parameters) {
+    const issue = await jiraConnector(context).getIssue(parameters.issueKey, context.signal);
+    return {
+      issueKey: issue.key,
+      summary: issue.summary,
+      status: issue.status,
+      issueType: issue.issueType,
+      description: issue.description,
+      descriptionTruncated: String(issue.descriptionTruncated),
+      url: issue.url,
+    };
+  },
+  auditResult: (result) => ({ issueKey: result['issueKey'] ?? '' }),
+};
+
 export const controlPlaneActions: Readonly<Record<string, ControlPlaneAction<never>>> = {
   [jiraIssueCreate.action]: jiraIssueCreate as unknown as ControlPlaneAction<never>,
+  [jiraRead.action]: jiraRead as unknown as ControlPlaneAction<never>,
 };
 
 export function controlPlaneAction(action: string): ControlPlaneAction | undefined {

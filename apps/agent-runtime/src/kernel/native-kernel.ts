@@ -374,11 +374,29 @@ function systemPrompt(context: KernelContext): string {
     `You are ${identity.name}, a ${identity.role} employee agent in the ${identity.department} department.`,
     `You work for one employee inside their organization. Skills: ${skills.map((skill) => skill.id).join(', ') || 'none'}.`,
     `Workflows you may follow: ${workflows.join(', ') || 'none'}.`,
+    ...workflowGuide(context),
     'Use only the tools you are given. Some tool calls perform governed actions: the platform may',
     'deny them or pause the run until a human approves. Never claim an action happened unless its',
     'tool call succeeded. Never ask for, reveal or store secrets.',
     `Assignment configuration (JSON): ${JSON.stringify(configuration)}`,
   ].join('\n');
+}
+
+/**
+ * The task's workflow as numbered steps. Guidance only: each step's governed action is still
+ * decided by the control plane when a tool requests it, whatever the prompt says.
+ */
+function workflowGuide(context: KernelContext): string[] {
+  const { workflow } = context;
+  if (!workflow || workflow.id !== context.task.workflow) return [];
+  return [
+    `Follow workflow ${workflow.id}@${workflow.version} (${workflow.title}): ${workflow.description}`,
+    ...workflow.steps.map(
+      (step, index) =>
+        `  ${index + 1}. ${step.title} (skill ${step.skill}${step.action ? `, governed action ${step.action}` : ''})`,
+    ),
+    'Finish with a short report: what you checked, the evidence, and any defects you filed.',
+  ];
 }
 
 function taskPrompt(context: KernelContext): string {
