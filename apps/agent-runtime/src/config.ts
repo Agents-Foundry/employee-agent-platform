@@ -11,6 +11,8 @@ export interface RuntimeConfig {
   pollIntervalMs: number;
   concurrency: number;
   enableScriptedModel: boolean;
+  /** Execution runtime for repository and browser tools; unset means those tools are absent. */
+  executionRuntimeUrl: string | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -41,6 +43,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     pollIntervalMs: bounded(env['AGENT_RUNTIME_POLL_MS'], 2000, 100, 60_000),
     concurrency: bounded(env['AGENT_RUNTIME_CONCURRENCY'], 4, 1, 64),
     enableScriptedModel: env['AGENT_RUNTIME_ENABLE_SCRIPTED_MODEL'] === 'true',
+    executionRuntimeUrl: env['EXECUTION_RUNTIME_URL']?.trim() || null,
   };
 }
 

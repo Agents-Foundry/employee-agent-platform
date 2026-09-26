@@ -11,6 +11,8 @@ import { IssueTrackerTool } from './tools/issue-tracker-tool.js';
 import { LocalArtifactStore } from './tools/artifact-store.js';
 import { ToolRegistry } from './tools/runtime-tool.js';
 import { ControlPlaneClient } from './transport/control-plane-client.js';
+import { ExecutionClient } from './transport/execution-client.js';
+import { BrowserTool, RepositoryTool } from './tools/execution-tools.js';
 
 const config = loadRuntimeConfig();
 const paths = statePaths(config.stateDir);
@@ -27,7 +29,17 @@ const host = new RuntimeHost({
   verifier: new ManifestVerifier(config.manifestVerificationKey),
   kernel: new NativeKernel(),
   models: new ModelGateway(providers, new EnvironmentCredentialBroker()),
-  tools: new ToolRegistry([new ArtifactTool(), new IssueTrackerTool()]),
+  tools: new ToolRegistry([
+    new ArtifactTool(),
+    new IssueTrackerTool(),
+    // Repository and browser work runs only in an execution runtime, never in this process.
+    ...(config.executionRuntimeUrl
+      ? [
+          new RepositoryTool(new ExecutionClient(config.executionRuntimeUrl)),
+          new BrowserTool(new ExecutionClient(config.executionRuntimeUrl)),
+        ]
+      : []),
+  ]),
   artifacts: new LocalArtifactStore(paths.artifacts),
   checkpoints: new FileCheckpointStore(paths.checkpoints),
   concurrency: config.concurrency,

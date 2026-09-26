@@ -3,7 +3,9 @@ import type {
   RuntimeActionDecision,
   RuntimeActionExecuteRequest,
   RuntimeActionExecution,
+  RuntimeActionGrantRequest,
   RuntimeActionRequest,
+  SignedExecutionGrant,
   RuntimeClaimResponse,
   RuntimeEventAck,
   RuntimeEventEnvelope,
@@ -18,6 +20,7 @@ import {
   parseRuntimeActionExecution,
   parseRuntimeClaimResponse,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
+import { parseSignedExecutionGrant } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import { ControlPlaneError } from '../errors.js';
 
 /** The runtime's view of the control plane; tests substitute an in-memory implementation. */
@@ -26,6 +29,7 @@ export interface ControlPlanePort {
   sendEvent(event: RuntimeEventEnvelope): Promise<RuntimeEventAck>;
   requestAction(request: RuntimeActionRequest): Promise<RuntimeActionDecision>;
   executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution>;
+  requestGrant(request: RuntimeActionGrantRequest): Promise<SignedExecutionGrant>;
 }
 
 export interface ControlPlaneClientOptions {
@@ -72,6 +76,10 @@ export class ControlPlaneClient implements ControlPlanePort {
 
   async executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution> {
     return parseRuntimeActionExecution(await this.post(runtimeTransportPaths.execute, request));
+  }
+
+  async requestGrant(request: RuntimeActionGrantRequest): Promise<SignedExecutionGrant> {
+    return parseSignedExecutionGrant(await this.post(runtimeTransportPaths.grant, request));
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

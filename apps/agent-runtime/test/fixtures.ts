@@ -10,6 +10,7 @@ import type {
   RuntimeEventAck,
   RuntimeEventEnvelope,
   SignedAgentManifestV2,
+  SignedExecutionGrant,
 } from '@agents-foundry/contracts';
 import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
 import { parseRuntimeEvent } from '../../../packages/contracts/src/runtime/v1/schemas.js';
@@ -137,6 +138,16 @@ export class FakeControlPlane implements ControlPlanePort {
   async executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution> {
     this.executions.push(request);
     return this.execute(request);
+  }
+
+  readonly grants: RuntimeActionExecuteRequest[] = [];
+  grant: (request: RuntimeActionExecuteRequest) => SignedExecutionGrant = () => {
+    throw new ControlPlaneError(409, 'ACTION_NOT_GRANTABLE');
+  };
+
+  async requestGrant(request: RuntimeActionExecuteRequest): Promise<SignedExecutionGrant> {
+    this.grants.push(request);
+    return this.grant(request);
   }
 
   types(runId: string): string[] {
