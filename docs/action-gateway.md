@@ -5,7 +5,10 @@ The Action Gateway decides, approves and executes governed actions for agent run
 Code lives in `apps/control-plane-api/src/actions/`, and Policy v2 is in
 `packages/policy-engine`.
 
-**Status (Phase D):** implemented for `jira.issue.create`, end to end:
+**Status (Phase F):** control-plane actions `jira.issue.create` (Phase D) and `jira.read`
+(Phase F). `jira.read` reads one work item in an allowed project; it needs `issueTracker.read`,
+is allowed by default, and its audit record keeps only the issue key. `jira.issue.create` is
+implemented end to end:
 
 - runtime tool `issue-tracker`;
 - payload-bound approval;
