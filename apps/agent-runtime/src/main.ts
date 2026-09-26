@@ -8,11 +8,12 @@ import { ScriptedProvider } from './models/scripted-provider.js';
 import { consoleLogger, RuntimeHost } from './runtime-host.js';
 import { ArtifactTool } from './tools/artifact-tool.js';
 import { IssueTrackerTool } from './tools/issue-tracker-tool.js';
+import { SourceControlTool } from './tools/source-control-tool.js';
 import { LocalArtifactStore } from './tools/artifact-store.js';
 import { ToolRegistry } from './tools/runtime-tool.js';
 import { ControlPlaneClient } from './transport/control-plane-client.js';
 import { ExecutionClient } from './transport/execution-client.js';
-import { BrowserTool, RepositoryTool } from './tools/execution-tools.js';
+import { BrowserTool, BuildTool, CodeEditorTool, RepositoryTool } from './tools/execution-tools.js';
 
 const config = loadRuntimeConfig();
 const paths = statePaths(config.stateDir);
@@ -32,11 +33,14 @@ const host = new RuntimeHost({
   tools: new ToolRegistry([
     new ArtifactTool(),
     new IssueTrackerTool(),
-    // Repository and browser work runs only in an execution runtime, never in this process.
+    new SourceControlTool(),
+    // Workspace work (repository, browser, editing, builds) runs only in an execution runtime.
     ...(config.executionRuntimeUrl
       ? [
           new RepositoryTool(new ExecutionClient(config.executionRuntimeUrl)),
           new BrowserTool(new ExecutionClient(config.executionRuntimeUrl)),
+          new CodeEditorTool(new ExecutionClient(config.executionRuntimeUrl)),
+          new BuildTool(new ExecutionClient(config.executionRuntimeUrl)),
         ]
       : []),
   ]),

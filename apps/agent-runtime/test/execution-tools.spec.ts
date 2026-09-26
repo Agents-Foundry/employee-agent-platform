@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { ArtifactRegistration, SignedExecutionGrant } from '@agents-foundry/contracts';
 import { RuntimeFailure } from '../src/errors.js';
-import { BrowserTool, RepositoryTool } from '../src/tools/execution-tools.js';
+import {
+  BrowserTool,
+  BuildTool,
+  CodeEditorTool,
+  RepositoryTool,
+} from '../src/tools/execution-tools.js';
+import { SourceControlTool } from '../src/tools/source-control-tool.js';
 import { ExecutionClient, type ExecutionPort } from '../src/transport/execution-client.js';
 import { MemoryArtifactStore } from '../src/tools/artifact-store.js';
 import type { ToolExecutionContext } from '../src/tools/runtime-tool.js';
@@ -50,6 +56,37 @@ describe('execution-runtime tools', () => {
     ).toThrow(RuntimeFailure);
     expect(() => browser.parse({ kind: 'file.read', path: 'x' })).toThrow(RuntimeFailure);
     expect(() => repository.parse({ kind: 'file.read', path: '../x' })).toThrow();
+
+    // Phase G tools: writes, project scripts and pull requests each have one action.
+    const editor = new CodeEditorTool(port);
+    const build = new BuildTool(port);
+    const source = new SourceControlTool();
+    expect([editor.governedAction(), build.governedAction(), source.governedAction()]).toEqual([
+      'repository.write',
+      'workspace.command',
+      'repository.pull_request.create',
+    ]);
+    const write = { kind: 'file.write', path: 'repo/a.ts', content: 'x' };
+    expect(editor.parse(write)).toEqual(write);
+    expect(() => editor.parse({ kind: 'file.read', path: 'repo/a.ts' })).toThrow(RuntimeFailure);
+    expect(() => repository.parse(write)).toThrow(RuntimeFailure);
+    expect(() => editor.parse({ ...write, path: 'repo/.git/hooks/pre-commit' })).toThrow();
+    const script = { kind: 'command', command: 'npm', args: ['run', 'lint'], cwd: 'repo' };
+    expect(build.parse(script)).toEqual(script);
+    expect(build.summarize(build.parse(script))).toBe('Run npm run lint in repo');
+    expect(() => build.parse(write)).toThrow(RuntimeFailure);
+    const proposal = {
+      repository: 'acme/storefront',
+      baseBranch: 'main',
+      headBranch: 'agents-foundry/ui-7',
+      title: 'Banner',
+      body: '',
+      path: 'repo',
+    };
+    expect(source.parse(proposal)).toEqual(proposal);
+    // The runtime never supplies file contents for a pull request.
+    expect(() => source.parse({ ...proposal, files: [{ path: 'a', content: 'b' }] })).toThrow();
+    expect(() => source.parse({ ...proposal, headBranch: 'main' })).toThrow();
   });
 
   it('executes under a grant, registers evidence and surfaces failures with their output', async () => {

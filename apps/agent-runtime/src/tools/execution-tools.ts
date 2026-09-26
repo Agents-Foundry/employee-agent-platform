@@ -123,3 +123,63 @@ export class BrowserTool extends ExecutionTool {
       : 'Run Playwright';
   }
 }
+
+/** Catalog tool `code-editor@1.0.0`: create or replace a text file in the workspace. */
+export class CodeEditorTool extends ExecutionTool {
+  readonly id = 'code-editor';
+  protected readonly action = 'repository.write';
+  protected readonly kinds = ['file.write'] as const;
+  readonly description =
+    'Create or replace one UTF-8 text file in your isolated workspace (file.write). Send the ' +
+    'complete new content; paths are relative to the workspace, for example "repo/src/app.ts". ' +
+    'Nothing outside the workspace changes until a pull request is approved.';
+  readonly inputSchema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind', 'path', 'content'],
+    properties: {
+      kind: { const: 'file.write' },
+      path: { type: 'string', description: 'Workspace-relative file path.' },
+      content: { type: 'string', description: 'The complete file content (at most 128 KiB).' },
+    },
+  };
+
+  summarize(input: ExecutionOperation): string {
+    return input.kind === 'file.write' ? `Write ${input.path}` : 'Write a file';
+  }
+}
+
+/** Catalog tool `build@1.0.0`: run one allow-listed project script in the sandbox. */
+export class BuildTool extends ExecutionTool {
+  readonly id = 'build';
+  protected readonly action = 'workspace.command';
+  protected readonly kinds = ['command'] as const;
+  readonly description =
+    'Run one of the project\'s allow-listed npm scripts in the sandbox (command "npm", args ' +
+    '["run", "<script>"]), for example lint, test or build. There is no network access, so ' +
+    'dependencies must already be installed in the workspace.';
+  readonly inputSchema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind', 'command', 'args', 'cwd'],
+    properties: {
+      kind: { const: 'command' },
+      command: { const: 'npm' },
+      args: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Exactly ["run", "<script>"].',
+      },
+      cwd: {
+        type: 'string',
+        description: 'Workspace directory of the project, for example "repo".',
+      },
+    },
+  };
+
+  summarize(input: ExecutionOperation): string {
+    return input.kind === 'command'
+      ? `Run ${[input.command, ...input.args].join(' ')} in ${input.cwd}`
+      : 'Run a project script';
+  }
+}
