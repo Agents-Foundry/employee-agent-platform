@@ -13,7 +13,7 @@ error handling and documentation. A type, table or route stub alone does not cou
 | D     | Action Gateway: semantic actions, contextual policy bridge, approvals, audit, connector dispatch            | Implemented (see below) |
 | E     | `execution-runtime`: workspaces, checkout, shell, filesystem, artifact capture, then browser/Playwright     | Implemented (see below) |
 | F     | QA migration from the static six-step plan to the generic runtime (feature-flagged)                         | Implemented (see below) |
-| G     | Frontend Engineer on the same runtime, as the architectural acceptance test                                 | Not started             |
+| G     | Frontend Engineer on the same runtime, as the architectural acceptance test                                 | Implemented (see below) |
 
 ## Phase A — delivered
 
@@ -165,24 +165,56 @@ error handling and documentation. A type, table or route stub alone does not cou
 - The employee app polls run state every 2 seconds; there is no push channel.
 - Legacy QA records (`qa_runs`) are kept and are still written when the flag is off.
 
+## Phase G — delivered
+
+- Frontend Engineer 1.0.0 as catalog data only: the `implement-ui-change` workflow, four
+  skills, and the `code-editor`, `build` and `source-control` tools. A test scans the runtimes
+  and gateway for role names ([ADR 0015](adr/0015-frontend-engineer-and-sandboxed-execution.md)).
+- Governed workspace writes (`repository.write`) and project scripts (`workspace.command`:
+  `npm run <configured script>`, network `NONE`).
+- `repository.pull_request.create` through a GitHub connector: a control-plane-assembled,
+  digest-bound change set and a draft pull request created through the API. Migration 011
+  adds GitHub connections and stored change sets.
+- `ContainerExecutionProvider`: repository code runs only in locked-down containers under the
+  grant's CPU, memory, process and network limits. Tests run real containers when Docker is
+  available.
+- Admin: GitHub connections and a role selector. Employee app: a role selector, and generic
+  runs for agents without the QA workflow. `POST /api/execution/v1/runs` accepts a
+  `conversationId`.
+- Acceptance test: the Frontend Engineer implements, verifies (in a container) and proposes a
+  change on the shared runtime, publishing exactly the approved files.
+
+### Phase G limitations
+
+- No egress allow-list: container grants that need network are refused unless the operator
+  accepts unrestricted egress (QA Playwright runs, for now).
+- No dependency installation; scripts run offline.
+- Pull requests are GitHub-only, and each change set is limited to 100 files and 1 MiB.
+- Git and file operations run on the host, confined but not network-isolated.
+
 ## Feature flags
 
-| Flag                                 | Default | Effect                                                                                         |
-| ------------------------------------ | ------- | ---------------------------------------------------------------------------------------------- |
-| `AGENT_MANIFEST_V2_ISSUANCE_ENABLED` | `false` | New agents receive `agents-foundry/v2` manifests                                               |
-| `GENERIC_AGENT_RUNTIME_ENABLED`      | `false` | Employees may start generic runs (`POST /api/execution/v1/runs`)                               |
-| `AGENT_RUNTIME_IDENTITIES_PATH`      | unset   | Runtime public keys and scopes; unset means no runtime can authenticate                        |
-| `CONNECTOR_SECRETS_PATH`             | unset   | Per-organization connector secrets; unset means every governed write fails `SECRET_UNRESOLVED` |
-| `EXECUTION_ALLOW_UNSANDBOXED`        | `false` | Execution runtime accepts sandboxed grants on the local provider (development only)            |
-| `QA_GENERIC_RUNTIME_ENABLED`         | `false` | `/api/qa/runs` queues generic `validate-story` runs for eligible agents                        |
+| Flag                                  | Default | Effect                                                                                         |
+| ------------------------------------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `AGENT_MANIFEST_V2_ISSUANCE_ENABLED`  | `false` | New agents receive `agents-foundry/v2` manifests                                               |
+| `GENERIC_AGENT_RUNTIME_ENABLED`       | `false` | Employees may start generic runs (`POST /api/execution/v1/runs`)                               |
+| `AGENT_RUNTIME_IDENTITIES_PATH`       | unset   | Runtime public keys and scopes; unset means no runtime can authenticate                        |
+| `CONNECTOR_SECRETS_PATH`              | unset   | Per-organization connector secrets; unset means every governed write fails `SECRET_UNRESOLVED` |
+| `EXECUTION_ALLOW_UNSANDBOXED`         | `false` | Execution runtime accepts sandboxed grants on the local provider (development only)            |
+| `QA_GENERIC_RUNTIME_ENABLED`          | `false` | `/api/qa/runs` queues generic `validate-story` runs for eligible agents                        |
+| `EXECUTION_PROVIDER`                  | `local` | `container` runs repository code in locked-down containers (sandboxed isolation)               |
+| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS` | `false` | Container provider runs network-needing grants without an allow-list (development only)        |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
 
 ## Next recommended phase
 
-Phase G: the Frontend Engineer on the same runtime, as the architectural acceptance test. It
-should be a new role package (blueprint, skills, workflows) with no runtime or control-plane
-branches. It needs a governed `repository.pull_request.create` path and `file.write` /
-`command` grants with a sandboxing `ExecutionProvider` (a container with egress limited to the
-grant's allow-list).
+All planned phases (A–G) are delivered. The highest-value follow-ups are:
+
+- an egress proxy that enforces each grant's host allow-list, so QA Playwright runs need no
+  override;
+- dependency installation through a governed, allow-listed registry mirror;
+- PostgreSQL with row-level security for multi-tenant production, replacing SQLite's
+  application-level isolation;
+- more roles as catalog data, with evaluation suites.

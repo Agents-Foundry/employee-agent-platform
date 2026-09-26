@@ -1,6 +1,6 @@
 # ADR 0009: Role packages are declarative expertise
 
-- Status: Accepted
+- Status: Accepted; validated in Phase G by the Frontend Engineer (ADR 0015)
 - Date: 2026-09-23
 
 ## Context
