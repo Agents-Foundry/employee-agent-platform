@@ -9,6 +9,7 @@ import type {
   RuntimeLease,
   SignedAgentManifestV2,
   TaskSpec,
+  WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import { RUNTIME_PROTOCOL_V1 } from '../../../packages/contracts/src/runtime/v1/protocol.js';
 import type { CheckpointStore } from './checkpoints.js';
@@ -179,11 +180,13 @@ export class RuntimeHost {
       await events.emit('run.failed', { error: failure!.toExecutionError(), retryable: false });
       return;
     }
-    const context = this.context(correlation, command.run.task, manifest, events, signal);
+    const { task, workflow } = command.run;
+    const context = this.context(correlation, { task, workflow }, manifest, events, signal);
     const outcome = await this.options.kernel.start(context);
     await this.finish(events, outcome, signal, {
       sessionId: lease.sessionId,
-      task: command.run.task,
+      task,
+      ...(workflow ? { workflow } : {}),
       runtimeProfile: command.run.runtimeProfile,
       manifest,
     });
@@ -219,7 +222,13 @@ export class RuntimeHost {
       await this.options.checkpoints.delete(command.runId);
       return;
     }
-    const context = this.context(correlation, checkpoint.task, manifest, events, signal);
+    const context = this.context(
+      correlation,
+      { task: checkpoint.task, workflow: checkpoint.workflow },
+      manifest,
+      events,
+      signal,
+    );
     const outcome = await this.options.kernel.resume(context, checkpoint.kernelState, {
       approvalId: command.approval.approvalId,
       decision: command.approval.decision,
@@ -235,14 +244,15 @@ export class RuntimeHost {
 
   private context(
     correlation: RuntimeCorrelation,
-    task: TaskSpec,
+    work: { task: TaskSpec; workflow: WorkflowDefinition | undefined },
     manifest: SignedAgentManifestV2,
     events: RunEvents,
     signal: AbortSignal,
   ): KernelContext {
     return {
       correlation,
-      task,
+      task: work.task,
+      ...(work.workflow ? { workflow: work.workflow } : {}),
       manifest,
       emit: (type, payload, stepId) => events.emit(type, payload, stepId),
       requestAction: (request) =>
@@ -269,6 +279,7 @@ export class RuntimeHost {
     run: {
       sessionId: string;
       task: TaskSpec;
+      workflow?: WorkflowDefinition;
       runtimeProfile: string;
       manifest: SignedAgentManifestV2;
     },
@@ -296,6 +307,7 @@ export class RuntimeHost {
           sessionId: run.sessionId,
           correlation,
           task: run.task,
+          ...(run.workflow ? { workflow: run.workflow } : {}),
           runtimeProfile: run.runtimeProfile,
           manifest: run.manifest,
           kernelId: this.options.kernel.id,

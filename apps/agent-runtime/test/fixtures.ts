@@ -11,6 +11,7 @@ import type {
   RuntimeEventEnvelope,
   SignedAgentManifestV2,
   SignedExecutionGrant,
+  WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
 import { parseRuntimeEvent } from '../../../packages/contracts/src/runtime/v1/schemas.js';
@@ -158,6 +159,7 @@ export class FakeControlPlane implements ControlPlanePort {
     subject: RuntimeCorrelation,
     manifest: SignedAgentManifestV2,
     objective = 'Validate STORY-1',
+    workflow?: WorkflowDefinition,
   ) {
     this.claims.push({
       command: {
@@ -173,6 +175,7 @@ export class FakeControlPlane implements ControlPlanePort {
           runtimeProfile: 'standard-agent',
           manifest,
           workspace: null,
+          ...(workflow ? { workflow } : {}),
         },
       },
       lease: {

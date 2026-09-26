@@ -360,6 +360,20 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
     const command = db.execution.buildRunSubmitCommand(org, run.id);
     expect(parseRuntimeCommand(command)).toMatchObject({ type: 'run.submit' });
     expect(command.run.manifest).toEqual(manifest);
+    // Phase F: the workflow comes from the pinned catalog bundle, and must match the task.
+    expect(command.run.workflow).toMatchObject({ id: 'validate-story', version: '1.0.0' });
+    expect(command.run.workflow!.steps.map((step) => step.id)).toEqual([
+      'analyze',
+      'plan',
+      'execute',
+      'report',
+    ]);
+    expect(() =>
+      parseRuntimeCommand({
+        ...command,
+        run: { ...command.run, workflow: { ...command.run.workflow!, id: 'sanity-test' } },
+      }),
+    ).toThrow('RUNTIME_COMMAND_INVALID');
 
     const correlation = {
       organizationId: org,

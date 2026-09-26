@@ -379,7 +379,9 @@ export class ActionGateway {
         action: pending.action,
         requestId: pending.requestId,
         connectionId: pending.connection.id,
-        ...(outcome.result ? { result: outcome.result } : {}),
+        ...(outcome.result
+          ? { result: pending.handler.auditResult?.(outcome.result) ?? outcome.result }
+          : {}),
         ...(outcome.error ? { code: outcome.error.code } : {}),
       },
       pending.organizationId,

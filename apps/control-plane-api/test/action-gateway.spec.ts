@@ -376,6 +376,30 @@ describe('Action Gateway', () => {
       expect(stored.every((row) => row['parameters'] === null)).toBe(true);
     });
 
+    it('allows work-item reads in configured projects with read capability only', async () => {
+      await connect().expect(201);
+      const decide = async (body: object) =>
+        (await post('/runtime/v1/actions', body).expect(200)).body;
+      const read = (step: Awaited<ReturnType<typeof runningStep>>, issueKey: string) =>
+        step.action({ action: 'jira.read' }, { issueKey });
+      const current = await runningStep(await createAgent());
+      expect(await decide(read(current, 'FIN-1'))).toMatchObject({
+        decision: 'DENIED',
+        reason: 'The target resource is outside the configured scope.',
+      });
+      expect(
+        await decide(current.action({ action: 'jira.read' }, { issueKey: 'QA-1', x: 1 })),
+      ).toMatchObject({ reason: 'PARAMETERS_INVALID' });
+      // QA Engineer 1.1.0 has issueTracker.read but not write: reading is still allowed.
+      const older = await runningStep(await createAgent('1.1.0'));
+      expect(await decide(read(older, 'QA-1'))).toMatchObject({ decision: 'ALLOWED' });
+      expect(
+        raw()
+          .prepare("SELECT action, parameters FROM agent_action_requests WHERE decision='ALLOWED'")
+          .all(),
+      ).toEqual([{ action: 'jira.read', parameters: '{"issueKey":"QA-1"}' }]);
+    });
+
     it('pauses with a payload-bound expiring approval, then executes exactly once after approval', async () => {
       await connect().expect(201);
       const agentId = await createAgent();
@@ -721,6 +745,43 @@ describe('connectors and secrets', () => {
     expect(calls[0]!['authorization']).toBe('Bearer t');
     await expect(connector({ key: '../evil' }).createIssue(issue, signal)).rejects.toThrow(
       'CONNECTOR_RESPONSE_INVALID',
+    );
+  });
+
+  it('reads a Jira issue as bounded plain text and only the issue asked for', async () => {
+    const connector = (body: unknown) =>
+      new JiraIssueTrackerConnector({
+        baseUrl: 'https://jira.example.com',
+        token: 't',
+        fetch: async () => Response.json(body),
+      });
+    const signal = new AbortController().signal;
+    const paragraph = (text: string) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+    const long = 'x'.repeat(3000);
+    const issue = await connector({
+      key: 'QA-7',
+      fields: {
+        summary: 'Line one\nline two',
+        status: { name: 'In QA' },
+        issuetype: { name: 'Story' },
+        description: { type: 'doc', content: [paragraph('Given SAVE10'), paragraph(long)] },
+      },
+    }).getIssue('QA-7', signal);
+    expect(issue).toMatchObject({
+      key: 'QA-7',
+      summary: 'Line one line two',
+      status: 'In QA',
+      issueType: 'Story',
+      descriptionTruncated: true,
+      url: 'https://jira.example.com/browse/QA-7',
+    });
+    expect(issue.description).toHaveLength(2000);
+    expect(issue.description.startsWith('Given SAVE10\nxxx')).toBe(true);
+    await expect(connector({ key: 'QA-8', fields: {} }).getIssue('QA-7', signal)).rejects.toThrow(
+      'CONNECTOR_RESPONSE_INVALID',
+    );
+    await expect(connector({ key: 'QA-7', fields: {} }).getIssue('../x', signal)).rejects.toThrow(
+      'CONNECTOR_REQUEST_FAILED',
     );
   });
 });

@@ -4,6 +4,7 @@ import type {
   RuntimeCorrelation,
   SignedAgentManifestV2,
   TaskSpec,
+  WorkflowDefinition,
 } from '@agents-foundry/contracts';
 
 /** Everything needed to resume a paused run in this runtime. Contains conversation content. */
@@ -13,6 +14,7 @@ export interface RunCheckpoint {
   sessionId: string;
   correlation: RuntimeCorrelation;
   task: TaskSpec;
+  workflow?: WorkflowDefinition;
   runtimeProfile: string;
   manifest: SignedAgentManifestV2;
   kernelId: string;

@@ -7,6 +7,7 @@ import {
   artifactTypes,
   type ArtifactRegistration,
 } from '../../artifacts.js';
+import { workflowDefinitionSchema } from '../../catalog-schemas.js';
 import {
   controlPlaneEventTypes,
   runStepKinds,
@@ -364,6 +365,7 @@ const commandSchema = z.discriminatedUnion('type', [
             .object({ workspaceId: uuid, persistence: z.enum(['EPHEMERAL', 'PERSISTENT']) })
             .strict()
             .nullable(),
+          workflow: workflowDefinitionSchema.optional(),
         })
         .strict(),
     })
@@ -409,6 +411,8 @@ export function parseRuntimeCommand(input: unknown): RuntimeCommand {
   if (
     command.type === 'run.submit' &&
     (command.correlation.threadId !== command.run.threadId ||
+      (command.run.workflow !== undefined &&
+        command.run.workflow.id !== command.run.task.workflow) ||
       command.run.manifest.payload.metadata.agentId !== command.correlation.agentId ||
       command.run.manifest.payload.metadata.employeeId !== command.correlation.employeeId ||
       command.run.manifest.payload.metadata.organizationId !== command.correlation.organizationId)
