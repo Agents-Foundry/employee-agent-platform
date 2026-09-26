@@ -523,6 +523,50 @@ describe.each([
     });
   });
 
+  it('runs in a conversation of the same agent and reports back into it', async () => {
+    scenario = [];
+    const chat = (
+      await demoRequest(app)
+        .post('/api/conversations')
+        .send({ employeeId: employee.id, agentId, title: 'UI-7' })
+        .expect(201)
+    ).body as { id: string };
+    const task = { objective: 'Implement UI-7', workflow: 'implement-ui-change', inputs: {} };
+    const run = (
+      await demoRequest(app)
+        .post('/api/execution/v1/runs')
+        .send({ agentId, conversationId: chat.id, task })
+        .expect(202)
+    ).body as { threadId: string };
+    await host.pollOnce();
+    await host.drain();
+    const messages = (await demoRequest(app).get(`/api/conversations/${chat.id}`).expect(200)).body
+      .messages as { author: string; content: string }[];
+    expect(messages).toEqual([
+      expect.objectContaining({
+        author: 'AGENT',
+        content: 'UI-7 implemented and proposed as a draft pull request.',
+      }),
+    ]);
+    expect(
+      sql().prepare('SELECT conversation_id FROM agent_threads WHERE id=?').get(run.threadId),
+    ).toEqual({ conversation_id: chat.id });
+    const other = (
+      await demoRequest(app)
+        .post('/api/conversations')
+        .send({ employeeId: employee.id, agentId: 'agent_qa_engineer', title: 'QA' })
+        .expect(201)
+    ).body as { id: string };
+    await demoRequest(app)
+      .post('/api/execution/v1/runs')
+      .send({ agentId, conversationId: other.id, task })
+      .expect(409, { error: 'CONVERSATION_AGENT_MISMATCH' });
+    await demoRequest(app)
+      .post('/api/execution/v1/runs')
+      .send({ agentId, conversationId: chat.id, threadId: run.threadId, task })
+      .expect(400);
+  });
+
   it('refuses to publish a change set that changed after approval', async () => {
     const run = (
       await demoRequest(app)

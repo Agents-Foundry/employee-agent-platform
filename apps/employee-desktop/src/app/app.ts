@@ -8,6 +8,7 @@ import type {
   Conversation,
   ConversationDetail,
   QaRunResult,
+  AgentRun,
   AgentRunDetail,
   AgentRunStatus,
   AgentBlueprint,
@@ -60,10 +61,23 @@ export class App implements OnInit, OnDestroy {
   });
   private followedRunId: string | null = null;
   private followTimer: ReturnType<typeof setTimeout> | null = null;
+  protected readonly blueprints = signal<AgentBlueprint[]>([]);
   protected readonly blueprint = signal<AgentBlueprint | null>(null);
   protected readonly provisioning = signal<ProvisioningRequest[]>([]);
   protected readonly provisioningBusy = signal(false);
   protected readonly verifiedManifest = signal<AnySignedAgentManifest | null>(null);
+  /**
+   * The verified agent does not offer the legacy QA workflow, so tasks start a generic run of
+   * its first workflow (Phase G) instead of going through `/api/qa/runs`.
+   */
+  protected readonly genericAgent = computed(() => {
+    const manifest = this.verifiedManifest();
+    return manifest?.payload.apiVersion === 'agents-foundry/v2' &&
+      manifest.payload.workflows.length > 0 &&
+      !manifest.payload.workflows.includes('validate-story')
+      ? manifest.payload
+      : null;
+  });
   protected readonly verifiedProjectName = computed(() => {
     const manifest = this.verifiedManifest();
     return manifest ? String(manifestConfiguration(manifest.payload)['projectName'] ?? '') : '';
@@ -81,6 +95,14 @@ export class App implements OnInit, OnDestroy {
       'x-actor-role': 'EMPLOYEE',
       'x-organization-id': employee.organizationId,
     };
+  }
+
+  /** Switch the requested role; answers belong to one blueprint, so they reset. */
+  protected chooseBlueprint(id: string): void {
+    const next = this.blueprints().find((candidate) => candidate.id === id);
+    if (!next || next.id === this.blueprint()?.id) return;
+    this.blueprint.set(next);
+    this.answers = {};
   }
 
   protected toggleAnswer(id: string, option: string, checked: boolean): void {
@@ -160,7 +182,8 @@ export class App implements OnInit, OnDestroy {
       const manifest = await this.fetchVerifiedManifest(agentId);
       this.verifiedManifest.set(manifest);
       this.selectedAgentId = manifestSubject(manifest.payload).agentId;
-      this.targetUrl = String(manifestConfiguration(manifest.payload)['qaUrl']);
+      const qaUrl = manifestConfiguration(manifest.payload)['qaUrl'];
+      if (typeof qaUrl === 'string') this.targetUrl = qaUrl;
       await this.startNewConversation();
     } catch {
       this.error.set(
@@ -312,7 +335,9 @@ export class App implements OnInit, OnDestroy {
           this.http.post<Conversation>(`${this.apiUrl}/conversations`, {
             employeeId: bootstrap.employee.id,
             agentId: this.selectedAgentId,
-            title: `${this.storyKey} QA validation`,
+            title: this.genericAgent()
+              ? `${this.storyKey} · ${this.genericAgent()!.workflows[0]}`
+              : `${this.storyKey} QA validation`,
           }),
         );
         conversation = { ...created, messages: [] };
@@ -321,9 +346,31 @@ export class App implements OnInit, OnDestroy {
       await firstValueFrom(
         this.http.post(`${this.apiUrl}/conversations/${conversation.id}/messages`, {
           author: 'EMPLOYEE',
-          content: `${this.prompt.trim()}\nStory: ${this.storyKey}\nTarget: ${this.targetUrl}`,
+          content: this.genericAgent()
+            ? `${this.prompt.trim()}\nWork item: ${this.storyKey}`
+            : `${this.prompt.trim()}\nStory: ${this.storyKey}\nTarget: ${this.targetUrl}`,
         }),
       );
+      const generic = this.genericAgent();
+      if (generic) {
+        const run = await firstValueFrom(
+          this.http.post<AgentRun>(`${this.apiUrl}/execution/v1/runs`, {
+            agentId: this.selectedAgentId,
+            conversationId: conversation.id,
+            task: {
+              objective: this.prompt.trim().slice(0, 2000),
+              workflow: generic.workflows[0],
+              workItem: { system: 'issue-tracker', key: this.storyKey.trim().toUpperCase() },
+              inputs: {},
+            },
+          }),
+        );
+        this.lastRun.set(null);
+        await this.selectConversation(conversation);
+        await this.loadConversations();
+        await this.followRun(run.id);
+        return;
+      }
       const result = await firstValueFrom(
         this.http.post<QaRunResult>(`${this.apiUrl}/qa/runs`, {
           employeeId: this.bootstrap()!.employee.id,
@@ -364,7 +411,13 @@ export class App implements OnInit, OnDestroy {
           headers: this.actorHeaders(),
         }),
       );
-      this.blueprint.set(blueprints[0] ?? null);
+      this.blueprints.set(blueprints);
+      // Employees mostly request QA agents today; any listed role can be chosen.
+      this.blueprint.set(
+        blueprints.find((candidate) => candidate.id === 'engineering.qa-engineer') ??
+          blueprints[0] ??
+          null,
+      );
       await this.refreshProvisioning();
       await this.loadConversations();
     } catch {

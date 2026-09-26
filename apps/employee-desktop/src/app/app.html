@@ -83,7 +83,20 @@
         }
       </details>
       <details class="provisioning-panel">
-        <summary>Request your QA agent</summary>
+        <summary>Request an agent</summary>
+        @if (blueprints().length > 1) {
+          <label
+            >Role<select
+              name="blueprintId"
+              [ngModel]="blueprint()?.id"
+              (ngModelChange)="chooseBlueprint($event)"
+            >
+              @for (option of blueprints(); track option.id) {
+                <option [value]="option.id">{{ option.title }}</option>
+              }
+            </select></label
+          >
+        }
         @if (blueprint(); as definition) {
           <p>{{ definition.title }} · Blueprint {{ definition.version }}</p>
           <p>{{ definition.mission }}</p>
@@ -303,9 +316,15 @@
               required
               pattern="[A-Za-z][A-Za-z0-9]+-[0-9]+"
           /></label>
-          <label
-            >Target environment<input name="targetUrl" [(ngModel)]="targetUrl" required type="url"
-          /></label>
+          @if (!genericAgent()) {
+            <label
+              >Target environment<input
+                name="targetUrl"
+                [(ngModel)]="targetUrl"
+                required
+                type="url"
+            /></label>
+          }
         </div>
         <div class="prompt-box">
           <textarea
