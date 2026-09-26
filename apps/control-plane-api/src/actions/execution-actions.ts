@@ -88,8 +88,65 @@ const playwrightRun: ExecutionAction = {
       : 'Run Playwright',
 };
 
+/** Write a file inside the agent's workspace (Phase G). Nothing outside the workspace changes. */
+const repositoryWrite: ExecutionAction = {
+  action: 'repository.write',
+  operations: ['file.write'],
+  resource: (operation) => ({
+    type: 'workspace.path',
+    id: operation.kind === 'file.write' ? operation.path : '',
+  }),
+  inScope: () => true,
+  hosts: () => [],
+  summary: (operation) =>
+    operation.kind === 'file.write'
+      ? `Write ${new TextEncoder().encode(operation.content).byteLength} bytes to ${operation.path}`
+      : 'Write a file',
+};
+
+/** Default project scripts when the agent's configuration names none. */
+export const DEFAULT_PROJECT_SCRIPTS = ['build', 'lint', 'test'] as const;
+
+/** Scripts the agent may run: the configured `projectScripts` (comma-separated) or defaults. */
+export function projectScripts(configuration: Configuration): string[] {
+  const configured = text(configuration, 'projectScripts');
+  const scripts = configured
+    ? configured
+        .split(',')
+        .map((script) => script.trim())
+        .filter((script) => /^[a-z0-9][a-z0-9:._-]{0,59}$/.test(script))
+    : [];
+  return scripts.length ? scripts : [...DEFAULT_PROJECT_SCRIPTS];
+}
+
+/**
+ * Run one allow-listed project script (`npm run <script>`) in the workspace (Phase G). No hosts:
+ * the grant carries `network: NONE`, so dependencies must already be in the workspace.
+ */
+const workspaceCommand: ExecutionAction = {
+  action: 'workspace.command',
+  operations: ['command'],
+  resource: (operation) => ({
+    type: 'workspace.command',
+    id: operation.kind === 'command' ? [operation.command, ...operation.args].join(' ') : '',
+  }),
+  inScope: (operation, configuration) =>
+    operation.kind === 'command' &&
+    operation.command === 'npm' &&
+    operation.args.length === 2 &&
+    operation.args[0] === 'run' &&
+    projectScripts(configuration).includes(operation.args[1]!),
+  hosts: () => [],
+  summary: (operation) =>
+    operation.kind === 'command'
+      ? `Run ${[operation.command, ...operation.args].join(' ')} in ${operation.cwd}`
+      : 'Run a project script',
+};
+
 const registry: Readonly<Record<string, ExecutionAction>> = {
   [repositoryRead.action]: repositoryRead,
+  [repositoryWrite.action]: repositoryWrite,
+  [workspaceCommand.action]: workspaceCommand,
   [playwrightRun.action]: playwrightRun,
 };
 

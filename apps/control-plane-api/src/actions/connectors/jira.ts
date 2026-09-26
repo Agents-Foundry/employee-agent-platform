@@ -1,3 +1,7 @@
+import { ConnectorError } from './connector-error.js';
+
+export { ConnectorError };
+
 /** Typed capability contract (ADR 0012). Connectors hold no authorization logic. */
 export interface IssueDraft {
   projectKey: string;
@@ -43,16 +47,6 @@ function adfText(node: unknown, depth = 0): string {
 
 function oneLine(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/[\r\n]+/g, ' ').slice(0, max) : '';
-}
-
-/** A connector failure. Codes and status only: provider bodies can echo credentials or data. */
-export class ConnectorError extends Error {
-  constructor(
-    readonly code: 'CONNECTOR_REQUEST_FAILED' | 'CONNECTOR_RESPONSE_INVALID',
-    readonly status?: number,
-  ) {
-    super(code);
-  }
 }
 
 function paragraphs(text: string) {

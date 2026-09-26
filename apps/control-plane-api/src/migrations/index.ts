@@ -10,6 +10,7 @@ import { agentCatalogSql } from './007-agent-catalog.js';
 import { runtimeTransportSql } from './008-runtime-transport.js';
 import { actionGatewaySql } from './009-action-gateway.js';
 import { executionGrantsSql } from './010-execution-grants.js';
+import { sourceControlSql } from './011-source-control.js';
 
 export function migrateOrganization(
   db: DatabaseSync,
@@ -29,13 +30,16 @@ export function migrateOrganization(
     { version: 8, name: 'runtime-transport', sql: runtimeTransportSql },
     { version: 9, name: 'action-gateway', sql: actionGatewaySql },
     { version: 10, name: 'execution-grants', sql: executionGrantsSql },
+    { version: 11, name: 'source-control', sql: sourceControlSql },
   ];
+  // SQLite cannot rebuild a referenced table while foreign-key enforcement is enabled. These
+  // migrations run on the same synchronous connection and check every FK before commit.
+  const rebuilds = new Set([4, 11]);
   for (const migration of migrations) {
     if (migration.version > throughVersion) break;
     const checksum = createHash('sha256').update(migration.sql).digest('hex');
-    // SQLite cannot rebuild a referenced table while foreign-key enforcement is enabled.
-    // This one migration runs on the same synchronous connection and checks all FKs before commit.
-    if (migration.version === 4) db.exec('PRAGMA foreign_keys=OFF');
+    const rebuild = rebuilds.has(migration.version);
+    if (rebuild) db.exec('PRAGMA foreign_keys=OFF');
     db.exec('BEGIN IMMEDIATE');
     try {
       const applied = db
@@ -45,7 +49,7 @@ export function migrateOrganization(
         throw new Error('MIGRATION_CHECKSUM_MISMATCH');
       if (!applied) {
         db.exec(migration.sql);
-        if (migration.version === 4 && db.prepare('PRAGMA foreign_key_check').all().length)
+        if (rebuild && db.prepare('PRAGMA foreign_key_check').all().length)
           throw new Error('MIGRATION_FOREIGN_KEY_CHECK_FAILED');
         db.prepare('INSERT INTO schema_migrations VALUES (?,?,?,?)').run(
           migration.version,
@@ -59,7 +63,7 @@ export function migrateOrganization(
       db.exec('ROLLBACK');
       throw error;
     } finally {
-      if (migration.version === 4) db.exec('PRAGMA foreign_keys=ON');
+      if (rebuild) db.exec('PRAGMA foreign_keys=ON');
     }
   }
 }

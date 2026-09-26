@@ -19,7 +19,7 @@ import {
 import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
 import { EXECUTION_GRANT_KIND } from '../../../../packages/contracts/src/execution-runtime/v1/protocol.js';
 import { ExecutionError, type ExecutionService } from '../execution/execution-service.js';
-import { controlPlaneAction, type ControlPlaneAction } from './action-registry.js';
+import { controlPlaneAction, type ChangeSet, type ControlPlaneAction } from './action-registry.js';
 import { executionAction, type ExecutionAction } from './execution-actions.js';
 import { parseExecutionOperation } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import type { ActionPolicyService } from './action-policy-service.js';
@@ -67,6 +67,8 @@ interface Assessment {
   /** Control-plane-written summary and target for approvals; null for parameterless actions. */
   summary: string | null;
   resource: { type: string; id: string } | null;
+  /** Workspace changes an action publishes (Phase G). */
+  changes: ChangeSet | null;
   /** Present for execution-runtime actions (ADR 0013). */
   execution: {
     policy: ExecutionAction;
@@ -87,7 +89,12 @@ export interface PendingDispatch {
   parameters: Record<string, unknown>;
   connection: ConnectorConnection;
   secret: string;
+  changes: ChangeSet | null;
 }
+
+/** Limits on a published change set; larger changes are denied, never truncated. */
+export const MAX_CHANGE_SET_FILES = 100;
+export const MAX_CHANGE_SET_BYTES = 1024 * 1024;
 
 export type ExecutionPlan =
   | { kind: 'done'; execution: RuntimeActionExecution }
@@ -175,8 +182,8 @@ export class ActionGateway {
     this.db
       .prepare(
         `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
-         request_hash, decision, risk, reason, approval_id, created_at, parameters, policy_id, policy_version)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         request_hash, decision, risk, reason, approval_id, created_at, parameters, policy_id, policy_version,
+         change_set) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         request.requestId,
@@ -198,6 +205,7 @@ export class ActionGateway {
           : null,
         verdict.policy?.policyId ?? null,
         verdict.policy?.policyVersion ?? null,
+        verdict.outcome !== 'DENY' && verdict.changes ? JSON.stringify(verdict.changes) : null,
       );
     this.deps.audit(
       String(run['agent_id']),
@@ -304,6 +312,12 @@ export class ActionGateway {
     const connection = current.connection;
     if (!connection || !current.parameters)
       return refuse('CONNECTOR_NOT_CONFIGURED', 'No active connection for this action.');
+    const approvedChanges = request['change_set']
+      ? (JSON.parse(String(request['change_set'])) as ChangeSet)
+      : null;
+    // A pull request publishes exactly the approved change set; later writes need a new request.
+    if ((approvedChanges?.digest ?? null) !== (current.changes?.digest ?? null))
+      return refuse('CHANGE_SET_CHANGED', 'The workspace changed after the decision.');
     const secret = this.deps.secrets.resolve(organizationId, connection.secretRef);
     if (!secret) return refuse('SECRET_UNRESOLVED', 'The connection credential is unavailable.');
     this.db
@@ -324,6 +338,7 @@ export class ActionGateway {
         parameters: current.parameters,
         connection,
         secret,
+        changes: approvedChanges,
       },
     };
   }
@@ -340,6 +355,7 @@ export class ActionGateway {
           signal: AbortSignal.timeout(this.deps.dispatchTimeoutMs ?? 30_000),
         },
         pending.parameters as never,
+        pending.changes,
       );
       return { requestId: pending.requestId, status: 'SUCCEEDED', result };
     } catch (error) {
@@ -560,6 +576,7 @@ export class ActionGateway {
       connection: null,
       summary: null,
       resource: null,
+      changes: null,
       execution: null,
     });
     const organizationId = String(run['organization_id']);
@@ -601,6 +618,7 @@ export class ActionGateway {
     let parameters: Record<string, unknown> | null = null;
     let connection: ConnectorConnection | null = null;
     let resource: { type: string; id: string; inScope: boolean } | undefined;
+    let changes: ChangeSet | null = null;
     if (handler) {
       if (!request.parameters) return deny('PARAMETERS_REQUIRED');
       const parsed = handler.parameters.safeParse(request.parameters);
@@ -618,8 +636,13 @@ export class ActionGateway {
       if (!granted) return deny('CONNECTOR_CAPABILITY_MISSING');
       resource = {
         ...handler.resource(parameters as never),
-        inScope: handler.inScope(parameters as never, connection.settings),
+        inScope: handler.inScope(parameters as never, connection.settings, payload.configuration),
       };
+      if (handler.changeSetDirectory) {
+        const resolved = this.changeSet(run, handler.changeSetDirectory(parameters as never));
+        if (typeof resolved === 'string') return deny(resolved);
+        changes = resolved;
+      }
     }
     const executionPolicy = handler ? undefined : executionAction(request.action);
     let execution: Assessment['execution'] = null;
@@ -674,13 +697,51 @@ export class ActionGateway {
       connection,
       summary:
         handler && parameters
-          ? handler.summary(parameters as never)
+          ? handler.summary(parameters as never, changes)
           : execution
             ? execution.policy.summary(execution.operation).slice(0, 500)
             : null,
       resource: resource ? { type: resource.type, id: resource.id } : null,
+      changes,
       execution,
     };
+  }
+
+  /**
+   * The thread's workspace changes under `directory`: the latest content of every file written
+   * by a `repository.write` operation that was granted and whose step completed, with paths made
+   * relative to `directory`. Recorded by the control plane, never supplied by the runtime.
+   */
+  private changeSet(run: Row, directory: string): ChangeSet | string {
+    const rows = this.db
+      .prepare(
+        `SELECT r.parameters FROM agent_action_requests r
+         JOIN agent_runs ru ON ru.id=r.run_id AND ru.organization_id=r.organization_id
+         JOIN agent_run_steps s ON s.id=r.step_id AND s.status='COMPLETED'
+         JOIN agent_execution_grants g ON g.request_id=r.id
+         WHERE r.organization_id=? AND ru.thread_id=? AND r.action='repository.write'
+         AND r.parameters IS NOT NULL ORDER BY r.created_at, r.rowid`,
+      )
+      .all(run['organization_id'], run['thread_id']) as { parameters: string }[];
+    const latest = new Map<string, string>();
+    for (const row of rows) {
+      const operation = JSON.parse(row.parameters) as {
+        kind?: string;
+        path?: string;
+        content?: string;
+      };
+      if (operation.kind !== 'file.write' || typeof operation.content !== 'string') continue;
+      if (!operation.path?.startsWith(`${directory}/`)) continue;
+      latest.set(operation.path.slice(directory.length + 1), operation.content);
+    }
+    const files = [...latest.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([path, content]) => ({ path, content }));
+    if (!files.length) return 'CHANGE_SET_EMPTY';
+    const bytes = files.reduce((total, file) => total + Buffer.byteLength(file.content), 0);
+    if (files.length > MAX_CHANGE_SET_FILES || bytes > MAX_CHANGE_SET_BYTES)
+      return 'CHANGE_SET_TOO_LARGE';
+    return { digest: digest(files), files };
   }
 
   private storedExecution(row: Row): RuntimeActionExecution {
