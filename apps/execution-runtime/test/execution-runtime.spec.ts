@@ -14,6 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type {
   ExecuteOperationResponse,
@@ -351,6 +352,18 @@ describe('execution runtime', () => {
     expect(response.result.error?.code).toBe('REPOSITORY_PROTOCOL_FORBIDDEN');
   });
 
+  it('never installs dependencies on the local provider, which cannot confine network', async () => {
+    const response = await run({
+      kind: 'dependencies.install',
+      path: '.',
+      registryUrl: 'https://registry.npmjs.org/',
+    });
+    expect(response.result).toMatchObject({
+      status: 'DENIED',
+      error: { code: 'OPERATION_NOT_SUPPORTED' },
+    });
+  });
+
   it('serves the protocol over HTTP with health, routing and error mapping', async () => {
     const server = createExecutionServer(service, new LocalExecutionProvider());
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -671,8 +684,152 @@ describe('container provider', () => {
         qa.close();
       }
     });
+
+    it('installs exactly the locked dependencies from the granted registry, without install scripts', async () => {
+      const name = 'af-fixture-greeting';
+      const tgz = npmTarball({
+        'package/package.json': JSON.stringify({
+          name,
+          version: '1.0.0',
+          main: 'index.js',
+          scripts: {
+            postinstall:
+              "node -e \"require('fs').writeFileSync('/workspace/repo/POSTINSTALL_RAN','x')\"",
+          },
+        }),
+        'package/index.js': "module.exports = 'hello from the mirror';\n",
+      });
+      const fetched: string[] = [];
+      const mirror = http.createServer((request, response) => {
+        fetched.push(request.url ?? '');
+        if (request.url === `/${name}/-/${name}-1.0.0.tgz`) response.end(tgz);
+        else response.writeHead(404).end('{}');
+      });
+      await new Promise<void>((resolve) => mirror.listen(0, '127.0.0.1', resolve));
+      const port = (mirror.address() as AddressInfo).port;
+      const integrity = (content: Buffer) =>
+        `sha512-${createHash('sha512').update(content).digest('base64')}`;
+      const lockfile = (hash: string) =>
+        JSON.stringify({
+          name: 'app',
+          version: '1.0.0',
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            '': { name: 'app', version: '1.0.0', dependencies: { [name]: '1.0.0' } },
+            [`node_modules/${name}`]: {
+              version: '1.0.0',
+              // Locked against the public registry; the install rewrites it to the mirror.
+              resolved: `https://registry.npmjs.org/${name}/-/${name}-1.0.0.tgz`,
+              integrity: hash,
+            },
+          },
+        });
+      try {
+        service = new ExecutionService({
+          verifier: new GrantVerifier(spki),
+          provider: new ContainerExecutionProvider({
+            image,
+            allowFileRepositories: true,
+            egressProxyDirectory: defaultEgressProxyDirectory()!,
+          }),
+          state,
+          artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
+          workspaceRoot: root,
+        });
+        const networked = {
+          limits: {
+            ...limits,
+            network: { mode: 'ALLOW_LIST' as const, allowedHosts: ['host.docker.internal'] },
+          },
+        };
+        const install = {
+          kind: 'dependencies.install' as const,
+          path: 'repo',
+          registryUrl: `http://host.docker.internal:${port}/`,
+        };
+        await sandboxed({ ...checkout, repositoryUrl });
+        await sandboxed({
+          kind: 'file.write',
+          path: 'repo/package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            dependencies: { [name]: '1.0.0' },
+            scripts: { test: `node -e "console.log(require('${name}'))"` },
+          }),
+        });
+        const missing = await sandboxed(install, networked);
+        expect(missing.result.error?.code).toBe('LOCKFILE_REQUIRED');
+
+        await sandboxed({
+          kind: 'file.write',
+          path: 'repo/package-lock.json',
+          content: lockfile(integrity(tgz)),
+        });
+        const installed = await sandboxed(install, networked);
+        expect(installed.result.status, installed.output).toBe('SUCCEEDED');
+        expect(installed.output).toMatch(/added 1 package/);
+        expect(fetched).toEqual([`/${name}/-/${name}-1.0.0.tgz`]);
+        // Install scripts never ran, and the operation's npm cache is gone.
+        const ran = await sandboxed({ kind: 'file.read', path: 'repo/POSTINSTALL_RAN' });
+        expect(ran.result.error?.code).toBe('PATH_NOT_FOUND');
+        const workspace = join(root, 'workspaces', readdirSync(join(root, 'workspaces'))[0]!);
+        expect(readdirSync(workspace).filter((entry) => entry.startsWith('.af-npm-cache'))).toEqual(
+          [],
+        );
+
+        // Installed dependencies serve later offline scripts.
+        const tested = await sandboxed({
+          kind: 'command',
+          command: 'npm',
+          args: ['run', 'test'],
+          cwd: 'repo',
+        });
+        expect(tested.output).toContain('hello from the mirror');
+
+        // A tarball that does not match the lockfile is rejected.
+        await sandboxed({
+          kind: 'file.write',
+          path: 'repo/package-lock.json',
+          content: lockfile(integrity(Buffer.from('something else'))),
+        });
+        const tampered = await sandboxed(install, networked);
+        expect(tampered.result).toMatchObject({
+          status: 'FAILED',
+          error: { code: 'INSTALL_FAILED' },
+        });
+        expect(tampered.output).toMatch(/EINTEGRITY|integrity/i);
+      } finally {
+        mirror.close();
+      }
+    });
   });
 });
+
+/** A gzipped ustar archive, the npm package tarball format. */
+function npmTarball(files: Record<string, string>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const [path, content] of Object.entries(files)) {
+    const body = Buffer.from(content, 'utf8');
+    const header = Buffer.alloc(512);
+    header.write(path, 0, 100, 'utf8');
+    header.write('0000644\0', 100);
+    header.write('0000000\0', 108);
+    header.write('0000000\0', 116);
+    header.write(`${body.length.toString(8).padStart(11, '0')}\0`, 124);
+    header.write('00000000000\0', 136);
+    header.write(' '.repeat(8), 148);
+    header.write('0', 156);
+    header.write('ustar\0', 257);
+    header.write('00', 263);
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+    blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
 
 describe('process runner', () => {
   it('kills the process tree on timeout and caps output', async () => {
