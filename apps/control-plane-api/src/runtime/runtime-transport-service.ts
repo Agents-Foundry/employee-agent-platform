@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type {
+  RuntimeActionDecision,
   RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeClaimResponse,
@@ -16,10 +16,10 @@ import {
   parseRuntimeEvent,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import type { ActionGateway } from '../actions/action-gateway.js';
+import type { Audit } from '../actions/action-policy-service.js';
+import { constraintKind, type PgStore, type Row } from '../db/pg-store.js';
 import { ExecutionError, type ExecutionService } from '../execution/execution-service.js';
 import { servesOrganization, type RuntimeIdentity } from './runtime-identity.js';
-
-type Row = Record<string, SQLInputValue>;
 
 /** A claimed run that never started can be reclaimed by another runtime after this. */
 export const RUNTIME_LEASE_MS = 10 * 60_000;
@@ -28,64 +28,62 @@ export const COMMAND_REDELIVERY_MS = 60_000;
 
 export interface RuntimeTransportDependencies {
   gateway: ActionGateway;
-  audit: (
-    actorId: string,
-    eventType: string,
-    resourceType: string,
-    resourceId: string,
-    metadata: object,
-    organizationId: string,
-  ) => void;
+  audit: Audit;
 }
 
 /**
  * Control-plane side of the runtime transport (ADR 0011). Every method takes an already
  * authenticated runtime identity. Tenancy comes from the stored run and lease, never from
  * the runtime's message; a runtime can only act on runs it holds a lease for.
+ *
+ * Claiming reads the queue across organizations (platform scope). Everything done for a
+ * leased run runs in that run's tenant scope, where the lease is checked again (ADR 0018).
  */
 export class RuntimeTransportService {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: PgStore,
     private readonly execution: ExecutionService,
     private readonly deps: RuntimeTransportDependencies,
   ) {}
 
   /** Single-use nonces for signed requests; expired entries are purged opportunistically. */
-  consumeNonce(runtimeId: string, nonce: string, expiresAt: number): boolean {
-    this.db.prepare('DELETE FROM runtime_request_nonces WHERE expires_at < ?').run(Date.now());
-    const inserted = this.db
-      .prepare(
+  consumeNonce(runtimeId: string, nonce: string, expiresAt: number): Promise<boolean> {
+    return this.db.platform(async () => {
+      await this.db.run('DELETE FROM runtime_request_nonces WHERE expires_at < ?', Date.now());
+      const inserted = await this.db.run(
         'INSERT INTO runtime_request_nonces (runtime_id, nonce, expires_at) VALUES (?,?,?) ON CONFLICT DO NOTHING',
-      )
-      .run(runtimeId, nonce, expiresAt);
-    return inserted.changes === 1;
+        runtimeId,
+        nonce,
+        expiresAt,
+      );
+      return inserted.changes === 1;
+    });
   }
 
   /**
    * Hand the runtime its next command: a cancellation for a run it holds, a resume for one of
    * its runs released by an approval, or a fresh queued run it is authorized to execute.
    */
-  claim(runtime: RuntimeIdentity, nowMs = Date.now()): RuntimeClaimResponse | null {
+  async claim(runtime: RuntimeIdentity, nowMs = Date.now()): Promise<RuntimeClaimResponse | null> {
     // Expired approvals cancel their runs first, so they are delivered as run.cancel below.
-    this.deps.gateway.expireDue(nowMs);
-    return this.transaction(() => {
+    await this.deps.gateway.expireDue(nowMs);
+    return this.db.platform(async () => {
       const nowIso = new Date(nowMs).toISOString();
-      const held = this.db
-        .prepare(
-          `SELECT l.*, r.status, r.status_reason, r.runtime_sequence FROM agent_run_leases l
-           JOIN agent_runs r ON r.id=l.run_id AND r.organization_id=l.organization_id
-           WHERE l.runtime_id=? AND l.state='ACTIVE' ORDER BY l.claimed_at, l.rowid`,
-        )
-        .all(runtime.id) as Row[];
+      const held = await this.db.all(
+        `SELECT l.*, r.status, r.status_reason, r.runtime_sequence FROM agent_run_leases l
+         JOIN agent_runs r ON r.id=l.run_id AND r.organization_id=l.organization_id
+         WHERE l.runtime_id=? AND l.state='ACTIVE' ORDER BY l.claimed_at, l.seq`,
+        runtime.id,
+      );
       for (const lease of held) {
         const organizationId = String(lease['organization_id']);
         const runId = String(lease['run_id']);
         const status = String(lease['status']);
         if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(status)) {
-          this.closeLease(runId, nowIso);
+          await this.closeLease(runId, nowIso);
           if (status === 'CANCELLED')
             return this.respond(lease, {
-              ...this.commandBase(organizationId, runId),
+              ...(await this.commandBase(organizationId, runId)),
               type: 'run.cancel',
               runId,
               reason: String(lease['status_reason'] ?? 'CANCELLED'),
@@ -96,18 +94,18 @@ export class RuntimeTransportService {
         const redeliver =
           Date.parse(String(lease['heartbeat_at'])) + COMMAND_REDELIVERY_MS <= nowMs;
         if (status === 'QUEUED' && lease['status_reason'] === 'APPROVAL_GRANTED') {
-          const approval = this.db
-            .prepare(
-              `SELECT id, decided_at FROM approvals WHERE run_id=? AND organization_id=? AND status='APPROVED'
-               ORDER BY decided_at DESC, rowid DESC LIMIT 1`,
-            )
-            .get(runId, organizationId) as { id: string; decided_at: string } | undefined;
+          const approval = await this.db.get<{ id: string; decided_at: string }>(
+            `SELECT id, decided_at FROM approvals WHERE run_id=? AND organization_id=? AND status='APPROVED'
+             ORDER BY decided_at DESC, seq DESC LIMIT 1`,
+            runId,
+            organizationId,
+          );
           if (!approval) continue;
           const marker = `run.resume:${approval.id}`;
           if (lease['last_command'] === marker && !redeliver) continue;
-          this.touchLease(runId, nowMs, marker);
+          await this.touchLease(runId, nowMs, marker);
           return this.respond(lease, {
-            ...this.commandBase(organizationId, runId),
+            ...(await this.commandBase(organizationId, runId)),
             type: 'run.resume',
             runId,
             approval: {
@@ -118,9 +116,9 @@ export class RuntimeTransportService {
           });
         }
         if (status === 'QUEUED' && lease['status_reason'] === null && redeliver) {
-          const command = this.submitCommand(organizationId, runId, nowIso);
+          const command = await this.submitCommand(organizationId, runId, nowIso);
           if (!command) continue;
-          this.touchLease(runId, nowMs, 'run.submit');
+          await this.touchLease(runId, nowMs, 'run.submit');
           return this.respond(lease, command);
         }
       }
@@ -129,52 +127,68 @@ export class RuntimeTransportService {
   }
 
   /** Record one runtime event for a run the runtime holds. */
-  ingest(runtime: RuntimeIdentity, body: unknown, nowMs = Date.now()): RuntimeEventAck {
+  async ingest(
+    runtime: RuntimeIdentity,
+    body: unknown,
+    nowMs = Date.now(),
+  ): Promise<RuntimeEventAck> {
     const envelope = parseRuntimeEvent(body);
-    return this.transaction(() => {
-      const lease = this.ownedLease(runtime, envelope.runId);
+    const organizationId = await this.leaseOrganization(runtime, envelope.runId);
+    return this.db.tenant(organizationId, async () => {
+      const lease = await this.ownedLease(runtime, envelope.runId);
       if (
         envelope.type === 'run.started' &&
         envelope.payload.runtimeSessionId !== lease['session_id']
       )
         throw new ExecutionError(409, 'RUNTIME_SESSION_MISMATCH');
-      const { event, duplicate } = this.execution.ingestRuntimeEvent(
+      const { event, duplicate } = await this.execution.ingestRuntimeEvent(
         String(lease['organization_id']),
         body,
       );
       if (lease['state'] === 'ACTIVE') {
-        const run = this.db
-          .prepare('SELECT status FROM agent_runs WHERE id=?')
-          .get(envelope.runId) as { status: string };
+        const run = (await this.db.get<{ status: string }>(
+          'SELECT status FROM agent_runs WHERE id=? AND organization_id=?',
+          envelope.runId,
+          organizationId,
+        ))!;
         if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status))
-          this.closeLease(envelope.runId, new Date(nowMs).toISOString());
-        else this.touchLease(envelope.runId, nowMs);
+          await this.closeLease(envelope.runId, new Date(nowMs).toISOString());
+        else await this.touchLease(envelope.runId, nowMs);
       }
       return { eventId: event.id, sequence: event.sequence, duplicate };
     });
   }
 
   /** Decide a governed action through the Action Gateway (ADR 0005, ADR 0012). */
-  requestAction(runtime: RuntimeIdentity, body: unknown): ReturnType<ActionGateway['decide']> {
+  async requestAction(runtime: RuntimeIdentity, body: unknown): Promise<RuntimeActionDecision> {
     const request = parseRuntimeActionRequest(body);
     const requestHash = createHash('sha256').update(canonicalManifest(request)).digest('hex');
-    return this.transaction(() => {
-      const lease = this.ownedLease(runtime, request.correlation.runId);
-      const organizationId = String(lease['organization_id']);
-      const existing = this.db
-        .prepare('SELECT * FROM agent_action_requests WHERE id=?')
-        .get(request.requestId) as Row | undefined;
-      if (existing) {
-        if (
-          existing['organization_id'] !== organizationId ||
-          existing['request_hash'] !== requestHash
-        )
-          throw new ExecutionError(409, 'RUNTIME_ACTION_CONFLICT');
-        return this.deps.gateway.storedDecision(existing);
-      }
-      const { run } = this.runningStep(runtime, request.correlation);
-      return this.deps.gateway.decide(runtime.id, run, request, requestHash);
-    });
+    const organizationId = await this.leaseOrganization(runtime, request.correlation.runId);
+    try {
+      return await this.db.tenant(organizationId, async () => {
+        await this.ownedLease(runtime, request.correlation.runId);
+        const existing = await this.db.get(
+          'SELECT * FROM agent_action_requests WHERE id=? AND organization_id=?',
+          request.requestId,
+          organizationId,
+        );
+        if (existing) {
+          if (existing['request_hash'] !== requestHash)
+            throw new ExecutionError(409, 'RUNTIME_ACTION_CONFLICT');
+          return this.deps.gateway.storedDecision(existing);
+        }
+        const { run } = await this.runningStep(runtime, request.correlation);
+        return this.deps.gateway.decide(runtime.id, run, request, requestHash);
+      });
+    } catch (error) {
+      // The request id is taken by another organization's request.
+      if (
+        constraintKind(error) === 'unique' &&
+        (error as { constraint?: string }).constraint === 'agent_action_requests_pkey'
+      )
+        throw new ExecutionError(409, 'RUNTIME_ACTION_CONFLICT');
+      throw error;
+    }
   }
 
   /**
@@ -184,20 +198,23 @@ export class RuntimeTransportService {
    */
   async executeAction(runtime: RuntimeIdentity, body: unknown): Promise<RuntimeActionExecution> {
     const request = parseRuntimeActionExecuteRequest(body);
-    const plan = this.transaction(() => {
-      const { run } = this.runningStep(runtime, request.correlation);
+    const organizationId = await this.leaseOrganization(runtime, request.correlation.runId);
+    const plan = await this.db.tenant(organizationId, async () => {
+      const { run } = await this.runningStep(runtime, request.correlation);
       return this.deps.gateway.prepareExecution(run, request.requestId, request.correlation.stepId);
     });
     if (plan.kind === 'done') return plan.execution;
+    // The connector call happens outside any transaction.
     const outcome = await this.deps.gateway.dispatch(plan.dispatch);
-    return this.transaction(() => this.deps.gateway.completeExecution(plan.dispatch, outcome));
+    return this.deps.gateway.completeExecution(plan.dispatch, outcome);
   }
 
   /** Issue the signed grant for an execution-runtime action (ADR 0013). */
-  issueGrant(runtime: RuntimeIdentity, body: unknown): SignedExecutionGrant {
+  async issueGrant(runtime: RuntimeIdentity, body: unknown): Promise<SignedExecutionGrant> {
     const request = parseRuntimeActionExecuteRequest(body);
-    return this.transaction(() => {
-      const { run } = this.runningStep(runtime, request.correlation);
+    const organizationId = await this.leaseOrganization(runtime, request.correlation.runId);
+    return this.db.tenant(organizationId, async () => {
+      const { run } = await this.runningStep(runtime, request.correlation);
       const { correlation } = request;
       return this.deps.gateway.issueGrant(run, request.requestId, {
         organizationId: correlation.organizationId,
@@ -212,16 +229,18 @@ export class RuntimeTransportService {
   }
 
   /** Lease, correlation, run and step checks shared by action requests and executions. */
-  private runningStep(
+  private async runningStep(
     runtime: RuntimeIdentity,
     correlation: RuntimeActionRequest['correlation'],
-  ): { run: Row; lease: Row } {
-    const lease = this.ownedLease(runtime, correlation.runId);
+  ): Promise<{ run: Row; lease: Row }> {
+    const lease = await this.ownedLease(runtime, correlation.runId);
     const organizationId = String(lease['organization_id']);
     if (lease['state'] !== 'ACTIVE') throw new ExecutionError(409, 'RUN_TERMINAL');
-    const run = this.db
-      .prepare('SELECT * FROM agent_runs WHERE id=? AND organization_id=?')
-      .get(correlation.runId, organizationId) as Row;
+    const run = (await this.db.get(
+      'SELECT * FROM agent_runs WHERE id=? AND organization_id=?',
+      correlation.runId,
+      organizationId,
+    ))!;
     if (
       run['thread_id'] !== correlation.threadId ||
       run['employee_id'] !== correlation.employeeId ||
@@ -230,62 +249,69 @@ export class RuntimeTransportService {
     )
       throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
     if (run['status'] !== 'RUNNING') throw new ExecutionError(409, 'RUN_NOT_RUNNING');
-    const step = this.db
-      .prepare('SELECT status FROM agent_run_steps WHERE id=? AND run_id=? AND organization_id=?')
-      .get(correlation.stepId, run['id'], organizationId) as { status: string } | undefined;
+    const step = await this.db.get<{ status: string }>(
+      'SELECT status FROM agent_run_steps WHERE id=? AND run_id=? AND organization_id=?',
+      correlation.stepId,
+      String(run['id']),
+      organizationId,
+    );
     if (!step) throw new ExecutionError(404, 'STEP_NOT_FOUND');
     if (step.status !== 'RUNNING') throw new ExecutionError(409, 'STEP_NOT_RUNNING');
     return { run, lease };
   }
 
-  private claimQueued(runtime: RuntimeIdentity, nowMs: number): RuntimeClaimResponse | null {
+  private async claimQueued(
+    runtime: RuntimeIdentity,
+    nowMs: number,
+  ): Promise<RuntimeClaimResponse | null> {
     const nowIso = new Date(nowMs).toISOString();
     const profiles = [...runtime.runtimeProfiles];
     const tenants = runtime.organizations === '*' ? null : [...runtime.organizations];
-    const candidates = this.db
-      .prepare(
-        `SELECT r.id, r.organization_id, l.run_id AS leased FROM agent_runs r
-         LEFT JOIN agent_run_leases l ON l.run_id=r.id
-         WHERE r.status='QUEUED' AND r.status_reason IS NULL AND r.runtime_sequence=0
-         AND r.manifest_api_version='agents-foundry/v2'
-         AND r.runtime_profile IN (${profiles.map(() => '?').join(',')})
-         ${tenants ? `AND r.organization_id IN (${tenants.map(() => '?').join(',')})` : ''}
-         AND (l.run_id IS NULL OR (l.state='ACTIVE' AND l.lease_expires_at < ?))
-         ORDER BY r.created_at, r.rowid LIMIT 20`,
-      )
-      .all(...profiles, ...(tenants ?? []), nowIso) as {
+    const candidates = await this.db.all<{
       id: string;
       organization_id: string;
       leased: string | null;
-    }[];
+    }>(
+      `SELECT r.id, r.organization_id, l.run_id AS leased FROM agent_runs r
+       LEFT JOIN agent_run_leases l ON l.run_id=r.id
+       WHERE r.status='QUEUED' AND r.status_reason IS NULL AND r.runtime_sequence=0
+       AND r.manifest_api_version='agents-foundry/v2'
+       AND r.runtime_profile IN (${profiles.map(() => '?').join(',')})
+       ${tenants ? `AND r.organization_id IN (${tenants.map(() => '?').join(',')})` : ''}
+       AND (l.run_id IS NULL OR (l.state='ACTIVE' AND l.lease_expires_at < ?))
+       ORDER BY r.created_at, r.seq LIMIT 20`,
+      ...profiles,
+      ...(tenants ?? []),
+      nowIso,
+    );
     for (const candidate of candidates) {
-      const command = this.submitCommand(candidate.organization_id, candidate.id, nowIso);
+      const command = await this.submitCommand(candidate.organization_id, candidate.id, nowIso);
       if (!command) continue;
       const sessionId = randomUUID();
       const expires = new Date(nowMs + RUNTIME_LEASE_MS).toISOString();
       if (candidate.leased)
-        this.db
-          .prepare(
-            `UPDATE agent_run_leases SET runtime_id=?, session_id=?, last_command='run.submit', heartbeat_at=?,
-             lease_expires_at=? WHERE run_id=? AND state='ACTIVE'`,
-          )
-          .run(runtime.id, sessionId, nowIso, expires, candidate.id);
+        await this.db.run(
+          `UPDATE agent_run_leases SET runtime_id=?, session_id=?, last_command='run.submit', heartbeat_at=?,
+           lease_expires_at=? WHERE run_id=? AND state='ACTIVE'`,
+          runtime.id,
+          sessionId,
+          nowIso,
+          expires,
+          candidate.id,
+        );
       else
-        this.db
-          .prepare(
-            `INSERT INTO agent_run_leases (run_id, organization_id, session_id, runtime_id, state, last_command,
-             claimed_at, heartbeat_at, lease_expires_at) VALUES (?,?,?,?,'ACTIVE','run.submit',?,?,?)`,
-          )
-          .run(
-            candidate.id,
-            candidate.organization_id,
-            sessionId,
-            runtime.id,
-            nowIso,
-            nowIso,
-            expires,
-          );
-      this.deps.audit(
+        await this.db.run(
+          `INSERT INTO agent_run_leases (run_id, organization_id, session_id, runtime_id, state, last_command,
+           claimed_at, heartbeat_at, lease_expires_at) VALUES (?,?,?,?,'ACTIVE','run.submit',?,?,?)`,
+          candidate.id,
+          candidate.organization_id,
+          sessionId,
+          runtime.id,
+          nowIso,
+          nowIso,
+          expires,
+        );
+      await this.deps.audit(
         runtime.id,
         'runtime.run.claimed',
         'agent_run',
@@ -299,13 +325,13 @@ export class RuntimeTransportService {
   }
 
   /** A queued run whose manifest can no longer be verified is cancelled, never executed. */
-  private submitCommand(
+  private async submitCommand(
     organizationId: string,
     runId: string,
     nowIso: string,
-  ): RuntimeCommand | null {
+  ): Promise<RuntimeCommand | null> {
     try {
-      return this.execution.buildRunSubmitCommand(organizationId, runId);
+      return await this.execution.buildRunSubmitCommand(organizationId, runId);
     } catch (error) {
       const manifestProblem =
         error instanceof ExecutionError ||
@@ -313,23 +339,26 @@ export class RuntimeTransportService {
       if (!manifestProblem) throw error;
       const code =
         error.message === 'RUNTIME_MANIFEST_V2_REQUIRED' ? error.message : 'MANIFEST_INVALID';
-      this.execution.cancelRun(organizationId, runId, code, null);
-      const lease = this.db
-        .prepare("SELECT 1 FROM agent_run_leases WHERE run_id=? AND state='ACTIVE'")
-        .get(runId);
-      if (lease) this.closeLease(runId, nowIso);
+      await this.execution.cancelRun(organizationId, runId, code, null);
+      const lease = await this.db.get(
+        "SELECT 1 FROM agent_run_leases WHERE run_id=? AND state='ACTIVE'",
+        runId,
+      );
+      if (lease) await this.closeLease(runId, nowIso);
       return null;
     }
   }
 
-  private respond(lease: Row, command: RuntimeCommand): RuntimeClaimResponse {
+  private async respond(lease: Row, command: RuntimeCommand): Promise<RuntimeClaimResponse> {
     const runId = String(lease['run_id']);
-    const current = this.db
-      .prepare('SELECT session_id, lease_expires_at FROM agent_run_leases WHERE run_id=?')
-      .get(runId) as { session_id: string; lease_expires_at: string };
-    const sequence = this.db
-      .prepare('SELECT runtime_sequence FROM agent_runs WHERE id=?')
-      .get(runId) as { runtime_sequence: number };
+    const current = (await this.db.get<{ session_id: string; lease_expires_at: string }>(
+      'SELECT session_id, lease_expires_at FROM agent_run_leases WHERE run_id=?',
+      runId,
+    ))!;
+    const sequence = (await this.db.get<{ runtime_sequence: number }>(
+      'SELECT runtime_sequence FROM agent_runs WHERE id=?',
+      runId,
+    ))!;
     return {
       command,
       lease: {
@@ -340,12 +369,12 @@ export class RuntimeTransportService {
     };
   }
 
-  private commandBase(organizationId: string, runId: string) {
-    const run = this.db
-      .prepare(
-        'SELECT employee_id, agent_id, thread_id FROM agent_runs WHERE id=? AND organization_id=?',
-      )
-      .get(runId, organizationId) as { employee_id: string; agent_id: string; thread_id: string };
+  private async commandBase(organizationId: string, runId: string) {
+    const run = (await this.db.get<{ employee_id: string; agent_id: string; thread_id: string }>(
+      'SELECT employee_id, agent_id, thread_id FROM agent_runs WHERE id=? AND organization_id=?',
+      runId,
+      organizationId,
+    ))!;
     return {
       protocol: RUNTIME_PROTOCOL_V1,
       commandId: randomUUID(),
@@ -360,10 +389,20 @@ export class RuntimeTransportService {
     };
   }
 
+  /**
+   * Which organization a runtime's lease belongs to (platform scope: the run is not yet
+   * attributed to a tenant). The same checks as `ownedLease`; the lease is checked again
+   * inside the tenant transaction that acts on it.
+   */
+  private leaseOrganization(runtime: RuntimeIdentity, runId: string): Promise<string> {
+    return this.db.platform(async () =>
+      String((await this.ownedLease(runtime, runId))['organization_id']),
+    );
+  }
+
   /** The lease must belong to this runtime and to a tenant it serves; otherwise 403. */
-  private ownedLease(runtime: RuntimeIdentity, runId: string): Row {
-    const lease = this.db.prepare('SELECT * FROM agent_run_leases WHERE run_id=?').get(runId) as
-      Row | undefined;
+  private async ownedLease(runtime: RuntimeIdentity, runId: string): Promise<Row> {
+    const lease = await this.db.get('SELECT * FROM agent_run_leases WHERE run_id=?', runId);
     if (
       !lease ||
       lease['runtime_id'] !== runtime.id ||
@@ -373,38 +412,23 @@ export class RuntimeTransportService {
     return lease;
   }
 
-  private touchLease(runId: string, nowMs: number, lastCommand?: string): void {
-    this.db
-      .prepare(
-        `UPDATE agent_run_leases SET heartbeat_at=?, lease_expires_at=?, last_command=COALESCE(?, last_command)
-         WHERE run_id=? AND state='ACTIVE'`,
-      )
-      .run(
-        new Date(nowMs).toISOString(),
-        new Date(nowMs + RUNTIME_LEASE_MS).toISOString(),
-        lastCommand ?? null,
-        runId,
-      );
+  private async touchLease(runId: string, nowMs: number, lastCommand?: string): Promise<void> {
+    await this.db.run(
+      `UPDATE agent_run_leases SET heartbeat_at=?, lease_expires_at=?, last_command=COALESCE(?::text, last_command)
+       WHERE run_id=? AND state='ACTIVE'`,
+      new Date(nowMs).toISOString(),
+      new Date(nowMs + RUNTIME_LEASE_MS).toISOString(),
+      lastCommand ?? null,
+      runId,
+    );
   }
 
-  private closeLease(runId: string, nowIso: string): void {
-    this.db
-      .prepare(
-        `UPDATE agent_run_leases SET state='CLOSED', closed_at=?, heartbeat_at=? WHERE run_id=? AND state='ACTIVE'`,
-      )
-      .run(nowIso, nowIso, runId);
-  }
-
-  private transaction<T>(work: () => T): T {
-    if (this.db.isTransaction) return work();
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = work();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+  private async closeLease(runId: string, nowIso: string): Promise<void> {
+    await this.db.run(
+      `UPDATE agent_run_leases SET state='CLOSED', closed_at=?, heartbeat_at=? WHERE run_id=? AND state='ACTIVE'`,
+      nowIso,
+      nowIso,
+      runId,
+    );
   }
 }

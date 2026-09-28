@@ -23,11 +23,11 @@ const entry = z
   .strict();
 export type IdentityEntry = z.infer<typeof entry>;
 
-export function syncIdentityDirectory(
+export async function syncIdentityDirectory(
   database: ControlPlaneDatabase,
   issuer: string,
   filename: string,
-): void {
+): Promise<void> {
   const entries = z
     .array(entry)
     .max(10000)
@@ -38,5 +38,5 @@ export function syncIdentityDirectory(
     new Set(entries.map((item) => item.email.toLowerCase())).size !== entries.length
   )
     throw new Error('DUPLICATE_IDENTITY');
-  database.syncIdentities(issuer, entries);
+  await database.syncIdentities(issuer, entries);
 }

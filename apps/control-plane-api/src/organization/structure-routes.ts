@@ -16,37 +16,39 @@ export function configureStructureRoutes(
     }
     next();
   });
-  router.get('/', (req, res) => res.json(service.list(res.locals['actor'], req.query)));
-  router.get('/employee-options', (req, res) =>
-    res.json(service.employeeOptions(res.locals['actor'], req.query)),
+  router.get('/', async (req, res) => res.json(await service.list(res.locals['actor'], req.query)));
+  router.get('/employee-options', async (req, res) =>
+    res.json(await service.employeeOptions(res.locals['actor'], req.query)),
   );
-  router.post('/', (req, res) => res.status(201).json(service.save(res.locals['actor'], req.body)));
-  router.get('/:id/ancestors', (req, res) =>
-    res.json(service.ancestors(res.locals['actor'], req.params['id'])),
+  router.post('/', async (req, res) =>
+    res.status(201).json(await service.save(res.locals['actor'], req.body)),
   );
-  router.get('/:id/head-position-options', (req, res) =>
-    res.json(service.headPositionOptions(res.locals['actor'], req.params['id'], req.query)),
+  router.get('/:id/ancestors', async (req, res) =>
+    res.json(await service.ancestors(res.locals['actor'], req.params['id'])),
   );
-  router.put('/:id/head', (req, res) =>
-    res.json(service.setHeadPosition(res.locals['actor'], req.params['id'], req.body)),
+  router.get('/:id/head-position-options', async (req, res) =>
+    res.json(await service.headPositionOptions(res.locals['actor'], req.params['id'], req.query)),
   );
-  router.put('/:id', (req, res) =>
-    res.json(service.save(res.locals['actor'], req.body, req.params['id'])),
+  router.put('/:id/head', async (req, res) =>
+    res.json(await service.setHeadPosition(res.locals['actor'], req.params['id'], req.body)),
   );
-  router.post('/:id/archive', (req, res) => {
+  router.put('/:id', async (req, res) =>
+    res.json(await service.save(res.locals['actor'], req.body, req.params['id'])),
+  );
+  router.post('/:id/archive', async (req, res) => {
     const { version } = z.object({ version: z.number().int().positive() }).strict().parse(req.body);
-    service.archive(res.locals['actor'], req.params['id'], version);
+    await service.archive(res.locals['actor'], req.params['id'], version);
     res.status(204).end();
   });
-  router.get('/:id/members', (req, res) =>
-    res.json(service.members(res.locals['actor'], req.params['id'], req.query)),
+  router.get('/:id/members', async (req, res) =>
+    res.json(await service.members(res.locals['actor'], req.params['id'], req.query)),
   );
-  router.post('/:id/members', (req, res) => {
-    service.addMember(res.locals['actor'], req.params['id'], req.body);
+  router.post('/:id/members', async (req, res) => {
+    await service.addMember(res.locals['actor'], req.params['id'], req.body);
     res.status(201).json({ saved: true });
   });
-  router.delete('/:id/members/:membershipId', (req, res) => {
-    service.removeMember(res.locals['actor'], req.params['id'], req.params['membershipId']);
+  router.delete('/:id/members/:membershipId', async (req, res) => {
+    await service.removeMember(res.locals['actor'], req.params['id'], req.params['membershipId']);
     res.status(204).end();
   });
   app.use('/api/organization/units', router);

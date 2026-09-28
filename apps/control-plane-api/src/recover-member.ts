@@ -9,9 +9,9 @@ if (config.mode !== 'password') throw new Error('RECOVERY_REQUIRES_PASSWORD_MODE
 const [organizationId, employeeId, purpose] = z
   .tuple([z.string().uuid(), z.string().uuid(), z.enum(['activate', 'reset'])])
   .parse(process.argv.slice(2));
-const db = new ControlPlaneDatabase(undefined, false);
+const db = await ControlPlaneDatabase.open();
 try {
-  const result = db.issueOperatorLink(organizationId, employeeId, purpose);
+  const result = await db.issueOperatorLink(organizationId, employeeId, purpose);
   console.log(
     JSON.stringify(
       {
@@ -30,5 +30,5 @@ try {
     ),
   );
 } finally {
-  db.close();
+  await db.close();
 }

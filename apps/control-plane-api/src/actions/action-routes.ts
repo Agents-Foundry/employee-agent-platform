@@ -29,22 +29,24 @@ export function configureActionRoutes(
   };
 
   const connections = passwordOnly();
-  connections.get('/', (_req, res) => res.json(connectors.list(res.locals['actor'])));
-  connections.post('/', (req, res) =>
-    res.status(201).json(connectors.create(res.locals['actor'], req.body)),
+  connections.get('/', async (_req, res) => res.json(await connectors.list(res.locals['actor'])));
+  connections.post('/', async (req, res) =>
+    res.status(201).json(await connectors.create(res.locals['actor'], req.body)),
   );
-  connections.post('/:id/disable', (req, res) => {
+  connections.post('/:id/disable', async (req, res) => {
     const { version } = z.object({ version: z.number().int().positive() }).strict().parse(req.body);
-    res.json(connectors.disable(res.locals['actor'], String(req.params['id']), version));
+    res.json(await connectors.disable(res.locals['actor'], String(req.params['id']), version));
   });
 
   const actionPolicies = passwordOnly();
-  actionPolicies.get('/', (_req, res) => res.json(policies.list(res.locals['actor'])));
-  actionPolicies.put('/:action', (req, res) =>
-    res.json(policies.set(res.locals['actor'], actionParam.parse(req.params['action']), req.body)),
+  actionPolicies.get('/', async (_req, res) => res.json(await policies.list(res.locals['actor'])));
+  actionPolicies.put('/:action', async (req, res) =>
+    res.json(
+      await policies.set(res.locals['actor'], actionParam.parse(req.params['action']), req.body),
+    ),
   );
-  actionPolicies.delete('/:action', (req, res) => {
-    policies.clear(res.locals['actor'], actionParam.parse(req.params['action']));
+  actionPolicies.delete('/:action', async (req, res) => {
+    await policies.clear(res.locals['actor'], actionParam.parse(req.params['action']));
     res.status(204).end();
   });
 

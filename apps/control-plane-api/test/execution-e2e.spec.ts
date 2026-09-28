@@ -30,6 +30,8 @@ import type {
   ExecutionProvider,
   ProviderOutcome,
 } from '../../execution-runtime/src/providers/execution-provider.js';
+import { testDatabase } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employee = { id: 'employee_qa_demo', role: 'EMPLOYEE' as const, organizationId: org };
@@ -132,7 +134,7 @@ describe('execution runtime end to end under control-plane grants', () => {
 
   beforeEach(async () => {
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    db = new ControlPlaneDatabase(':memory:', true, {
+    db = await testDatabase({
       manifestV2Issuance: true,
       genericRuntime: true,
       runtimeIdentities: [
@@ -144,7 +146,7 @@ describe('execution runtime end to end under control-plane grants', () => {
         },
       ],
     });
-    const pending = db.requestProvisioning(
+    const pending = await db.requestProvisioning(
       employee.id,
       {
         blueprintId: 'engineering.qa-engineer',
@@ -164,7 +166,8 @@ describe('execution runtime end to end under control-plane grants', () => {
       org,
     );
     agentId = manifestSubject(
-      db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot').manifest!.payload,
+      (await db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot')).manifest!
+        .payload,
     ).agentId;
     app = createApp(db);
     controlServer = createServer(app);
@@ -213,7 +216,7 @@ describe('execution runtime end to end under control-plane grants', () => {
       new Promise((resolve) => executionServer.close(resolve)),
     ]);
     state.close();
-    db.close();
+    await db.close();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -236,7 +239,7 @@ describe('execution runtime end to end under control-plane grants', () => {
       maxProcesses: 64,
       network: { mode: 'ALLOW_LIST', allowedHosts: ['example.com'] },
     });
-    let detail = db.execution.getRun(employee, run.id);
+    let detail = await db.execution.getRun(employee, run.id);
     expect(detail.run.status).toBe('WAITING_FOR_APPROVAL');
     const approval = detail.approvals.find((item) => item.status === 'PENDING')!;
     expect(approval.action).toBe('qa.execute_playwright');
@@ -255,7 +258,7 @@ describe('execution runtime end to end under control-plane grants', () => {
     await host.pollOnce();
     await host.drain();
 
-    detail = db.execution.getRun(employee, run.id);
+    detail = await db.execution.getRun(employee, run.id);
     expect(detail.run.status).toBe('COMPLETED');
     expect(provider.seen.map((entry) => entry.operation.kind)).toEqual([
       'git.checkout',
@@ -264,16 +267,17 @@ describe('execution runtime end to end under control-plane grants', () => {
     expect(detail.artifacts).toEqual([
       expect.objectContaining({ type: 'test_report', name: 'playwright-report.json' }),
     ]);
-    const failures = db.execution
-      .listEvents(employee, run.id, 0, 200)
-      .items.filter((event) => event.type === 'tool.failed')
+    const failures = (await db.execution.listEvents(employee, run.id, 0, 200)).items
+      .filter((event) => event.type === 'tool.failed')
       .map((event) => (event.payload as { error: { code: string } }).error.code);
     expect(failures).toEqual(['ACTION_DENIED']);
-    const sql = (db as unknown as { db: import('node:sqlite').DatabaseSync }).db;
+    const sql = rawSql(db);
     expect(
-      sql.prepare('SELECT operation_kind FROM agent_execution_grants ORDER BY issued_at').all(),
+      await sql
+        .prepare('SELECT operation_kind FROM agent_execution_grants ORDER BY issued_at')
+        .all(),
     ).toEqual([{ operation_kind: 'git.checkout' }, { operation_kind: 'playwright.run' }]);
-    const denied = sql
+    const denied = await sql
       .prepare("SELECT reason FROM agent_action_requests WHERE decision='DENIED'")
       .all();
     expect(denied).toEqual([{ reason: 'The target resource is outside the configured scope.' }]);

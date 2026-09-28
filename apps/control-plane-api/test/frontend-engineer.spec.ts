@@ -52,6 +52,8 @@ import type {
   ProviderOutcome,
   WorkspaceHandle,
 } from '../../execution-runtime/src/providers/execution-provider.js';
+import { testDatabase } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employee = { id: 'employee_qa_demo', role: 'EMPLOYEE' as const, organizationId: org };
@@ -202,7 +204,7 @@ describe.each([
         resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`),
       ),
     );
-  const sql = () => (db as unknown as { db: DatabaseSync }).db;
+  const sql = () => rawSql(db);
   const BASE = 'a'.repeat(40);
 
   beforeEach(async () => {
@@ -213,7 +215,7 @@ describe.each([
     github = [];
     modelRequests = [];
     scenario = null;
-    db = new ControlPlaneDatabase(':memory:', true, {
+    db = await testDatabase({
       manifestV2Issuance: true,
       genericRuntime: true,
       secrets,
@@ -254,7 +256,7 @@ describe.each([
         },
       ],
     });
-    const pending = db.requestProvisioning(
+    const pending = await db.requestProvisioning(
       employee.id,
       {
         blueprintId: 'engineering.frontend-engineer',
@@ -273,19 +275,20 @@ describe.each([
       org,
     );
     agentId = manifestSubject(
-      db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot').manifest!.payload,
+      (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')).manifest!
+        .payload,
     ).agentId;
     // The seeded demo admin has no organization membership; skip that check for the fixture.
     const authorize = db.structure.authorize;
-    db.structure.authorize = () => undefined;
-    db.connectors.create(admin, {
+    db.structure.authorize = async () => undefined;
+    await db.connectors.create(admin, {
       provider: 'jira',
       name: 'Demo Jira',
       baseUrl: 'https://demo.atlassian.net',
       secretRef: 'secret://jira-token',
       settings: { allowedProjects: ['UI'] },
     });
-    db.connectors.create(admin, {
+    await db.connectors.create(admin, {
       provider: 'github',
       name: 'Acme GitHub',
       baseUrl: 'https://api.github.com',
@@ -355,7 +358,7 @@ describe.each([
       new Promise((resolve) => executionServer.close(resolve)),
     ]);
     state.close();
-    db.close();
+    await db.close();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -388,7 +391,7 @@ describe.each([
       'source-control',
     ]);
 
-    let detail = db.execution.getRun(employee, run.id);
+    let detail = await db.execution.getRun(employee, run.id);
     expect(detail.run.status).toBe('WAITING_FOR_APPROVAL');
     const approval = detail.approvals.find((item) => item.status === 'PENDING')!;
     expect(approval).toMatchObject({ action: 'repository.pull_request.create', risk: 'HIGH' });
@@ -425,7 +428,7 @@ describe.each([
     await host.pollOnce();
     await host.drain();
 
-    detail = db.execution.getRun(employee, run.id);
+    detail = await db.execution.getRun(employee, run.id);
     expect(detail.run.status).toBe('COMPLETED');
     expect(github.map((call) => `${call.method} ${call.path}`)).toEqual([
       'GET /repos/acme/storefront/git/ref/heads/main',
@@ -449,16 +452,17 @@ describe.each([
     expect(final).toBe(
       'Opened draft pull request #42 (https://github.com/acme/storefront/pull/42) from agents-foundry/ui-7.',
     );
-    const grants = sql()
-      .prepare('SELECT signed_grant FROM agent_execution_grants ORDER BY issued_at, rowid')
-      .all()
-      .map((row) => (JSON.parse(String(row['signed_grant'])) as SignedExecutionGrant).payload);
+    const grants = (
+      await sql()
+        .prepare('SELECT signed_grant FROM agent_execution_grants ORDER BY issued_at, seq')
+        .all()
+    ).map((row) => (JSON.parse(String(row['signed_grant'])) as SignedExecutionGrant).payload);
     expect(grants.map((grant) => [grant.action, grant.isolation])).toEqual([
       ['repository.read', 'sandboxed'],
       ['repository.write', 'sandboxed'],
       ['workspace.command', 'sandboxed'],
     ]);
-    expect(JSON.stringify(sql().prepare('SELECT * FROM audit_events').all())).not.toContain(
+    expect(JSON.stringify(await sql().prepare('SELECT * FROM audit_events').all())).not.toContain(
       'github-test-token',
     );
   });
@@ -503,14 +507,14 @@ describe.each([
     expect(github).toEqual([]);
     // GitHub connections name repositories as owner/name; other shapes are refused.
     const authorize = db.structure.authorize;
-    db.structure.authorize = () => undefined;
+    db.structure.authorize = async () => undefined;
     try {
       for (const settings of [
         { allowedRepositories: ['not a repo'] },
         { allowedRepositories: ['acme/x', 'ACME/X'] },
         { allowedProjects: ['UI'] },
       ])
-        expect(() =>
+        await expect(
           db.connectors.create(admin, {
             provider: 'github',
             name: 'Other',
@@ -518,19 +522,19 @@ describe.each([
             secretRef: 'secret://github-token',
             settings,
           }),
-        ).toThrow();
+        ).rejects.toThrow();
     } finally {
       db.structure.authorize = authorize;
     }
-    expect(db.connectors.active(org, 'github')?.settings).toEqual({
+    expect((await db.connectors.active(org, 'github'))?.settings).toEqual({
       allowedProjects: [],
       allowedRepositories: ['acme/storefront'],
     });
   });
 
   it('installs dependencies only from the registry configured for the agent (1.1.0)', async () => {
-    const provision = (packageRegistryUrl?: string) => {
-      const pending = db.requestProvisioning(
+    const provision = async (packageRegistryUrl?: string) => {
+      const pending = await db.requestProvisioning(
         employee.id,
         {
           blueprintId: 'engineering.frontend-engineer',
@@ -549,7 +553,8 @@ describe.each([
         org,
       );
       return manifestSubject(
-        db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot').manifest!.payload,
+        (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')).manifest!
+          .payload,
       ).agentId;
     };
     const mirror = 'https://npm.acme.internal/repository/npm/';
@@ -582,7 +587,7 @@ describe.each([
       install('https://registry.npmjs.org/'),
       install('http://npm.acme.internal/repository/npm/'),
     ];
-    expect(await start(provision(mirror))).toEqual([
+    expect(await start(await provision(mirror))).toEqual([
       expect.stringContaining('Checked out main'),
       '[recorded, not executed] npm ci',
       'ACTION_DENIED: The target resource is outside the configured scope.',
@@ -599,7 +604,7 @@ describe.each([
     // Without a configured registry, nothing can be installed.
     modelRequests.length = 0;
     scenario = [install(mirror)];
-    expect(await start(provision())).toEqual([
+    expect(await start(await provision())).toEqual([
       'ACTION_DENIED: The target resource is outside the configured scope.',
     ]);
   });
@@ -630,7 +635,7 @@ describe.each([
       }),
     ]);
     expect(
-      sql().prepare('SELECT conversation_id FROM agent_threads WHERE id=?').get(run.threadId),
+      await sql().prepare('SELECT conversation_id FROM agent_threads WHERE id=?').get(run.threadId),
     ).toEqual({ conversation_id: chat.id });
     const other = (
       await demoRequest(app)
@@ -660,14 +665,14 @@ describe.each([
     ).body as { id: string };
     await host.pollOnce();
     await host.drain();
-    const approval = db.execution
-      .getRun(employee, run.id)
-      .approvals.find((item) => item.status === 'PENDING')!;
+    const approval = (await db.execution.getRun(employee, run.id)).approvals.find(
+      (item) => item.status === 'PENDING',
+    )!;
     // Simulate a write recorded after the decision: the approved digest no longer matches.
-    const write = sql()
+    const write = (await sql()
       .prepare("SELECT * FROM agent_action_requests WHERE action='repository.write'")
-      .get() as Record<string, string>;
-    sql()
+      .get()) as Record<string, string>;
+    await sql()
       .prepare(
         `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
          request_hash, decision, risk, reason, approval_id, created_at, parameters, policy_id, policy_version)
@@ -691,7 +696,7 @@ describe.each([
         null,
         null,
       );
-    sql()
+    await sql()
       .prepare(
         `INSERT INTO agent_execution_grants (grant_id, request_id, organization_id, run_id, operation_kind,
          signed_grant, issued_at, expires_at) VALUES (?,?,?,?,?,?,?,?)`,

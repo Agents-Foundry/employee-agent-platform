@@ -11,6 +11,11 @@ import { hashToken, type PasswordConfig } from '../src/auth.js';
 import { LOCAL_ISSUER } from '../src/onboarding-types.js';
 import type { Actor } from '@agents-foundry/contracts';
 import { migrateOrganization } from '../src/migrations/index.js';
+import { legacyBaseSql } from '../src/migrations/000-legacy-base.js';
+import { testDatabase, testStore } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
+import { ManifestSigner } from '../src/manifest-signing.js';
+import { SCHEMA_VERSION, assertSchemaCurrent } from '../src/db/migrate.js';
 
 const config: PasswordConfig = {
   mode: 'password',
@@ -50,12 +55,7 @@ it('upgrades populated version-four memberships without losing IDs or tenant key
   const sql = new DatabaseSync(':memory:');
   try {
     sql.exec('PRAGMA foreign_keys=ON');
-    const legacy = Object.create(ControlPlaneDatabase.prototype) as {
-      db: DatabaseSync;
-      migrate(): void;
-    };
-    legacy.db = sql;
-    legacy.migrate();
+    sql.exec(legacyBaseSql);
     migrateOrganization(sql, 4);
     const organization = randomUUID(),
       employee = randomUUID(),
@@ -103,156 +103,165 @@ it('upgrades populated version-four memberships without losing IDs or tenant key
 });
 describe('organization structure', () => {
   let db: ControlPlaneDatabase, admin: Actor, other: Actor, employee: Actor;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    const customer = (slug: string): Actor => {
-      const invitation = db.createCustomer(
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false });
+    const customer = async (slug: string): Promise<Actor> => {
+      const invitation = await db.createCustomer(
         { name: slug, slug },
         { email: `admin@${slug}.example`, displayName: 'Admin', team: 'Admin' },
       );
-      db.acceptInvitation(hashToken(invitation.token), 'test-credential-not-used-for-login');
+      await db.acceptInvitation(hashToken(invitation.token), 'test-credential-not-used-for-login');
       return {
         id: invitation.employeeId,
         organizationId: invitation.organizationId,
         role: 'ADMIN',
       };
     };
-    admin = customer('alpha');
-    other = customer('beta');
-    const invited = db.inviteEmployee(admin, {
+    admin = await customer('alpha');
+    other = await customer('beta');
+    const invited = await db.inviteEmployee(admin, {
       email: 'employee@alpha.example',
       displayName: 'Employee',
       team: 'Legacy team',
     });
-    db.acceptInvitation(hashToken(invited.token), 'test-credential-not-used-for-login');
+    await db.acceptInvitation(hashToken(invited.token), 'test-credential-not-used-for-login');
     employee = { id: invited.employeeId, organizationId: admin.organizationId, role: 'EMPLOYEE' };
   });
   afterEach(() => db.close());
 
-  it('supports tenant-scoped structure, moves, breadcrumbs, filtering and stable pagination', () => {
-    const parent = db.structure.save(admin, payload());
-    const qa = db.structure.save(admin, payload('QA', parent.id));
-    const team = db.structure.save(admin, { ...payload('Automation', qa.id), unitType: 'team' });
-    expect(db.structure.ancestors(admin, team.id).map((row) => row.name)).toEqual([
+  it('supports tenant-scoped structure, moves, breadcrumbs, filtering and stable pagination', async () => {
+    const parent = await db.structure.save(admin, payload());
+    const qa = await db.structure.save(admin, payload('QA', parent.id));
+    const team = await db.structure.save(admin, {
+      ...payload('Automation', qa.id),
+      unitType: 'team',
+    });
+    expect((await db.structure.ancestors(admin, team.id)).map((row) => row.name)).toEqual([
       'Engineering',
       'QA',
       'Automation',
     ]);
-    expect(db.structure.list(admin, { parentId: parent.id }).items.map((row) => row.id)).toEqual([
-      qa.id,
-    ]);
-    expect(db.structure.list(admin, { unitType: 'team', search: 'auto', pageSize: 1 }).total).toBe(
-      1,
-    );
-    expect(db.structure.list(other, {}).total).toBe(0);
-    const moved = db.structure.save(
+    expect(
+      (await db.structure.list(admin, { parentId: parent.id })).items.map((row) => row.id),
+    ).toEqual([qa.id]);
+    expect(
+      (await db.structure.list(admin, { unitType: 'team', search: 'auto', pageSize: 1 })).total,
+    ).toBe(1);
+    expect((await db.structure.list(other, {})).total).toBe(0);
+    const moved = await db.structure.save(
       admin,
       { ...payload('Automation', parent.id), unitType: 'team', version: 1 },
       team.id,
     );
     expect(moved.version).toBe(2);
-    expect(db.structure.ancestors(admin, team.id).map((row) => row.name)).toEqual([
+    expect((await db.structure.ancestors(admin, team.id)).map((row) => row.name)).toEqual([
       'Engineering',
       'Automation',
     ]);
-    expect(db.structure.list(admin, { pageSize: 1, page: 2 }).items).toHaveLength(1);
+    expect((await db.structure.list(admin, { pageSize: 1, page: 2 })).items).toHaveLength(1);
   });
 
-  it('rejects cycles, cross-tenant links, stale writes, duplicates, and tenant spoofing', () => {
-    const parent = db.structure.save(admin, payload());
-    const child = db.structure.save(admin, payload('QA', parent.id));
-    expect(() =>
+  it('rejects cycles, cross-tenant links, stale writes, duplicates, and tenant spoofing', async () => {
+    const parent = await db.structure.save(admin, payload());
+    const child = await db.structure.save(admin, payload('QA', parent.id));
+    await expect(
       db.structure.save(admin, { ...payload('Engineering', child.id), version: 1 }, parent.id),
-    ).toThrow('HIERARCHY_CONFLICT');
-    expect(() =>
+    ).rejects.toThrow('HIERARCHY_CONFLICT');
+    await expect(
       db.structure.save(admin, { ...payload('Engineering', parent.id), version: 1 }, parent.id),
-    ).toThrow('HIERARCHY_CYCLE');
-    expect(() => db.structure.save(other, payload('Intruder', parent.id))).toThrow(
+    ).rejects.toThrow('HIERARCHY_CYCLE');
+    await expect(db.structure.save(other, payload('Intruder', parent.id))).rejects.toThrow(
       'UNIT_NOT_FOUND',
     );
-    expect(() => db.structure.save(other, { ...payload(), version: 1 }, parent.id)).toThrow(
+    await expect(db.structure.save(other, { ...payload(), version: 1 }, parent.id)).rejects.toThrow(
       'UNIT_NOT_FOUND',
     );
-    expect(() => db.structure.save(admin, { ...payload(), version: 99 }, parent.id)).toThrow(
-      'UNIT_VERSION_CONFLICT',
-    );
-    expect(() => db.structure.save(admin, payload())).toThrow('CODE_OR_MEMBERSHIP_CONFLICT');
-    expect(() =>
-      db.structure.save(admin, { ...payload('New'), organizationId: other.organizationId }),
-    ).toThrow();
-    expect(() => db.structure.save({ ...employee, role: 'ADMIN' }, payload('Fake'))).toThrow(
-      'ORGANIZATION_ADMIN_REQUIRED',
-    );
-    expect(db.structure.list(admin, {}).total).toBe(2);
-  });
-
-  it('supports multiple memberships and one primary, without granting RBAC permissions', () => {
-    const engineering = db.structure.save(admin, payload());
-    const qa = db.structure.save(admin, payload('QA'));
-    const input = { employeeId: employee.id, membershipType: 'lead', isPrimary: true };
-    db.structure.addMember(admin, engineering.id, input);
-    expect(() => db.structure.addMember(admin, qa.id, input)).toThrow(
+    await expect(
+      db.structure.save(admin, { ...payload(), version: 99 }, parent.id),
+    ).rejects.toThrow('UNIT_VERSION_CONFLICT');
+    await expect(db.structure.save(admin, payload())).rejects.toThrow(
       'CODE_OR_MEMBERSHIP_CONFLICT',
     );
-    db.structure.addMember(admin, qa.id, { ...input, isPrimary: false });
-    expect(db.structure.members(admin, qa.id, {}).total).toBe(1);
-    expect(() => db.structure.list(employee, {})).toThrow('ORGANIZATION_ADMIN_REQUIRED');
-    expect(() => db.structure.addMember(admin, qa.id, { ...input, employeeId: other.id })).toThrow(
-      'EMPLOYEE_NOT_FOUND',
+    await expect(
+      db.structure.save(admin, { ...payload('New'), organizationId: other.organizationId }),
+    ).rejects.toThrow();
+    await expect(
+      db.structure.save({ ...employee, role: 'ADMIN' }, payload('Fake')),
+    ).rejects.toThrow('ORGANIZATION_ADMIN_REQUIRED');
+    expect((await db.structure.list(admin, {})).total).toBe(2);
+  });
+
+  it('supports multiple memberships and one primary, without granting RBAC permissions', async () => {
+    const engineering = await db.structure.save(admin, payload());
+    const qa = await db.structure.save(admin, payload('QA'));
+    const input = { employeeId: employee.id, membershipType: 'lead', isPrimary: true };
+    await db.structure.addMember(admin, engineering.id, input);
+    await expect(db.structure.addMember(admin, qa.id, input)).rejects.toThrow(
+      'CODE_OR_MEMBERSHIP_CONFLICT',
     );
-    expect(() => db.structure.archive(admin, engineering.id, 1)).toThrow('HIERARCHY_CONFLICT');
-    const membership = db.structure.members(admin, engineering.id, {}).items[0];
-    db.structure.removeMember(admin, engineering.id, membership.id);
-    expect(db.structure.members(admin, engineering.id, {}).total).toBe(0);
+    await db.structure.addMember(admin, qa.id, { ...input, isPrimary: false });
+    expect((await db.structure.members(admin, qa.id, {})).total).toBe(1);
+    await expect(db.structure.list(employee, {})).rejects.toThrow('ORGANIZATION_ADMIN_REQUIRED');
+    await expect(
+      db.structure.addMember(admin, qa.id, { ...input, employeeId: other.id }),
+    ).rejects.toThrow('EMPLOYEE_NOT_FOUND');
+    await expect(db.structure.archive(admin, engineering.id, 1)).rejects.toThrow(
+      'HIERARCHY_CONFLICT',
+    );
+    const membership = (await db.structure.members(admin, engineering.id, {})).items[0];
+    await db.structure.removeMember(admin, engineering.id, membership.id);
+    expect((await db.structure.members(admin, engineering.id, {})).total).toBe(0);
     expect(
-      db.structure.members(admin, engineering.id, { status: 'ended' }).items[0].endedAt,
+      (await db.structure.members(admin, engineering.id, { status: 'ended' })).items[0].endedAt,
     ).toBeTruthy();
-    expect(() =>
+    await expect(
       db.structure.addMember(admin, engineering.id, {
         ...input,
         startedAt: new Date(Date.now() - 86_400_000).toISOString(),
       }),
-    ).toThrow('MEMBERSHIP_DATE_CONFLICT');
-    expect(() =>
+    ).rejects.toThrow('MEMBERSHIP_DATE_CONFLICT');
+    await expect(
       db.structure.addMember(admin, engineering.id, {
         ...input,
         startedAt: new Date(Date.now() + 86_400_000).toISOString(),
       }),
-    ).toThrow('MEMBERSHIP_START_IN_FUTURE');
-    db.structure.addMember(admin, engineering.id, input);
-    const renewed = db.structure.members(admin, engineering.id, {}).items[0];
+    ).rejects.toThrow('MEMBERSHIP_START_IN_FUTURE');
+    await db.structure.addMember(admin, engineering.id, input);
+    const renewed = (await db.structure.members(admin, engineering.id, {})).items[0];
     expect(renewed.id).not.toBe(membership.id);
-    db.structure.removeMember(admin, engineering.id, renewed.id);
-    expect(() => db.structure.removeMember(admin, engineering.id, renewed.id)).toThrow(
+    await db.structure.removeMember(admin, engineering.id, renewed.id);
+    await expect(db.structure.removeMember(admin, engineering.id, renewed.id)).rejects.toThrow(
       'MEMBERSHIP_ALREADY_ENDED',
     );
-    db.structure.archive(admin, engineering.id, 1);
-    expect(db.structure.list(admin, { status: 'archived' }).total).toBe(1);
-    expect(() => db.structure.addMember(admin, engineering.id, input)).toThrow('UNIT_INACTIVE');
+    await db.structure.archive(admin, engineering.id, 1);
+    expect((await db.structure.list(admin, { status: 'archived' })).total).toBe(1);
+    await expect(db.structure.addMember(admin, engineering.id, input)).rejects.toThrow(
+      'UNIT_INACTIVE',
+    );
   });
 
-  it('links a unit head to a same-unit active position, with tenant and version checks', () => {
-    const unit = db.structure.save(admin, payload());
-    const otherUnit = db.structure.save(admin, payload('QA'));
-    const family = db.jobs.save(admin, 'families', {
+  it('links a unit head to a same-unit active position, with tenant and version checks', async () => {
+    const unit = await db.structure.save(admin, payload());
+    const otherUnit = await db.structure.save(admin, payload('QA'));
+    const family = await db.jobs.save(admin, 'families', {
       name: 'Engineering',
       code: 'ENG',
       description: '',
     });
-    const discipline = db.jobs.save(admin, 'disciplines', {
+    const discipline = await db.jobs.save(admin, 'disciplines', {
       name: 'Quality',
       code: 'QUAL',
       description: '',
       jobFamilyId: family.id,
     });
-    const role = db.jobs.save(admin, 'roles', {
+    const role = await db.jobs.save(admin, 'roles', {
       name: 'Lead',
       code: 'LEAD',
       description: '',
       jobFamilyId: family.id,
       disciplineId: discipline.id,
     });
-    const level = db.jobs.save(admin, 'levels', {
+    const level = await db.jobs.save(admin, 'levels', {
       name: 'Senior',
       code: 'SEN',
       description: '',
@@ -267,51 +276,57 @@ describe('organization structure', () => {
       jobLevelId: level.id,
       reportsToPositionId: null,
     };
-    const position = db.jobs.save(admin, 'positions', positionInput);
-    expect(db.structure.headPositionOptions(admin, unit.id, {}).items[0].id).toBe(position.id);
-    expect(db.structure.headPositionOptions(admin, otherUnit.id, {}).total).toBe(0);
-    expect(() =>
+    const position = await db.jobs.save(admin, 'positions', positionInput);
+    expect((await db.structure.headPositionOptions(admin, unit.id, {})).items[0].id).toBe(
+      position.id,
+    );
+    expect((await db.structure.headPositionOptions(admin, otherUnit.id, {})).total).toBe(0);
+    await expect(
       db.structure.setHeadPosition(other, unit.id, { positionId: position.id, version: 1 }),
-    ).toThrow('UNIT_NOT_FOUND');
-    expect(() =>
+    ).rejects.toThrow('UNIT_NOT_FOUND');
+    await expect(
       db.structure.setHeadPosition(admin, otherUnit.id, { positionId: position.id, version: 1 }),
-    ).toThrow('HEAD_POSITION_CONFLICT');
-    const headed = db.structure.setHeadPosition(admin, unit.id, {
+    ).rejects.toThrow('HEAD_POSITION_CONFLICT');
+    const headed = await db.structure.setHeadPosition(admin, unit.id, {
       positionId: position.id,
       version: 1,
     });
     expect(headed.headPositionName).toBe('Team Head');
-    expect(() =>
+    await expect(
       db.structure.setHeadPosition(admin, unit.id, { positionId: null, version: 1 }),
-    ).toThrow('UNIT_VERSION_CONFLICT');
-    expect(() => db.jobs.archive(admin, 'positions', position.id, 1)).toThrow();
+    ).rejects.toThrow('UNIT_VERSION_CONFLICT');
+    await expect(db.jobs.archive(admin, 'positions', position.id, 1)).rejects.toThrow();
     expect(
-      db.structure.setHeadPosition(admin, unit.id, { positionId: null, version: 2 }).headPositionId,
+      (await db.structure.setHeadPosition(admin, unit.id, { positionId: null, version: 2 }))
+        .headPositionId,
     ).toBeNull();
-    db.jobs.archive(admin, 'positions', position.id, 1);
+    await db.jobs.archive(admin, 'positions', position.id, 1);
   });
 
-  it('retains hierarchy history and refuses to archive parents with active children', () => {
-    const parent = db.structure.save(admin, payload());
-    const child = db.structure.save(admin, payload('QA', parent.id));
-    expect(() => db.structure.archive(admin, parent.id, 1)).toThrow('HIERARCHY_CONFLICT');
-    db.structure.archive(admin, child.id, 1);
-    db.structure.archive(admin, parent.id, 1);
-    expect(db.structure.ancestors(admin, child.id)).toHaveLength(2);
-    expect(db.structure.list(admin, { status: 'all' }).total).toBe(2);
+  it('retains hierarchy history and refuses to archive parents with active children', async () => {
+    const parent = await db.structure.save(admin, payload());
+    const child = await db.structure.save(admin, payload('QA', parent.id));
+    await expect(db.structure.archive(admin, parent.id, 1)).rejects.toThrow('HIERARCHY_CONFLICT');
+    await db.structure.archive(admin, child.id, 1);
+    await db.structure.archive(admin, parent.id, 1);
+    expect(await db.structure.ancestors(admin, child.id)).toHaveLength(2);
+    expect((await db.structure.list(admin, { status: 'all' })).total).toBe(2);
   });
 
   it('enforces session, origin, role, strict validation and tenant scope through HTTP', async () => {
     const app = createApp(db, config);
-    const cookie = (actor: Actor) => {
+    const cookie = async (actor: Actor) => {
       const token = Buffer.from(randomUUID()).toString('base64url').slice(0, 43);
-      db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 60000);
+      await db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 60000);
       return `af_session=${token}`;
     };
-    const adminCookie = cookie(admin),
-      otherCookie = cookie(other);
+    const adminCookie = await cookie(admin),
+      otherCookie = await cookie(other);
     await request(app).get('/api/organization/units').expect(401);
-    await request(app).get('/api/organization/units').set('Cookie', cookie(employee)).expect(403);
+    await request(app)
+      .get('/api/organization/units')
+      .set('Cookie', await cookie(employee))
+      .expect(403);
     await request(app)
       .post('/api/organization/units')
       .set('Cookie', adminCookie)
@@ -357,51 +372,56 @@ describe('organization structure', () => {
   });
 });
 
-it('applies migrations once, persists changes, and enforces cross-tenant keys and immutable audit at database level', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'af-structure-'));
-  const path = join(directory, 'test.db');
-  let db: ControlPlaneDatabase | undefined;
-  let sql: DatabaseSync | undefined;
+it('applies migrations once, persists changes, and enforces cross-tenant keys and immutable audit at database level', async () => {
+  const { store, connect, drop } = await testStore();
+  const signer = new ManifestSigner();
   try {
-    db = new ControlPlaneDatabase(path, false);
-    const create = (slug: string) => {
-      const result = db!.createCustomer(
+    let db = await ControlPlaneDatabase.open({ store, signer });
+    const create = async (slug: string) => {
+      const result = await db.createCustomer(
         { name: slug, slug },
         { email: `${slug}@example.com`, displayName: slug, team: 'Admin' },
       );
-      db!.acceptInvitation(hashToken(result.token), 'unused');
+      await db.acceptInvitation(hashToken(result.token), 'unused');
       return {
         id: result.employeeId,
         organizationId: result.organizationId,
         role: 'ADMIN' as const,
       };
     };
-    const actor = create('first'),
-      other = create('second');
-    const root = db.structure.save(actor, payload());
-    const child = db.structure.save(actor, payload('QA', root.id));
-    db.close();
-    db = undefined;
-    db = new ControlPlaneDatabase(path, false);
-    expect(db.structure.list(actor, {}).total).toBe(2);
-    sql = new DatabaseSync(path);
-    sql.exec('PRAGMA foreign_keys=ON');
-    expect(sql.prepare('SELECT count(*) AS n FROM schema_migrations').get()!['n']).toBe(11);
-    expect(() =>
-      sql!
+    const actor = await create('first'),
+      other = await create('second');
+    const root = await db.structure.save(actor, payload());
+    const child = await db.structure.save(actor, payload('QA', root.id));
+    await db.close();
+    db = await ControlPlaneDatabase.open({ store: await connect(), signer });
+    expect((await db.structure.list(actor, {})).total).toBe(2);
+    const sql = rawSql(db);
+    expect((await sql.prepare('SELECT count(*) AS n FROM schema_migrations').get())!['n']).toBe(
+      SCHEMA_VERSION,
+    );
+    await expect(
+      sql
         .prepare('UPDATE organizational_units SET organization_id=? WHERE id=?')
         .run(other.organizationId, child.id),
-    ).toThrow();
-    expect(() =>
-      sql!.prepare('UPDATE organizational_units SET parent_id=? WHERE id=?').run(child.id, root.id),
-    ).toThrow('HIERARCHY_CYCLE');
-    expect(() => sql!.exec('DELETE FROM organization_change_events')).toThrow('AUDIT_IMMUTABLE');
-    expect(sql.prepare('SELECT count(*) AS n FROM organization_change_events').get()!['n']).toBe(2);
-    sql.exec("UPDATE schema_migrations SET checksum='modified' WHERE version=1");
-    expect(() => migrateOrganization(sql!)).toThrow('MIGRATION_CHECKSUM_MISMATCH');
+    ).rejects.toThrow();
+    await expect(
+      sql.prepare('UPDATE organizational_units SET parent_id=? WHERE id=?').run(child.id, root.id),
+    ).rejects.toThrow('HIERARCHY_CYCLE');
+    await expect(sql.exec('DELETE FROM organization_change_events')).rejects.toThrow(
+      'AUDIT_IMMUTABLE',
+    );
+    expect(
+      (await sql.prepare('SELECT count(*) AS n FROM organization_change_events').get())!['n'],
+    ).toBe(2);
+    // The platform role cannot rewrite migration history; a mismatch fails startup.
+    await expect(
+      sql.exec("UPDATE schema_migrations SET checksum='modified' WHERE version=1"),
+    ).rejects.toThrow('permission denied');
+    await expect(
+      assertSchemaCurrent(async () => [{ version: 1, checksum: 'modified' }]),
+    ).rejects.toThrow('DATABASE_SCHEMA_MISMATCH');
   } finally {
-    sql?.close();
-    db?.close();
-    rmSync(directory, { recursive: true, force: true });
+    await drop();
   }
 });

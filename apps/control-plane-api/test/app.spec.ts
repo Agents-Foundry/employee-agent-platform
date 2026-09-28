@@ -1,16 +1,17 @@
 import { demoRequest as request, createDemoApp as createApp } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneDatabase } from '../src/database.js';
+import { testDatabase } from './support/database.js';
 
 describe('control plane API', () => {
   let database: ControlPlaneDatabase;
 
-  beforeEach(() => {
-    database = new ControlPlaneDatabase(':memory:');
+  beforeEach(async () => {
+    database = await testDatabase();
   });
 
-  afterEach(() => {
-    database.close();
+  afterEach(async () => {
+    await database.close();
   });
 
   it('exposes the locked QA POC bootstrap model', async () => {

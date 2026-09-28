@@ -30,13 +30,13 @@ export interface ExecutionRouteOptions {
     agentId: string,
     organizationId: string,
     employeeId: string,
-  ) => AnySignedAgentManifest;
+  ) => Promise<AnySignedAgentManifest>;
   /** The employee's own conversation; throws CONVERSATION_NOT_FOUND otherwise. */
   loadConversation: (
     conversationId: string,
     organizationId: string,
     employeeId: string,
-  ) => { id: string; title: string; agentId: string };
+  ) => Promise<{ id: string; title: string; agentId: string }>;
 }
 
 /** Strip runtime bookkeeping from a run before it reaches a browser. */
@@ -60,16 +60,18 @@ export function configureExecutionRoutes(
     if (!parsed.success) throw new ExecutionError(404, missing);
     return parsed.data;
   };
-  router.get('/threads/:id', (req, res) => {
-    res.json(service.getThread(res.locals['actor'], id(req.params['id'], 'THREAD_NOT_FOUND')));
+  router.get('/threads/:id', async (req, res) => {
+    res.json(
+      await service.getThread(res.locals['actor'], id(req.params['id'], 'THREAD_NOT_FOUND')),
+    );
   });
-  router.get('/runs/:id', (req, res) => {
-    res.json(service.getRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')));
+  router.get('/runs/:id', async (req, res) => {
+    res.json(await service.getRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')));
   });
-  router.get('/runs/:id/events', (req, res) => {
+  router.get('/runs/:id/events', async (req, res) => {
     const query = eventQuery.parse(req.query);
     res.json(
-      service.listEvents(
+      await service.listEvents(
         res.locals['actor'],
         id(req.params['id'], 'RUN_NOT_FOUND'),
         query.afterSequence,
@@ -78,21 +80,21 @@ export function configureExecutionRoutes(
     );
   });
   // An employee starts a run for an agent assigned to them; the runtime picks it up.
-  router.post('/runs', (req, res) => {
+  router.post('/runs', async (req, res) => {
     if (!options.genericRuntimeEnabled) throw new ExecutionError(404, 'GENERIC_RUNTIME_DISABLED');
     const actor = res.locals['actor'];
     const input = startRunSchema.parse(req.body);
-    const manifest = options.loadManifest(input.agentId, actor.organizationId, actor.id);
+    const manifest = await options.loadManifest(input.agentId, actor.organizationId, actor.id);
     if (manifest.payload.apiVersion !== 'agents-foundry/v2')
       throw new ExecutionError(409, 'RUNTIME_MANIFEST_V2_REQUIRED');
     if (input.task.workflow && !manifest.payload.workflows.includes(input.task.workflow))
       throw new ExecutionError(400, 'WORKFLOW_NOT_IN_MANIFEST');
     const conversation = input.conversationId
-      ? options.loadConversation(input.conversationId, actor.organizationId, actor.id)
+      ? await options.loadConversation(input.conversationId, actor.organizationId, actor.id)
       : null;
     if (conversation && conversation.agentId !== input.agentId)
       throw new ExecutionError(409, 'CONVERSATION_AGENT_MISMATCH');
-    const run = service.createRun({
+    const run = await service.createRun({
       organizationId: actor.organizationId,
       employeeId: actor.id,
       agentId: input.agentId,
@@ -104,9 +106,11 @@ export function configureExecutionRoutes(
     });
     res.status(202).json(runView(run));
   });
-  router.post('/runs/:id/cancel', (req, res) => {
+  router.post('/runs/:id/cancel', async (req, res) => {
     res.json(
-      runView(service.cancelOwnRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND'))),
+      runView(
+        await service.cancelOwnRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')),
+      ),
     );
   });
   app.use('/api/execution/v1', router);

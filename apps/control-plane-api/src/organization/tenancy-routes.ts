@@ -17,38 +17,40 @@ export function configureTenancyRoutes(
     }
     next();
   });
-  router.get('/profile', (_req, res) => res.json(service.profile(res.locals['actor'])));
-  router.get('/setup-progress', (_req, res) =>
-    res.json(service.setupProgress(res.locals['actor'])),
+  router.get('/profile', async (_req, res) => res.json(await service.profile(res.locals['actor'])));
+  router.get('/setup-progress', async (_req, res) =>
+    res.json(await service.setupProgress(res.locals['actor'])),
   );
-  router.put('/profile', (req, res) =>
-    res.json(service.updateProfile(res.locals['actor'], req.body)),
+  router.put('/profile', async (req, res) =>
+    res.json(await service.updateProfile(res.locals['actor'], req.body)),
   );
-  router.get('/domains', (_req, res) => res.json(service.listDomains(res.locals['actor'])));
-  router.post('/domains', (req, res) =>
-    res.status(201).json(service.registerDomain(res.locals['actor'], req.body)),
+  router.get('/domains', async (_req, res) =>
+    res.json(await service.listDomains(res.locals['actor'])),
+  );
+  router.post('/domains', async (req, res) =>
+    res.status(201).json(await service.registerDomain(res.locals['actor'], req.body)),
   );
   router.post('/domains/:id/verify', async (req, res) =>
     res.json(await service.verifyDomain(res.locals['actor'], req.params['id'])),
   );
-  router.post('/domains/:id/primary', (req, res) =>
-    res.json(service.setPrimaryDomain(res.locals['actor'], req.params['id'])),
+  router.post('/domains/:id/primary', async (req, res) =>
+    res.json(await service.setPrimaryDomain(res.locals['actor'], req.params['id'])),
   );
-  router.get('/employees', (req, res) =>
-    res.json(service.listEmployees(res.locals['actor'], req.query)),
+  router.get('/employees', async (req, res) =>
+    res.json(await service.listEmployees(res.locals['actor'], req.query)),
   );
-  router.post('/employees', (req, res) =>
-    res.status(201).json(service.createEmployee(res.locals['actor'], req.body)),
+  router.post('/employees', async (req, res) =>
+    res.status(201).json(await service.createEmployee(res.locals['actor'], req.body)),
   );
-  router.put('/employees/:id', (req, res) =>
-    res.json(service.updateEmployee(res.locals['actor'], req.params['id'], req.body)),
+  router.put('/employees/:id', async (req, res) =>
+    res.json(await service.updateEmployee(res.locals['actor'], req.params['id'], req.body)),
   );
-  router.put('/employees/:id/position', (req, res) =>
-    res.json(service.assignPosition(res.locals['actor'], req.params['id'], req.body)),
+  router.put('/employees/:id/position', async (req, res) =>
+    res.json(await service.assignPosition(res.locals['actor'], req.params['id'], req.body)),
   );
-  router.post('/employees/:id/invitation', (req, res) => {
+  router.post('/employees/:id/invitation', async (req, res) => {
     try {
-      const result = db.inviteExistingEmployee(res.locals['actor'], req.params['id']);
+      const result = await db.inviteExistingEmployee(res.locals['actor'], req.params['id']);
       if (config.mode !== 'password') return;
       res.status(201).json({
         employeeId: result.employeeId,
@@ -68,11 +70,11 @@ export function configureTenancyRoutes(
       throw error;
     }
   });
-  router.get('/memberships', (req, res) =>
-    res.json(service.listMemberships(res.locals['actor'], req.query)),
+  router.get('/memberships', async (req, res) =>
+    res.json(await service.listMemberships(res.locals['actor'], req.query)),
   );
-  router.put('/memberships/:id/status', (req, res) =>
-    res.json(service.setMembershipStatus(res.locals['actor'], req.params['id'], req.body)),
+  router.put('/memberships/:id/status', async (req, res) =>
+    res.json(await service.setMembershipStatus(res.locals['actor'], req.params['id'], req.body)),
   );
   app.use('/api/organization', router);
 }

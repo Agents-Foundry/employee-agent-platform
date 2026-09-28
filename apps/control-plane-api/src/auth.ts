@@ -209,7 +209,10 @@ export function configureAuth(
     path: '/',
   };
   const origins = new Set([new URL(config.adminUrl).origin, new URL(config.employeeUrl).origin]);
-  const originAllowed = (req: Request, res: { locals: Record<string, unknown> }): boolean => {
+  const originAllowed = async (
+    req: Request,
+    res: { locals: Record<string, unknown> },
+  ): Promise<boolean> => {
     const origin = req.header('origin') ?? '';
     if (origins.has(origin)) return true;
     try {
@@ -219,15 +222,15 @@ export function configureAuth(
         !parsed.port &&
         parsed.hostname === req.hostname.toLowerCase().replace(/\.$/, '') &&
         typeof res.locals['tenantOrganizationId'] === 'string' &&
-        database.tenancy.resolveVerifiedDomain(parsed.hostname) ===
+        (await database.tenancy.resolveVerifiedDomain(parsed.hostname)) ===
           res.locals['tenantOrganizationId']
       );
     } catch {
       return false;
     }
   };
-  const requireOrigin: RequestHandler = (req, res, next) => {
-    if (!originAllowed(req, res)) {
+  const requireOrigin: RequestHandler = async (req, res, next) => {
+    if (!(await originAllowed(req, res))) {
       res.status(403).json({ error: 'ORIGIN_FORBIDDEN' });
       return;
     }
@@ -273,9 +276,17 @@ export function configureAuth(
     try {
       const tenantId = res.locals['tenantOrganizationId'] as string | undefined;
       if (config.mode === 'google') {
-        const identity = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email, tenantId);
+        const identity = await database.findPasswordIdentity(
+          GOOGLE_ISSUER,
+          input.data.email,
+          tenantId,
+        );
         const valid = await verifyPassword(input.data.password, identity?.hash);
-        const current = database.findPasswordIdentity(GOOGLE_ISSUER, input.data.email, tenantId);
+        const current = await database.findPasswordIdentity(
+          GOOGLE_ISSUER,
+          input.data.email,
+          tenantId,
+        );
         if (
           !valid ||
           !identity ||
@@ -286,19 +297,19 @@ export function configureAuth(
           return;
         }
         const old = cookie(req, sessionName);
-        if (old) database.deleteSession(hashToken(old));
+        if (old) await database.deleteSession(hashToken(old));
         const session = randomToken();
-        database.createSession(
+        await database.createSession(
           hashToken(session),
           GOOGLE_ISSUER,
           identity.subject,
           Date.now() + 8 * 3600000,
         );
         res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
-        res.json(database.findIdentity(GOOGLE_ISSUER, identity.subject, tenantId));
+        res.json(await database.findIdentity(GOOGLE_ISSUER, identity.subject, tenantId));
         return;
       }
-      const account = database.findPasswordAccount(
+      const account = await database.findPasswordAccount(
         input.data.email,
         tenantId,
         input.data.client === 'admin'
@@ -309,7 +320,7 @@ export function configureAuth(
       );
       const valid = await verifyPassword(input.data.password, account?.hash);
       // Recheck after async hashing so concurrent revocation/rotation cannot issue a stale session.
-      const current = database.findPasswordAccount(
+      const current = await database.findPasswordAccount(
         input.data.email,
         tenantId,
         input.data.client === 'admin'
@@ -329,9 +340,9 @@ export function configureAuth(
         return;
       }
       const old = cookie(req, sessionName);
-      if (old) database.deleteSession(hashToken(old));
+      if (old) await database.deleteSession(hashToken(old));
       const session = randomToken();
-      const actor = database.createAccountSession(
+      const actor = await database.createAccountSession(
         hashToken(session),
         account.userId,
         account.organizationId,
@@ -344,7 +355,7 @@ export function configureAuth(
     }
   });
 
-  app.get('/api/auth/login', (req, res) => {
+  app.get('/api/auth/login', async (req, res) => {
     if (config.mode !== 'google') {
       res.status(404).json({ error: 'GOOGLE_NOT_CONFIGURED' });
       return;
@@ -364,8 +375,8 @@ export function configureAuth(
       verifier = randomToken(),
       binding = randomToken();
     const previous = cookie(req, loginName);
-    if (previous) database.discardLogin(hashToken(previous));
-    database.createLogin(
+    if (previous) await database.discardLogin(hashToken(previous));
+    await database.createLogin(
       hashToken(binding),
       { state, nonce, verifier, destination },
       Date.now() + 600000,
@@ -395,7 +406,7 @@ export function configureAuth(
     res.setHeader('Cache-Control', 'no-store');
     const binding = cookie(req, loginName);
     res.clearCookie(loginName, options);
-    const transaction = binding ? database.consumeLogin(hashToken(binding)) : undefined;
+    const transaction = binding ? await database.consumeLogin(hashToken(binding)) : undefined;
     if (
       !transaction ||
       req.query['state'] !== transaction.state ||
@@ -413,28 +424,33 @@ export function configureAuth(
         transaction.nonce,
       );
       if (
-        !database.findIdentity(
+        !(await database.findIdentity(
           GOOGLE_ISSUER,
           subject,
           res.locals['tenantOrganizationId'] as string | undefined,
-        )
+        ))
       ) {
         res.status(403).json({ error: 'MEMBERSHIP_REQUIRED', issuer: GOOGLE_ISSUER, subject });
         return;
       }
       const old = cookie(req, sessionName);
-      if (old) database.deleteSession(hashToken(old));
+      if (old) await database.deleteSession(hashToken(old));
       const session = randomToken();
-      database.createSession(hashToken(session), GOOGLE_ISSUER, subject, Date.now() + 8 * 3600000);
+      await database.createSession(
+        hashToken(session),
+        GOOGLE_ISSUER,
+        subject,
+        Date.now() + 8 * 3600000,
+      );
       res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
       res.redirect(transaction.destination);
     } catch {
       res.status(401).json({ error: 'GOOGLE_SIGN_IN_FAILED' });
     }
   });
-  app.post('/api/auth/logout', requireOrigin, (req, res) => {
+  app.post('/api/auth/logout', requireOrigin, async (req, res) => {
     const token = cookie(req, sessionName);
-    if (token) database.deleteSession(hashToken(token));
+    if (token) await database.deleteSession(hashToken(token));
     res.clearCookie(sessionName, options);
     res.status(204).end();
   });
@@ -472,8 +488,8 @@ export function configureAuth(
         const hash = await hashPassword(input.data.password);
         const resetting = req.path === '/api/auth/reset-password';
         const accepted = resetting
-          ? database.resetPassword(hashToken(input.data.token), hash)
-          : database.acceptInvitation(hashToken(input.data.token), hash);
+          ? await database.resetPassword(hashToken(input.data.token), hash)
+          : await database.acceptInvitation(hashToken(input.data.token), hash);
         if (!accepted) {
           res.status(400).json({
             error: resetting ? 'INVALID_OR_EXPIRED_RESET' : 'INVALID_OR_EXPIRED_INVITATION',
@@ -487,51 +503,51 @@ export function configureAuth(
       }
     },
   );
-  const requireAccount: RequestHandler = (req, res, next) => {
+  const requireAccount: RequestHandler = async (req, res, next) => {
     if (config.mode !== 'password') return res.status(404).json({ error: 'NOT_FOUND' });
     const token = cookie(req, sessionName);
     const hash = token ? hashToken(token) : '';
     const actor = hash
-      ? database.findSession(hash, res.locals['tenantOrganizationId'] as string | undefined)
+      ? await database.findSession(hash, res.locals['tenantOrganizationId'] as string | undefined)
       : undefined;
-    const userId = hash ? database.accountSessionUser(hash) : undefined;
+    const userId = hash ? await database.accountSessionUser(hash) : undefined;
     if (!actor || !userId) return res.status(401).json({ error: 'AUTHENTICATION_REQUIRED' });
-    if (!['GET', 'HEAD'].includes(req.method) && !originAllowed(req, res))
+    if (!['GET', 'HEAD'].includes(req.method) && !(await originAllowed(req, res)))
       return res.status(403).json({ error: 'ORIGIN_FORBIDDEN' });
     res.locals['accountActor'] = actor;
     res.locals['accountUserId'] = userId;
     res.locals['accountSessionHash'] = hash;
     return next();
   };
-  app.get('/api/auth/memberships', requireAccount, (_req, res) => {
+  app.get('/api/auth/memberships', requireAccount, async (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json(
-      database.listAccountMemberships(
+      await database.listAccountMemberships(
         res.locals['accountActor'],
         res.locals['tenantOrganizationId'],
       ),
     );
   });
-  app.post('/api/auth/switch', requireAccount, (req, res) => {
+  app.post('/api/auth/switch', requireAccount, async (req, res) => {
     const input = z.object({ organizationId: z.string().uuid() }).strict().safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: 'INVALID_ORGANIZATION' });
     const target = input.data.organizationId;
     if (res.locals['tenantOrganizationId'] && res.locals['tenantOrganizationId'] !== target)
       return res.status(403).json({ error: 'TENANT_HOST_MISMATCH' });
-    const actor = database.accountMembership(res.locals['accountUserId'], target);
+    const actor = await database.accountMembership(res.locals['accountUserId'], target);
     if (!actor) return res.status(403).json({ error: 'MEMBERSHIP_REQUIRED' });
     const session = randomToken();
-    database.createAccountSession(
+    await database.createAccountSession(
       hashToken(session),
       res.locals['accountUserId'],
       target,
       Date.now() + 8 * 3600000,
     );
-    database.deleteSession(res.locals['accountSessionHash']);
+    await database.deleteSession(res.locals['accountSessionHash']);
     res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
     return res.json(actor);
   });
-  app.get('/api/auth/link-preview', requireAccount, (req, res) => {
+  app.get('/api/auth/link-preview', requireAccount, async (req, res) => {
     if (res.locals['tenantOrganizationId'])
       return res.status(403).json({ error: 'CANONICAL_HOST_REQUIRED' });
     const token = z
@@ -539,12 +555,15 @@ export function configureAuth(
       .regex(/^[A-Za-z0-9_-]{43}$/)
       .safeParse(req.query['token']);
     if (!token.success) return res.status(400).json({ error: 'INVALID_LINK' });
-    const preview = database.previewAccountLink(hashToken(token.data), res.locals['accountUserId']);
+    const preview = await database.previewAccountLink(
+      hashToken(token.data),
+      res.locals['accountUserId'],
+    );
     if (!preview) return res.status(404).json({ error: 'INVALID_OR_EXPIRED_LINK' });
     res.setHeader('Cache-Control', 'no-store');
     return res.json(preview);
   });
-  app.post('/api/auth/link-account', requireAccount, (req, res) => {
+  app.post('/api/auth/link-account', requireAccount, async (req, res) => {
     if (res.locals['tenantOrganizationId'])
       return res.status(403).json({ error: 'CANONICAL_HOST_REQUIRED' });
     const input = z
@@ -552,26 +571,26 @@ export function configureAuth(
       .strict()
       .safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: 'INVALID_LINK' });
-    const actor = database.acceptAccountLink(
+    const actor = await database.acceptAccountLink(
       hashToken(input.data.token),
       res.locals['accountUserId'],
     );
     if (!actor) return res.status(404).json({ error: 'INVALID_OR_EXPIRED_LINK' });
     const session = randomToken();
-    database.createAccountSession(
+    await database.createAccountSession(
       hashToken(session),
       res.locals['accountUserId'],
       actor.organizationId,
       Date.now() + 8 * 3600000,
     );
-    database.deleteSession(res.locals['accountSessionHash']);
+    await database.deleteSession(res.locals['accountSessionHash']);
     res.cookie(sessionName, session, { ...options, maxAge: 8 * 3600000 });
     return res.json(actor);
   });
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const token = cookie(req, sessionName);
     const actor = token
-      ? database.findSession(
+      ? await database.findSession(
           hashToken(token),
           res.locals['tenantOrganizationId'] as string | undefined,
         )
@@ -580,7 +599,7 @@ export function configureAuth(
       res.status(401).json({ error: 'AUTHENTICATION_REQUIRED' });
       return;
     }
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !originAllowed(req, res)) {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !(await originAllowed(req, res))) {
       res.status(403).json({ error: 'ORIGIN_FORBIDDEN' });
       return;
     }

@@ -10,6 +10,8 @@ import { ManifestSigner } from '../src/manifest-signing.js';
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { evaluatePolicy } from '../../../packages/policy-engine/src/index.js';
 import { verifyManifest } from '../../employee-desktop/src/app/verify-manifest.js';
+import { testDatabase, testStore } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employee = {
@@ -36,8 +38,8 @@ const input = {
 
 describe('blueprint provisioning', () => {
   let db: ControlPlaneDatabase;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:');
+  beforeEach(async () => {
+    db = await testDatabase();
   });
   afterEach(() => db.close());
 
@@ -49,7 +51,7 @@ describe('blueprint provisioning', () => {
   it('issues a verified, owned manifest and records lifecycle events atomically', async () => {
     const app = createApp(db);
     const pending = await submit(app);
-    expect(db.getBootstrap().agents).toHaveLength(1);
+    expect((await db.getBootstrap()).agents).toHaveLength(1);
     const result = await request(app)
       .post(`/api/provisioning/${pending.id}/decision`)
       .set(admin)
@@ -91,10 +93,10 @@ describe('blueprint provisioning', () => {
       .get(`/api/agents/${manifest.payload.agentId}/manifest`)
       .set(employee)
       .expect(200);
-    expect(() => db.getManifest(manifest.payload.agentId, 'another-org')).toThrow(
+    await expect(db.getManifest(manifest.payload.agentId, 'another-org')).rejects.toThrow(
       'MANIFEST_NOT_FOUND',
     );
-    expect(() => db.getManifest(manifest.payload.agentId, org, 'another-employee')).toThrow(
+    await expect(db.getManifest(manifest.payload.agentId, org, 'another-employee')).rejects.toThrow(
       'MANIFEST_NOT_FOUND',
     );
     const conversation = await request(app)
@@ -115,7 +117,7 @@ describe('blueprint provisioning', () => {
       })
       .expect(202);
     expect(run.body.run.status).toBe('AWAITING_APPROVAL');
-    expect(db.getBootstrap().agents).toHaveLength(2);
+    expect((await db.getBootstrap()).agents).toHaveLength(2);
     const events = (await request(app).get('/api/lifecycle-events').set(admin).expect(200)).body;
     expect(events.map((event: { type: string }) => event.type).sort()).toEqual([
       'agent.manifest.issued',
@@ -127,7 +129,7 @@ describe('blueprint provisioning', () => {
       .set(admin)
       .send({ decision: 'REJECTED', reason: 'too late' })
       .expect(409);
-    expect(db.listLifecycleEvents(org)).toHaveLength(3);
+    expect(await db.listLifecycleEvents(org)).toHaveLength(3);
   });
 
   it('validates blueprint versions, required answers, URLs, selections, and forbids capability overrides', async () => {
@@ -142,8 +144,8 @@ describe('blueprint provisioning', () => {
       { ...input, answers: { ...input.answers, projectName: ' ' } },
     ])
       await request(app).post('/api/provisioning').set(employee).send(body).expect(400);
-    expect(db.listProvisioning(org)).toHaveLength(0);
-    expect(db.listLifecycleEvents(org)).toHaveLength(0);
+    expect(await db.listProvisioning(org)).toHaveLength(0);
+    expect(await db.listLifecycleEvents(org)).toHaveLength(0);
     expect(evaluatePolicy('unknown.action').outcome).toBe('DENY');
     expect(evaluatePolicy('__proto__').outcome).toBe('DENY');
   });
@@ -167,10 +169,10 @@ describe('blueprint provisioning', () => {
       .send({ decision: 'APPROVED', reason: 'spoof' })
       .expect(403);
     await request(app).get('/api/lifecycle-events').set(employee).expect(403);
-    expect(() =>
+    await expect(
       db.decideProvisioning(pending.id, org, employee['x-actor-id'], 'APPROVED', 'self'),
-    ).toThrow('SELF_APPROVAL_FORBIDDEN');
-    expect(db.listProvisioning(org)[0].status).toBe('PENDING');
+    ).rejects.toThrow('SELF_APPROVAL_FORBIDDEN');
+    expect((await db.listProvisioning(org))[0].status).toBe('PENDING');
   });
 
   it('rejection creates no agent or manifest', async () => {
@@ -183,8 +185,8 @@ describe('blueprint provisioning', () => {
       .expect(200);
     expect(result.body.request.status).toBe('REJECTED');
     expect(result.body.manifest).toBeUndefined();
-    expect(db.getBootstrap().agents).toHaveLength(1);
-    expect(db.listLifecycleEvents(org)).toHaveLength(2);
+    expect((await db.getBootstrap()).agents).toHaveLength(1);
+    expect(await db.listLifecycleEvents(org)).toHaveLength(2);
   });
 
   it('rolls back a failed signing operation without consuming the request', async () => {
@@ -192,55 +194,55 @@ describe('blueprint provisioning', () => {
     const sign = vi.spyOn(db.signer, 'sign').mockImplementationOnce(() => {
       throw new Error('SIGNING_UNAVAILABLE');
     });
-    expect(() => db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot')).toThrow(
-      'SIGNING_UNAVAILABLE',
-    );
+    await expect(
+      db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot'),
+    ).rejects.toThrow('SIGNING_UNAVAILABLE');
     sign.mockRestore();
-    expect(db.listProvisioning(org)[0].status).toBe('PENDING');
-    expect(db.getBootstrap().agents).toHaveLength(1);
-    expect(db.listLifecycleEvents(org)).toHaveLength(1);
+    expect((await db.listProvisioning(org))[0].status).toBe('PENDING');
+    expect((await db.getBootstrap()).agents).toHaveLength(1);
+    expect(await db.listLifecycleEvents(org)).toHaveLength(1);
     expect(
-      db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Retry').manifest,
+      (await db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Retry')).manifest,
     ).toBeDefined();
   });
 
-  it('persists signing identity and manifests through restart, and fails closed on stored tampering', () => {
+  it('persists signing identity and manifests through restart, and fails closed on stored tampering', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'agents-foundry-signing-'));
-    const path = join(directory, 'test.db');
-    let persistent: ControlPlaneDatabase | undefined;
+    const keyPath = join(directory, 'signing-key.pem');
+    const { store, connect, drop } = await testStore();
+    const open = async () =>
+      ControlPlaneDatabase.open({
+        store: await connect(),
+        seedDemo: true,
+        signer: ManifestSigner.fromFile(keyPath),
+      });
     try {
-      persistent = new ControlPlaneDatabase(path);
-      const pending = persistent.requestProvisioning(employee['x-actor-id'], {
+      let persistent = await ControlPlaneDatabase.open({
+        store,
+        seedDemo: true,
+        signer: ManifestSigner.fromFile(keyPath),
+      });
+      const pending = await persistent.requestProvisioning(employee['x-actor-id'], {
         ...input,
         credentialMode: 'EMPLOYEE_BYOK',
       });
-      const manifest = persistent.decideProvisioning(
-        pending.id,
-        org,
-        'admin_demo',
-        'APPROVED',
-        'Pilot',
+      const manifest = (
+        await persistent.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot')
       ).manifest!;
       const keyId = persistent.signer.verificationKey.keyId;
-      persistent.close();
-      persistent = new ControlPlaneDatabase(path);
+      await persistent.close();
+      persistent = await open();
       expect(persistent.signer.verificationKey.keyId).toBe(keyId);
       const agentId = manifestSubject(manifest.payload).agentId;
-      expect(persistent.getManifest(agentId, org)).toEqual(manifest);
-      persistent.close();
-      persistent = undefined;
-      const raw = new DatabaseSync(path);
-      try {
-        raw
-          .prepare('UPDATE agent_manifests SET body = ?')
-          .run(JSON.stringify({ ...manifest, signature: 'invalid' }));
-      } finally {
-        raw.close();
-      }
-      persistent = new ControlPlaneDatabase(path);
-      expect(() => persistent!.getManifest(agentId, org)).toThrow('MANIFEST_INVALID');
+      expect(await persistent.getManifest(agentId, org)).toEqual(manifest);
+      await rawSql(persistent)
+        .prepare('UPDATE agent_manifests SET body = ?')
+        .run(JSON.stringify({ ...manifest, signature: 'invalid' }));
+      await persistent.close();
+      persistent = await open();
+      await expect(persistent.getManifest(agentId, org)).rejects.toThrow('MANIFEST_INVALID');
     } finally {
-      persistent?.close();
+      await drop();
       rmSync(directory, { recursive: true, force: true });
     }
   });

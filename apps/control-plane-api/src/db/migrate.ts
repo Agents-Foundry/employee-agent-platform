@@ -9,8 +9,9 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;
 
+/** Line endings are normalized so Windows and Linux checkouts record the same checksum. */
 function checksum(sql: string): string {
-  return createHash('sha256').update(sql).digest('hex');
+  return createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
 }
 
 /**
@@ -61,11 +62,12 @@ export async function migrate(ownerUrl: string): Promise<number[]> {
 }
 
 /** The recorded migrations must match this release exactly; anything else fails closed. */
-export async function assertSchemaCurrent(query: (sql: string) => Promise<pg.QueryResult>) {
+export async function assertSchemaCurrent(
+  load: () => Promise<{ version: number; checksum: string }[]>,
+): Promise<void> {
   let rows: { version: number; checksum: string }[];
   try {
-    rows = (await query('SELECT version, checksum FROM schema_migrations ORDER BY version'))
-      .rows as typeof rows;
+    rows = await load();
   } catch {
     throw new Error('DATABASE_NOT_MIGRATED');
   }

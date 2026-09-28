@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type {
   AnySignedAgentManifest,
   ApprovalRisk,
@@ -26,27 +25,18 @@ import {
   type ExecutionAction,
 } from './execution-actions.js';
 import { parseExecutionOperation } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
-import type { ActionPolicyService } from './action-policy-service.js';
+import type { ActionPolicyService, Audit } from './action-policy-service.js';
+import type { PgStore, Row } from '../db/pg-store.js';
 import { ConnectorError } from './connectors/jira.js';
 import type { ConnectorService } from './connector-service.js';
 import type { SecretResolver } from './secrets.js';
-
-type Row = Record<string, SQLInputValue>;
-type Audit = (
-  actorId: string,
-  eventType: string,
-  resourceType: string,
-  resourceId: string,
-  metadata: object,
-  organizationId: string,
-) => void;
 
 export interface ActionGatewayDependencies {
   loadManifest: (
     agentId: string,
     organizationId: string,
     employeeId: string,
-  ) => AnySignedAgentManifest;
+  ) => Promise<AnySignedAgentManifest>;
   bundle: (blueprintId: string, version: string) => ResolvedBlueprintBundle;
   audit: Audit;
   connectors: ConnectorService;
@@ -117,7 +107,7 @@ export class ActionGateway {
   private readonly evaluate: typeof evaluateActionPolicy;
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: PgStore,
     private readonly execution: ExecutionService,
     private readonly deps: ActionGatewayDependencies,
   ) {
@@ -133,24 +123,22 @@ export class ActionGateway {
     run: Row,
     request: RuntimeActionRequest,
     requestHash: string,
-  ): RuntimeActionDecision {
+  ): Promise<RuntimeActionDecision> {
     const organizationId = String(run['organization_id']);
-    const verdict = this.assess(run, request);
-    const now = new Date();
-    const approvalId = verdict.outcome === 'REQUIRE_APPROVAL' ? randomUUID() : null;
-    const summary = verdict.summary ?? request.summary;
-    if (approvalId) {
-      const ttl = verdict.policy?.conditions.find(
-        (condition) => condition.type === 'APPROVAL_TTL_SECONDS',
-      );
-      const expiresAt = new Date(now.getTime() + (ttl ? ttl.value : 3600) * 1000).toISOString();
-      const resource = verdict.resource;
-      this.db
-        .prepare(
+    return this.db.tenant(organizationId, async () => {
+      const verdict = await this.assess(run, request);
+      const now = new Date();
+      const approvalId = verdict.outcome === 'REQUIRE_APPROVAL' ? randomUUID() : null;
+      const summary = verdict.summary ?? request.summary;
+      if (approvalId) {
+        const ttl = verdict.policy?.conditions.find(
+          (condition) => condition.type === 'APPROVAL_TTL_SECONDS',
+        );
+        const expiresAt = new Date(now.getTime() + (ttl ? ttl.value : 3600) * 1000).toISOString();
+        const resource = verdict.resource;
+        await this.db.run(
           `INSERT INTO approvals (id, organization_id, requested_by, action, resource_type, resource_id,
            risk, summary, status, created_at, run_id, step_id, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
           approvalId,
           organizationId,
           String(run['employee_id']),
@@ -165,31 +153,28 @@ export class ActionGateway {
           request.correlation.stepId,
           expiresAt,
         );
-      this.execution.pauseForApproval(
-        organizationId,
-        String(run['id']),
-        request.correlation.stepId,
-        {
-          id: approvalId,
-          action: request.action,
-          risk: verdict.risk,
-          summary,
-        },
-      );
-    }
-    const decision =
-      verdict.outcome === 'ALLOW'
-        ? 'ALLOWED'
-        : verdict.outcome === 'DENY'
-          ? 'DENIED'
-          : 'APPROVAL_REQUIRED';
-    this.db
-      .prepare(
+        await this.execution.pauseForApproval(
+          organizationId,
+          String(run['id']),
+          request.correlation.stepId,
+          {
+            id: approvalId,
+            action: request.action,
+            risk: verdict.risk,
+            summary,
+          },
+        );
+      }
+      const decision =
+        verdict.outcome === 'ALLOW'
+          ? 'ALLOWED'
+          : verdict.outcome === 'DENY'
+            ? 'DENIED'
+            : 'APPROVAL_REQUIRED';
+      await this.db.run(
         `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
          request_hash, decision, risk, reason, approval_id, created_at, parameters, policy_id, policy_version,
          change_set) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
         request.requestId,
         organizationId,
         String(run['id']),
@@ -211,28 +196,31 @@ export class ActionGateway {
         verdict.policy?.policyVersion ?? null,
         verdict.outcome !== 'DENY' && verdict.changes ? JSON.stringify(verdict.changes) : null,
       );
-    this.deps.audit(
-      String(run['agent_id']),
-      `runtime.action.${decision.toLowerCase()}`,
-      'agent_run',
-      String(run['id']),
-      {
-        action: request.action,
-        toolId: request.toolId,
-        runtimeId,
-        requestId: request.requestId,
-        ...(verdict.policy
-          ? { policyId: verdict.policy.policyId, policyVersion: verdict.policy.policyVersion }
-          : {}),
-        ...(approvalId ? { approvalId } : {}),
-      },
-      organizationId,
-    );
-    return this.storedDecision(
-      this.db
-        .prepare('SELECT * FROM agent_action_requests WHERE id=?')
-        .get(request.requestId) as Row,
-    );
+      await this.deps.audit(
+        String(run['agent_id']),
+        `runtime.action.${decision.toLowerCase()}`,
+        'agent_run',
+        String(run['id']),
+        {
+          action: request.action,
+          toolId: request.toolId,
+          runtimeId,
+          requestId: request.requestId,
+          ...(verdict.policy
+            ? { policyId: verdict.policy.policyId, policyVersion: verdict.policy.policyVersion }
+            : {}),
+          ...(approvalId ? { approvalId } : {}),
+        },
+        organizationId,
+      );
+      return this.storedDecision(
+        (await this.db.get(
+          'SELECT * FROM agent_action_requests WHERE id=? AND organization_id=?',
+          request.requestId,
+          organizationId,
+        ))!,
+      );
+    });
   }
 
   storedDecision(row: Row): RuntimeActionDecision {
@@ -252,99 +240,128 @@ export class ActionGateway {
    * Re-authorizes against current policy, the approval and its expiry, then commits to a single
    * dispatch. Denials are recorded as FAILED executions so the request can never be retried.
    */
-  prepareExecution(run: Row, requestId: string, stepId: string, nowMs = Date.now()): ExecutionPlan {
-    this.expireDue(nowMs);
+  prepareExecution(
+    run: Row,
+    requestId: string,
+    stepId: string,
+    nowMs = Date.now(),
+  ): Promise<ExecutionPlan> {
     const organizationId = String(run['organization_id']);
-    const request = this.db
-      .prepare('SELECT * FROM agent_action_requests WHERE id=? AND organization_id=? AND run_id=?')
-      .get(requestId, organizationId, run['id']) as Row | undefined;
-    if (!request) throw new ExecutionError(404, 'ACTION_REQUEST_NOT_FOUND');
-    if (request['step_id'] !== stepId)
-      throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
-    const handler = controlPlaneAction(String(request['action']));
-    if (!handler) throw new ExecutionError(409, 'ACTION_NOT_EXECUTABLE');
-    const existing = this.db
-      .prepare('SELECT * FROM agent_action_executions WHERE request_id=?')
-      .get(requestId) as Row | undefined;
-    if (existing) {
-      if (existing['status'] === 'DISPATCHING')
-        throw new ExecutionError(409, 'ACTION_EXECUTION_IN_PROGRESS');
-      return { kind: 'done', execution: this.storedExecution(existing) };
-    }
-    const nowIso = new Date(nowMs).toISOString();
-    const refuse = (code: string, message: string): ExecutionPlan => {
-      this.db
-        .prepare(
-          `INSERT INTO agent_action_executions (request_id, organization_id, run_id, status, error_code, started_at, completed_at)
-           VALUES (?,?,?,'FAILED',?,?,?)`,
-        )
-        .run(requestId, organizationId, String(run['id']), code, nowIso, nowIso);
-      this.deps.audit(
-        String(run['agent_id']),
-        'action.execution.refused',
-        'agent_run',
-        String(run['id']),
-        { action: handler.action, requestId, code },
-        organizationId,
-      );
-      return { kind: 'done', execution: { requestId, status: 'FAILED', error: { code, message } } };
-    };
-    const decision = String(request['decision']);
-    if (decision === 'DENIED') return refuse('ACTION_DENIED', 'The action was denied.');
-    if (decision === 'APPROVAL_REQUIRED') {
-      const approval = this.db
-        .prepare('SELECT status, expires_at FROM approvals WHERE id=? AND organization_id=?')
-        .get(request['approval_id'], organizationId) as
-        { status: string; expires_at: string | null } | undefined;
-      if (approval?.status === 'EXPIRED' || (approval?.expires_at && approval.expires_at <= nowIso))
-        return refuse('APPROVAL_EXPIRED', 'The approval expired before execution.');
-      if (approval?.status !== 'APPROVED')
-        return refuse('APPROVAL_NOT_GRANTED', 'The action has not been approved.');
-    }
-    const parameters = request['parameters']
-      ? (JSON.parse(String(request['parameters'])) as Record<string, unknown>)
-      : null;
-    // Policy, overrides, manifest, connection and scope may have changed since the decision.
-    const current = this.assess(run, {
-      action: String(request['action']),
-      toolId: String(request['tool_id']),
-      parameters: parameters ?? undefined,
-    });
-    if (current.outcome === 'DENY') return refuse('POLICY_DENIED', current.reason);
-    if (current.outcome === 'REQUIRE_APPROVAL' && decision === 'ALLOWED')
-      return refuse('APPROVAL_REQUIRED', 'Policy now requires approval; request the action again.');
-    const connection = current.connection;
-    if (!connection || !current.parameters)
-      return refuse('CONNECTOR_NOT_CONFIGURED', 'No active connection for this action.');
-    const approvedChanges = request['change_set']
-      ? (JSON.parse(String(request['change_set'])) as ChangeSet)
-      : null;
-    // A pull request publishes exactly the approved change set; later writes need a new request.
-    if ((approvedChanges?.digest ?? null) !== (current.changes?.digest ?? null))
-      return refuse('CHANGE_SET_CHANGED', 'The workspace changed after the decision.');
-    const secret = this.deps.secrets.resolve(organizationId, connection.secretRef);
-    if (!secret) return refuse('SECRET_UNRESOLVED', 'The connection credential is unavailable.');
-    this.db
-      .prepare(
-        `INSERT INTO agent_action_executions (request_id, organization_id, run_id, connection_id, status, started_at)
-         VALUES (?,?,?,?,'DISPATCHING',?)`,
-      )
-      .run(requestId, organizationId, String(run['id']), connection.id, nowIso);
-    return {
-      kind: 'dispatch',
-      dispatch: {
+    return this.db.tenant(organizationId, async () => {
+      await this.expireDue(nowMs, organizationId);
+      const request = await this.db.get(
+        'SELECT * FROM agent_action_requests WHERE id=? AND organization_id=? AND run_id=?',
         requestId,
         organizationId,
-        runId: String(run['id']),
-        agentId: String(run['agent_id']),
-        action: handler.action,
-        handler,
-        parameters: current.parameters,
-        connection,
-        secret,
-        changes: approvedChanges,
-      },
-    };
+        String(run['id']),
+      );
+      if (!request) throw new ExecutionError(404, 'ACTION_REQUEST_NOT_FOUND');
+      if (request['step_id'] !== stepId)
+        throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
+      const handler = controlPlaneAction(String(request['action']));
+      if (!handler) throw new ExecutionError(409, 'ACTION_NOT_EXECUTABLE');
+      const existing = await this.db.get(
+        'SELECT * FROM agent_action_executions WHERE request_id=? AND organization_id=?',
+        requestId,
+        organizationId,
+      );
+      if (existing) {
+        if (existing['status'] === 'DISPATCHING')
+          throw new ExecutionError(409, 'ACTION_EXECUTION_IN_PROGRESS');
+        return { kind: 'done', execution: this.storedExecution(existing) };
+      }
+      const nowIso = new Date(nowMs).toISOString();
+      const refuse = async (code: string, message: string): Promise<ExecutionPlan> => {
+        await this.db.run(
+          `INSERT INTO agent_action_executions (request_id, organization_id, run_id, status, error_code, started_at, completed_at)
+           VALUES (?,?,?,'FAILED',?,?,?)`,
+          requestId,
+          organizationId,
+          String(run['id']),
+          code,
+          nowIso,
+          nowIso,
+        );
+        await this.deps.audit(
+          String(run['agent_id']),
+          'action.execution.refused',
+          'agent_run',
+          String(run['id']),
+          { action: handler.action, requestId, code },
+          organizationId,
+        );
+        return {
+          kind: 'done',
+          execution: { requestId, status: 'FAILED', error: { code, message } },
+        };
+      };
+      const decision = String(request['decision']);
+      if (decision === 'DENIED') return refuse('ACTION_DENIED', 'The action was denied.');
+      if (decision === 'APPROVAL_REQUIRED') {
+        const approval = await this.db.get<{ status: string; expires_at: string | null }>(
+          'SELECT status, expires_at FROM approvals WHERE id=? AND organization_id=?',
+          String(request['approval_id']),
+          organizationId,
+        );
+        if (
+          approval?.status === 'EXPIRED' ||
+          (approval?.expires_at && approval.expires_at <= nowIso)
+        )
+          return refuse('APPROVAL_EXPIRED', 'The approval expired before execution.');
+        if (approval?.status !== 'APPROVED')
+          return refuse('APPROVAL_NOT_GRANTED', 'The action has not been approved.');
+      }
+      const parameters = request['parameters']
+        ? (JSON.parse(String(request['parameters'])) as Record<string, unknown>)
+        : null;
+      // Policy, overrides, manifest, connection and scope may have changed since the decision.
+      const current = await this.assess(run, {
+        action: String(request['action']),
+        toolId: String(request['tool_id']),
+        parameters: parameters ?? undefined,
+      });
+      if (current.outcome === 'DENY') return refuse('POLICY_DENIED', current.reason);
+      if (current.outcome === 'REQUIRE_APPROVAL' && decision === 'ALLOWED')
+        return refuse(
+          'APPROVAL_REQUIRED',
+          'Policy now requires approval; request the action again.',
+        );
+      const connection = current.connection;
+      if (!connection || !current.parameters)
+        return refuse('CONNECTOR_NOT_CONFIGURED', 'No active connection for this action.');
+      const approvedChanges = request['change_set']
+        ? (JSON.parse(String(request['change_set'])) as ChangeSet)
+        : null;
+      // A pull request publishes exactly the approved change set; later writes need a new request.
+      if ((approvedChanges?.digest ?? null) !== (current.changes?.digest ?? null))
+        return refuse('CHANGE_SET_CHANGED', 'The workspace changed after the decision.');
+      const secret = this.deps.secrets.resolve(organizationId, connection.secretRef);
+      if (!secret) return refuse('SECRET_UNRESOLVED', 'The connection credential is unavailable.');
+      await this.db.run(
+        `INSERT INTO agent_action_executions (request_id, organization_id, run_id, connection_id, status, started_at)
+         VALUES (?,?,?,?,'DISPATCHING',?)`,
+        requestId,
+        organizationId,
+        String(run['id']),
+        connection.id,
+        nowIso,
+      );
+      return {
+        kind: 'dispatch',
+        dispatch: {
+          requestId,
+          organizationId,
+          runId: String(run['id']),
+          agentId: String(run['agent_id']),
+          action: handler.action,
+          handler,
+          parameters: current.parameters,
+          connection,
+          secret,
+          changes: approvedChanges,
+        },
+      };
+    });
   }
 
   /** Second half: the connector call, outside any database transaction. */
@@ -378,35 +395,36 @@ export class ActionGateway {
   completeExecution(
     pending: PendingDispatch,
     outcome: RuntimeActionExecution,
-  ): RuntimeActionExecution {
-    this.db
-      .prepare(
-        `UPDATE agent_action_executions SET status=?, result=?, error_code=?, completed_at=? WHERE request_id=?`,
-      )
-      .run(
+  ): Promise<RuntimeActionExecution> {
+    return this.db.tenant(pending.organizationId, async () => {
+      await this.db.run(
+        `UPDATE agent_action_executions SET status=?, result=?, error_code=?, completed_at=?
+         WHERE request_id=? AND organization_id=?`,
         outcome.status,
         outcome.result ? JSON.stringify(outcome.result) : null,
         outcome.error?.code ?? null,
         new Date().toISOString(),
         pending.requestId,
+        pending.organizationId,
       );
-    this.deps.audit(
-      pending.agentId,
-      outcome.status === 'SUCCEEDED' ? 'action.executed' : 'action.execution.failed',
-      'agent_run',
-      pending.runId,
-      {
-        action: pending.action,
-        requestId: pending.requestId,
-        connectionId: pending.connection.id,
-        ...(outcome.result
-          ? { result: pending.handler.auditResult?.(outcome.result) ?? outcome.result }
-          : {}),
-        ...(outcome.error ? { code: outcome.error.code } : {}),
-      },
-      pending.organizationId,
-    );
-    return outcome;
+      await this.deps.audit(
+        pending.agentId,
+        outcome.status === 'SUCCEEDED' ? 'action.executed' : 'action.execution.failed',
+        'agent_run',
+        pending.runId,
+        {
+          action: pending.action,
+          requestId: pending.requestId,
+          connectionId: pending.connection.id,
+          ...(outcome.result
+            ? { result: pending.handler.auditResult?.(outcome.result) ?? outcome.result }
+            : {}),
+          ...(outcome.error ? { code: outcome.error.code } : {}),
+        },
+        pending.organizationId,
+      );
+      return outcome;
+    });
   }
 
   /**
@@ -419,90 +437,97 @@ export class ActionGateway {
     requestId: string,
     correlation: ExecutionGrantPayload['correlation'],
     nowMs = Date.now(),
-  ): SignedExecutionGrant {
-    this.expireDue(nowMs);
+  ): Promise<SignedExecutionGrant> {
     const organizationId = String(run['organization_id']);
-    const request = this.db
-      .prepare('SELECT * FROM agent_action_requests WHERE id=? AND organization_id=? AND run_id=?')
-      .get(requestId, organizationId, run['id']) as Row | undefined;
-    if (!request) throw new ExecutionError(404, 'ACTION_REQUEST_NOT_FOUND');
-    if (request['step_id'] !== correlation.stepId)
-      throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
-    if (!executionAction(String(request['action'])))
-      throw new ExecutionError(409, 'ACTION_NOT_GRANTABLE');
-    const nowIso = new Date(nowMs).toISOString();
-    const existing = this.db
-      .prepare('SELECT signed_grant, expires_at FROM agent_execution_grants WHERE request_id=?')
-      .get(requestId) as { signed_grant: string; expires_at: string } | undefined;
-    if (existing) {
-      // One grant per request: redelivery is safe because execution runtimes use it once.
-      if (existing.expires_at <= nowIso) throw new ExecutionError(409, 'GRANT_EXPIRED');
-      return JSON.parse(existing.signed_grant) as SignedExecutionGrant;
-    }
-    const refuse = (code: string, status = 403) => {
-      this.deps.audit(
-        String(run['agent_id']),
-        'action.grant.refused',
-        'agent_run',
+    return this.db.tenant(organizationId, async () => {
+      await this.expireDue(nowMs, organizationId);
+      const request = await this.db.get(
+        'SELECT * FROM agent_action_requests WHERE id=? AND organization_id=? AND run_id=?',
+        requestId,
+        organizationId,
         String(run['id']),
-        { action: String(request['action']), requestId, code },
+      );
+      if (!request) throw new ExecutionError(404, 'ACTION_REQUEST_NOT_FOUND');
+      if (request['step_id'] !== correlation.stepId)
+        throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
+      if (!executionAction(String(request['action'])))
+        throw new ExecutionError(409, 'ACTION_NOT_GRANTABLE');
+      const nowIso = new Date(nowMs).toISOString();
+      const existing = await this.db.get<{ signed_grant: string; expires_at: string }>(
+        'SELECT signed_grant, expires_at FROM agent_execution_grants WHERE request_id=? AND organization_id=?',
+        requestId,
         organizationId,
       );
-      return new ExecutionError(status, code);
-    };
-    const decision = String(request['decision']);
-    let expiresAt = new Date(nowMs + 10 * 60_000).toISOString();
-    if (decision === 'DENIED') throw refuse('ACTION_DENIED');
-    if (decision === 'APPROVAL_REQUIRED') {
-      const approval = this.db
-        .prepare('SELECT status, expires_at FROM approvals WHERE id=? AND organization_id=?')
-        .get(request['approval_id'], organizationId) as
-        { status: string; expires_at: string | null } | undefined;
-      if (approval?.status === 'EXPIRED' || (approval?.expires_at && approval.expires_at <= nowIso))
-        throw refuse('APPROVAL_EXPIRED');
-      if (approval?.status !== 'APPROVED') throw refuse('APPROVAL_NOT_GRANTED');
-      if (approval.expires_at && approval.expires_at < expiresAt) expiresAt = approval.expires_at;
-    }
-    const parameters = request['parameters']
-      ? (JSON.parse(String(request['parameters'])) as Record<string, unknown>)
-      : undefined;
-    const current = this.assess(run, {
-      action: String(request['action']),
-      toolId: String(request['tool_id']),
-      parameters,
-    });
-    if (current.outcome === 'DENY') throw refuse('POLICY_DENIED');
-    if (current.outcome === 'REQUIRE_APPROVAL' && decision === 'ALLOWED')
-      throw refuse('APPROVAL_REQUIRED', 409);
-    if (!current.execution || !current.parameters) throw refuse('PARAMETERS_REQUIRED', 409);
-    const hosts = current.execution.policy.hosts(current.execution.operation);
-    const grant = this.deps.signGrant({
-      kind: EXECUTION_GRANT_KIND,
-      grantId: randomUUID(),
-      requestId,
-      action: String(request['action']),
-      correlation,
-      operationKind: current.execution.operation.kind,
-      operationDigest: digest(current.parameters),
-      isolation: current.execution.isolation,
-      limits: {
-        timeoutMs: Math.max(1000, Math.min(current.execution.timeoutMs, 3_600_000)),
-        cpuMillis: 2000,
-        memoryMb: 2048,
-        maxProcesses: current.execution.policy.maxProcesses ?? DEFAULT_MAX_PROCESSES,
-        network: hosts.length
-          ? { mode: 'ALLOW_LIST', allowedHosts: hosts }
-          : { mode: 'NONE', allowedHosts: [] },
-      },
-      issuedAt: nowIso,
-      expiresAt,
-    });
-    this.db
-      .prepare(
+      if (existing) {
+        // One grant per request: redelivery is safe because execution runtimes use it once.
+        if (existing.expires_at <= nowIso) throw new ExecutionError(409, 'GRANT_EXPIRED');
+        return JSON.parse(existing.signed_grant) as SignedExecutionGrant;
+      }
+      const refuse = async (code: string, status = 403) => {
+        await this.deps.audit(
+          String(run['agent_id']),
+          'action.grant.refused',
+          'agent_run',
+          String(run['id']),
+          { action: String(request['action']), requestId, code },
+          organizationId,
+        );
+        return new ExecutionError(status, code);
+      };
+      const decision = String(request['decision']);
+      let expiresAt = new Date(nowMs + 10 * 60_000).toISOString();
+      if (decision === 'DENIED') throw await refuse('ACTION_DENIED');
+      if (decision === 'APPROVAL_REQUIRED') {
+        const approval = await this.db.get<{ status: string; expires_at: string | null }>(
+          'SELECT status, expires_at FROM approvals WHERE id=? AND organization_id=?',
+          String(request['approval_id']),
+          organizationId,
+        );
+        if (
+          approval?.status === 'EXPIRED' ||
+          (approval?.expires_at && approval.expires_at <= nowIso)
+        )
+          throw await refuse('APPROVAL_EXPIRED');
+        if (approval?.status !== 'APPROVED') throw await refuse('APPROVAL_NOT_GRANTED');
+        if (approval.expires_at && approval.expires_at < expiresAt) expiresAt = approval.expires_at;
+      }
+      const parameters = request['parameters']
+        ? (JSON.parse(String(request['parameters'])) as Record<string, unknown>)
+        : undefined;
+      const current = await this.assess(run, {
+        action: String(request['action']),
+        toolId: String(request['tool_id']),
+        parameters,
+      });
+      if (current.outcome === 'DENY') throw await refuse('POLICY_DENIED');
+      if (current.outcome === 'REQUIRE_APPROVAL' && decision === 'ALLOWED')
+        throw await refuse('APPROVAL_REQUIRED', 409);
+      if (!current.execution || !current.parameters) throw await refuse('PARAMETERS_REQUIRED', 409);
+      const hosts = current.execution.policy.hosts(current.execution.operation);
+      const grant = this.deps.signGrant({
+        kind: EXECUTION_GRANT_KIND,
+        grantId: randomUUID(),
+        requestId,
+        action: String(request['action']),
+        correlation,
+        operationKind: current.execution.operation.kind,
+        operationDigest: digest(current.parameters),
+        isolation: current.execution.isolation,
+        limits: {
+          timeoutMs: Math.max(1000, Math.min(current.execution.timeoutMs, 3_600_000)),
+          cpuMillis: 2000,
+          memoryMb: 2048,
+          maxProcesses: current.execution.policy.maxProcesses ?? DEFAULT_MAX_PROCESSES,
+          network: hosts.length
+            ? { mode: 'ALLOW_LIST', allowedHosts: hosts }
+            : { mode: 'NONE', allowedHosts: [] },
+        },
+        issuedAt: nowIso,
+        expiresAt,
+      });
+      await this.db.run(
         `INSERT INTO agent_execution_grants (grant_id, request_id, organization_id, run_id, operation_kind,
          signed_grant, issued_at, expires_at) VALUES (?,?,?,?,?,?,?,?)`,
-      )
-      .run(
         grant.payload.grantId,
         requestId,
         organizationId,
@@ -512,42 +537,47 @@ export class ActionGateway {
         nowIso,
         expiresAt,
       );
-    this.deps.audit(
-      String(run['agent_id']),
-      'action.grant.issued',
-      'agent_run',
-      String(run['id']),
-      {
-        action: grant.payload.action,
-        requestId,
-        grantId: grant.payload.grantId,
-        operationKind: grant.payload.operationKind,
-        expiresAt,
-      },
-      organizationId,
-    );
-    return grant;
+      await this.deps.audit(
+        String(run['agent_id']),
+        'action.grant.issued',
+        'agent_run',
+        String(run['id']),
+        {
+          action: grant.payload.action,
+          requestId,
+          grantId: grant.payload.grantId,
+          operationKind: grant.payload.operationKind,
+          expiresAt,
+        },
+        organizationId,
+      );
+      return grant;
+    });
   }
 
   /**
    * Expire pending approvals past their deadline and cancel the runs they paused. Called
    * lazily wherever approvals are read, decided or executed, so no scheduler is required.
+   * With an organization it sweeps that tenant only; without one (runtime claims) it sweeps
+   * every organization in the platform scope.
    */
-  expireDue(nowMs = Date.now()): number {
+  expireDue(nowMs = Date.now(), organizationId?: string): Promise<number> {
     const nowIso = new Date(nowMs).toISOString();
-    const due = this.db
-      .prepare(
-        `SELECT id, organization_id FROM approvals WHERE status='PENDING' AND expires_at IS NOT NULL AND expires_at<=?`,
-      )
-      .all(nowIso) as { id: string; organization_id: string }[];
-    if (!due.length) return 0;
-    this.transaction(() => {
+    const sweep = async () => {
+      const due = await this.db.all<{ id: string; organization_id: string }>(
+        `SELECT id, organization_id FROM approvals WHERE status='PENDING' AND expires_at IS NOT NULL AND expires_at<=?
+         ${organizationId ? 'AND organization_id=?' : ''} ORDER BY expires_at, seq`,
+        nowIso,
+        ...(organizationId ? [organizationId] : []),
+      );
       for (const approval of due) {
-        this.db
-          .prepare(`UPDATE approvals SET status='EXPIRED' WHERE id=? AND status='PENDING'`)
-          .run(approval.id);
-        this.execution.onApprovalExpired(approval.organization_id, approval.id);
-        this.deps.audit(
+        await this.db.run(
+          `UPDATE approvals SET status='EXPIRED' WHERE id=? AND organization_id=? AND status='PENDING'`,
+          approval.id,
+          approval.organization_id,
+        );
+        await this.execution.onApprovalExpired(approval.organization_id, approval.id);
+        await this.deps.audit(
           'platform',
           'approval.expired',
           'approval',
@@ -556,11 +586,12 @@ export class ActionGateway {
           approval.organization_id,
         );
       }
-    });
-    return due.length;
+      return due.length;
+    };
+    return organizationId ? this.db.tenant(organizationId, sweep) : this.db.platform(sweep);
   }
 
-  private assess(
+  private async assess(
     run: Row,
     request: {
       action: string;
@@ -569,7 +600,7 @@ export class ActionGateway {
       parameters?: Record<string, unknown> | undefined;
       inputDigest?: string;
     },
-  ): Assessment {
+  ): Promise<Assessment> {
     const deny = (reason: string, risk: ApprovalRisk = 'CRITICAL'): Assessment => ({
       outcome: 'DENY',
       risk,
@@ -586,12 +617,14 @@ export class ActionGateway {
     const organizationId = String(run['organization_id']);
     let manifest: AnySignedAgentManifest;
     try {
-      manifest = this.deps.loadManifest(
+      manifest = await this.deps.loadManifest(
         String(run['agent_id']),
         organizationId,
         String(run['employee_id']),
       );
-    } catch {
+    } catch (error) {
+      // Database failures are not verdicts: the transaction is aborted, so fail the request.
+      if ((error as { code?: unknown }).code !== undefined) throw error;
       return deny('MANIFEST_INVALID');
     }
     const payload = manifest.payload;
@@ -630,7 +663,7 @@ export class ActionGateway {
       if (request.inputDigest !== undefined && digest(request.parameters) !== request.inputDigest)
         return deny('INPUT_DIGEST_MISMATCH');
       parameters = request.parameters;
-      connection = this.deps.connectors.active(organizationId, handler.connectorProvider);
+      connection = await this.deps.connectors.active(organizationId, handler.connectorProvider);
       if (!connection) return deny('CONNECTOR_NOT_CONFIGURED');
       const granted = payload.connectors.some(
         (connector) =>
@@ -643,7 +676,7 @@ export class ActionGateway {
         inScope: handler.inScope(parameters as never, connection.settings, payload.configuration),
       };
       if (handler.changeSetDirectory) {
-        const resolved = this.changeSet(run, handler.changeSetDirectory(parameters as never));
+        const resolved = await this.changeSet(run, handler.changeSetDirectory(parameters as never));
         if (typeof resolved === 'string') return deny(resolved);
         changes = resolved;
       }
@@ -674,6 +707,8 @@ export class ActionGateway {
         timeoutMs: tool.timeoutMs,
       };
     }
+    // Read before evaluating: a database failure aborts the transaction and fails the request.
+    const organizationOutcome = await this.deps.policies.outcome(organizationId, request.action);
     let policy: ActionPolicyDecision;
     try {
       policy = this.evaluate({
@@ -685,7 +720,7 @@ export class ActionGateway {
           employeeId: String(run['employee_id']),
         },
         manifestOutcome: capability.outcome,
-        organizationOutcome: this.deps.policies.outcome(organizationId, request.action),
+        organizationOutcome,
         ...(resource ? { resource } : {}),
       });
     } catch {
@@ -716,17 +751,17 @@ export class ActionGateway {
    * by a `repository.write` operation that was granted and whose step completed, with paths made
    * relative to `directory`. Recorded by the control plane, never supplied by the runtime.
    */
-  private changeSet(run: Row, directory: string): ChangeSet | string {
-    const rows = this.db
-      .prepare(
-        `SELECT r.parameters FROM agent_action_requests r
-         JOIN agent_runs ru ON ru.id=r.run_id AND ru.organization_id=r.organization_id
-         JOIN agent_run_steps s ON s.id=r.step_id AND s.status='COMPLETED'
-         JOIN agent_execution_grants g ON g.request_id=r.id
-         WHERE r.organization_id=? AND ru.thread_id=? AND r.action='repository.write'
-         AND r.parameters IS NOT NULL ORDER BY r.created_at, r.rowid`,
-      )
-      .all(run['organization_id'], run['thread_id']) as { parameters: string }[];
+  private async changeSet(run: Row, directory: string): Promise<ChangeSet | string> {
+    const rows = await this.db.all<{ parameters: string }>(
+      `SELECT r.parameters FROM agent_action_requests r
+       JOIN agent_runs ru ON ru.id=r.run_id AND ru.organization_id=r.organization_id
+       JOIN agent_run_steps s ON s.id=r.step_id AND s.status='COMPLETED'
+       JOIN agent_execution_grants g ON g.request_id=r.id
+       WHERE r.organization_id=? AND ru.thread_id=? AND r.action='repository.write'
+       AND r.parameters IS NOT NULL ORDER BY r.created_at, r.seq`,
+      String(run['organization_id']),
+      String(run['thread_id']),
+    );
     const latest = new Map<string, string>();
     for (const row of rows) {
       const operation = JSON.parse(row.parameters) as {
@@ -765,18 +800,5 @@ export class ActionGateway {
           }
         : {}),
     };
-  }
-
-  private transaction<T>(work: () => T): T {
-    if (this.db.isTransaction) return work();
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = work();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
   }
 }

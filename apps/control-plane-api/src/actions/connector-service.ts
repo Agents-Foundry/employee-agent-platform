@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { Actor, ConnectorConnection, ConnectorProvider } from '@agents-foundry/contracts';
 import {
@@ -11,16 +10,8 @@ import {
   OrganizationDomainError,
   type OrganizationStructureService,
 } from '../organization/structure-service.js';
-
-type Row = Record<string, unknown>;
-type Audit = (
-  actorId: string,
-  eventType: string,
-  resourceType: string,
-  resourceId: string,
-  metadata: object,
-  organizationId: string,
-) => void;
+import { constraintKind, type PgStore, type Row } from '../db/pg-store.js';
+import type { Audit } from './action-policy-service.js';
 
 const unique = (values: string[]) => new Set(values).size === values.length;
 const jiraSettings = z
@@ -60,36 +51,40 @@ const privateSuffixes = ['.localhost', '.local', '.internal', '.lan', '.home.arp
  */
 export class ConnectorService {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: PgStore,
     private readonly structure: OrganizationStructureService,
     private readonly audit: Audit,
     private readonly options: { allowPrivateNetwork?: boolean } = {},
   ) {}
 
-  list(actor: Actor): ConnectorConnection[] {
-    this.structure.authorize(actor);
-    return (
-      this.db
-        .prepare(
-          'SELECT * FROM organization_connector_connections WHERE organization_id=? ORDER BY status, name COLLATE NOCASE, id',
-        )
-        .all(actor.organizationId) as Row[]
-    ).map((row) => this.map(row));
+  private asAdmin<T>(actor: Actor, work: () => Promise<T>): Promise<T> {
+    return this.db.tenant(actor.organizationId, async () => {
+      await this.structure.authorize(actor);
+      return work();
+    });
   }
 
-  create(actor: Actor, raw: unknown): ConnectorConnection {
+  list(actor: Actor): Promise<ConnectorConnection[]> {
+    return this.asAdmin(actor, async () =>
+      (
+        await this.db.all(
+          'SELECT * FROM organization_connector_connections WHERE organization_id=? ORDER BY status, lower(name), id',
+          actor.organizationId,
+        )
+      ).map((row) => this.map(row)),
+    );
+  }
+
+  async create(actor: Actor, raw: unknown): Promise<ConnectorConnection> {
     const input = createSchema.parse(raw);
     const baseUrl = this.normalizeUrl(input.baseUrl);
-    this.structure.authorize(actor);
-    const id = randomUUID();
-    const now = new Date().toISOString();
     try {
-      this.db
-        .prepare(
+      return await this.asAdmin(actor, async () => {
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        await this.db.run(
           `INSERT INTO organization_connector_connections (id,organization_id,provider,name,base_url,secret_ref,settings,
            status,version,created_by,created_at,updated_by,updated_at) VALUES (?,?,?,?,?,?,?,'ACTIVE',1,?,?,?,?)`,
-        )
-        .run(
           id,
           actor.organizationId,
           input.provider,
@@ -102,61 +97,72 @@ export class ConnectorService {
           actor.id,
           now,
         );
+        await this.audit(
+          actor.id,
+          'connector.connection.created',
+          'connector_connection',
+          id,
+          { provider: input.provider, name: input.name, secretRef: input.secretRef },
+          actor.organizationId,
+        );
+        return (await this.get(actor.organizationId, id))!;
+      });
     } catch (error) {
-      if (String((error as Error).message).includes('UNIQUE'))
+      if (constraintKind(error) === 'unique')
         throw new OrganizationDomainError(409, 'CONNECTION_ALREADY_ACTIVE');
       throw error;
     }
-    this.audit(
-      actor.id,
-      'connector.connection.created',
-      'connector_connection',
-      id,
-      { provider: input.provider, name: input.name, secretRef: input.secretRef },
-      actor.organizationId,
-    );
-    return this.get(actor.organizationId, id)!;
   }
 
-  disable(actor: Actor, id: string, version: number): ConnectorConnection {
-    this.structure.authorize(actor);
-    const changed = this.db
-      .prepare(
+  disable(actor: Actor, id: string, version: number): Promise<ConnectorConnection> {
+    return this.asAdmin(actor, async () => {
+      const changed = await this.db.run(
         `UPDATE organization_connector_connections SET status='DISABLED', version=version+1, updated_by=?, updated_at=?
          WHERE id=? AND organization_id=? AND status='ACTIVE' AND version=?`,
-      )
-      .run(actor.id, new Date().toISOString(), id, actor.organizationId, version);
-    if (changed.changes !== 1) {
-      if (!this.get(actor.organizationId, id))
-        throw new OrganizationDomainError(404, 'CONNECTION_NOT_FOUND');
-      throw new OrganizationDomainError(409, 'CONNECTION_VERSION_CONFLICT');
-    }
-    this.audit(
-      actor.id,
-      'connector.connection.disabled',
-      'connector_connection',
-      id,
-      {},
-      actor.organizationId,
-    );
-    return this.get(actor.organizationId, id)!;
+        actor.id,
+        new Date().toISOString(),
+        id,
+        actor.organizationId,
+        version,
+      );
+      if (changed.changes !== 1) {
+        if (!(await this.get(actor.organizationId, id)))
+          throw new OrganizationDomainError(404, 'CONNECTION_NOT_FOUND');
+        throw new OrganizationDomainError(409, 'CONNECTION_VERSION_CONFLICT');
+      }
+      await this.audit(
+        actor.id,
+        'connector.connection.disabled',
+        'connector_connection',
+        id,
+        {},
+        actor.organizationId,
+      );
+      return (await this.get(actor.organizationId, id))!;
+    });
   }
 
   /** The single active connection for a provider in a tenant, if any. */
-  active(organizationId: string, provider: ConnectorProvider): ConnectorConnection | null {
-    const row = this.db
-      .prepare(
+  active(organizationId: string, provider: ConnectorProvider): Promise<ConnectorConnection | null> {
+    return this.db.tenant(organizationId, async () => {
+      const row = await this.db.get(
         `SELECT * FROM organization_connector_connections WHERE organization_id=? AND provider=? AND status='ACTIVE'`,
-      )
-      .get(organizationId, provider) as Row | undefined;
-    return row ? this.map(row) : null;
+        organizationId,
+        provider,
+      );
+      return row ? this.map(row) : null;
+    });
   }
 
-  get(organizationId: string, id: string): ConnectorConnection | null {
-    const row = this.db
-      .prepare('SELECT * FROM organization_connector_connections WHERE id=? AND organization_id=?')
-      .get(id, organizationId) as Row | undefined;
-    return row ? this.map(row) : null;
+  get(organizationId: string, id: string): Promise<ConnectorConnection | null> {
+    return this.db.tenant(organizationId, async () => {
+      const row = await this.db.get(
+        'SELECT * FROM organization_connector_connections WHERE id=? AND organization_id=?',
+        id,
+        organizationId,
+      );
+      return row ? this.map(row) : null;
+    });
   }
 
   /**

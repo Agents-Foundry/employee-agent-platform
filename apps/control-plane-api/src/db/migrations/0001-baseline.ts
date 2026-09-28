@@ -4,7 +4,7 @@
  * - triggers are PL/pgSQL and raise the same codes;
  * - case-insensitive uniqueness uses `lower()` indexes;
  * - `messages` and `agent_assignments` carry `organization_id` so they can be isolated;
- * - `provisioning_requests` and `audit_events` get an insertion sequence instead of `rowid`;
+ * - tables that SQLite ordered by `rowid` get an insertion sequence, `seq`;
  * - integers are `bigint` (epoch-millisecond expiries exceed 32 bits).
  */
 export const baselineSql = String.raw`
@@ -208,7 +208,8 @@ CREATE TABLE agents (
  team text NOT NULL,
  status text NOT NULL,
  capabilities text NOT NULL,
- installation_id text
+ installation_id text,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE
 );
 CREATE UNIQUE INDEX agents_tenant_id ON agents(organization_id,id);
 CREATE INDEX agents_installation ON agents(organization_id,installation_id) WHERE installation_id IS NOT NULL;
@@ -268,6 +269,7 @@ CREATE TABLE messages (
  author text NOT NULL,
  content text NOT NULL,
  created_at text NOT NULL,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  FOREIGN KEY (organization_id, conversation_id) REFERENCES conversations(organization_id, id)
 );
 CREATE INDEX messages_conversation ON messages(organization_id, conversation_id, created_at);
@@ -279,7 +281,8 @@ CREATE TABLE approvals (
  action text NOT NULL, resource_type text NOT NULL, resource_id text NOT NULL,
  risk text NOT NULL, summary text NOT NULL, status text NOT NULL,
  decided_by text, decided_at text, created_at text NOT NULL,
- run_id text, step_id text, expires_at text
+ run_id text, step_id text, expires_at text,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE
 );
 CREATE INDEX idx_approvals_status ON approvals(status, created_at);
 CREATE INDEX approvals_run ON approvals(organization_id,run_id) WHERE run_id IS NOT NULL;
@@ -633,6 +636,7 @@ CREATE TABLE agent_threads (
  status text NOT NULL CHECK(status IN ('ACTIVE','ARCHIVED')),
  created_at text NOT NULL,
  updated_at text NOT NULL,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  UNIQUE(organization_id,id),
  FOREIGN KEY(organization_id,employee_id) REFERENCES employees(organization_id,id),
  FOREIGN KEY(organization_id,agent_id) REFERENCES agents(organization_id,id),
@@ -659,6 +663,7 @@ CREATE TABLE agent_runs (
  updated_at text NOT NULL,
  started_at text,
  completed_at text,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  UNIQUE(organization_id,id),
  FOREIGN KEY(organization_id,thread_id) REFERENCES agent_threads(organization_id,id),
  FOREIGN KEY(organization_id,employee_id) REFERENCES employees(organization_id,id),
@@ -760,6 +765,7 @@ CREATE TABLE agent_artifacts (
  retention_policy text NOT NULL CHECK(retention_policy IN ('EPHEMERAL','STANDARD_30D','EXTENDED_365D','LEGAL_HOLD')),
  created_at text NOT NULL,
  created_by text NOT NULL,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  FOREIGN KEY(organization_id,run_id) REFERENCES agent_runs(organization_id,id),
  FOREIGN KEY(organization_id,thread_id) REFERENCES agent_threads(organization_id,id),
  FOREIGN KEY(organization_id,step_id) REFERENCES agent_run_steps(organization_id,id)
@@ -802,6 +808,7 @@ CREATE TABLE agent_run_leases (
  heartbeat_at text NOT NULL,
  lease_expires_at text NOT NULL,
  closed_at text,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  FOREIGN KEY(organization_id,run_id) REFERENCES agent_runs(organization_id,id)
 );
 CREATE INDEX agent_run_leases_runtime ON agent_run_leases(runtime_id,state);
@@ -864,6 +871,7 @@ CREATE TABLE agent_action_requests (
  policy_id text,
  policy_version text,
  change_set text CHECK(change_set IS NULL OR af_json_valid(change_set)),
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  CHECK((decision='APPROVAL_REQUIRED') = (approval_id IS NOT NULL)),
  FOREIGN KEY(organization_id,run_id) REFERENCES agent_runs(organization_id,id),
  FOREIGN KEY(organization_id,step_id) REFERENCES agent_run_steps(organization_id,id)
@@ -921,6 +929,7 @@ CREATE TABLE agent_execution_grants (
  signed_grant text NOT NULL CHECK(af_json_valid(signed_grant)),
  issued_at text NOT NULL,
  expires_at text NOT NULL,
+ seq bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
  FOREIGN KEY(organization_id,run_id) REFERENCES agent_runs(organization_id,id)
 );
 CREATE TRIGGER agent_execution_grants_no_update BEFORE UPDATE ON agent_execution_grants
@@ -964,14 +973,20 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_members ON users USING (EXISTS (
  SELECT 1 FROM organization_memberships m WHERE m.user_id = users.id));
+-- Identities are sign-in records; a tenant sees only its own employees' identities.
+ALTER TABLE identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE identities FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_employees ON identities USING (EXISTS (
+ SELECT 1 FROM employees e WHERE e.id = identities.employee_id));
 ALTER TABLE account_password_credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE account_password_credentials FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_members ON account_password_credentials USING (EXISTS (
  SELECT 1 FROM organization_memberships m WHERE m.user_id = account_password_credentials.user_id));
 
 -- Privileges --------------------------------------------------------------------------------------
--- af_tenant: tenant tables only. Sign-in secrets, sessions, invitations and runtime nonces are
--- not granted at all, so tenant-scoped code cannot read them even by mistake.
+-- af_tenant: tenant tables, plus the narrow column grants below. Password hashes, session and
+-- invitation tokens, login transactions and runtime nonces are not granted at all, so
+-- tenant-scoped code cannot read them even by mistake.
 GRANT USAGE ON SCHEMA public TO af_tenant, af_platform;
 GRANT SELECT, INSERT, UPDATE ON
  employees, organization_memberships, organization_agent_installations, agents, agent_manifests,
@@ -987,7 +1002,13 @@ GRANT DELETE ON organization_action_policies TO af_tenant;
 GRANT SELECT, UPDATE ON organizations TO af_tenant;
 GRANT SELECT (id, email, display_name, status, created_at) ON users TO af_tenant;
 GRANT SELECT (user_id) ON account_password_credentials TO af_tenant;
+-- Admins revoke their own organization's sessions and re-enable their employees' local sign-in;
+-- session hashes and identity subjects stay unreadable.
+GRANT SELECT (user_id, organization_id), DELETE ON auth_sessions TO af_tenant;
+GRANT SELECT (issuer, employee_id, user_id, enabled), UPDATE (enabled) ON identities TO af_tenant;
 GRANT SELECT ON catalog_blueprint_versions TO af_tenant;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO af_platform;
+-- Migration history belongs to the schema owner.
+REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM af_platform;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO af_tenant, af_platform;
 `;

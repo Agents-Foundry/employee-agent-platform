@@ -14,8 +14,6 @@ export interface BootstrapOptions {
   tenant: LoginRole;
   /** The API's platform connection: member of af_platform, BYPASSRLS. */
   platform: LoginRole;
-  /** Clone from this database instead of creating an empty one (tests). */
-  template?: string;
 }
 
 const NAME = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -54,9 +52,7 @@ export async function bootstrapDatabase(adminUrl: string, options: BootstrapOpti
     ]);
     if (!exists.rowCount) {
       await admin.query(
-        options.template
-          ? `CREATE DATABASE ${name(options.database)} TEMPLATE ${name(options.template)} OWNER ${name(options.owner.name)}`
-          : `CREATE DATABASE ${name(options.database)} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' OWNER ${name(options.owner.name)}`,
+        `CREATE DATABASE ${name(options.database)} TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' OWNER ${name(options.owner.name)}`,
       );
     }
     await admin.query(
@@ -86,6 +82,24 @@ export function roleUrl(adminUrl: string, database: string, role: LoginRole): st
   url.password = role.password;
   url.pathname = `/${database}`;
   return url.href;
+}
+
+/** Clones a database from a template (tests); no session may be connected to the template. */
+export async function cloneDatabase(
+  adminUrl: string,
+  database: string,
+  template: string,
+  owner: string,
+): Promise<void> {
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(
+      `CREATE DATABASE ${name(database)} TEMPLATE ${name(template)} OWNER ${name(owner)}`,
+    );
+  } finally {
+    await admin.end();
+  }
 }
 
 /** Drops a database created for tests. */

@@ -37,14 +37,14 @@ export function configureOrganizationRoutes(
     }
     next();
   };
-  app.get('/api/organization/members', admin, (_req, res) =>
-    res.json(db.listMembers(res.locals['actor'].organizationId)),
+  app.get('/api/organization/members', admin, async (_req, res) =>
+    res.json(await db.listMembers(res.locals['actor'].organizationId)),
   );
-  app.post('/api/organization/invitations', admin, (req, res) => {
+  app.post('/api/organization/invitations', admin, async (req, res) => {
     if (config.mode !== 'password') return;
     const input = memberInput.parse(req.body);
     try {
-      const invitation = db.inviteEmployee(res.locals['actor'], input);
+      const invitation = await db.inviteEmployee(res.locals['actor'], input);
       res.status(201).json({
         employeeId: invitation.employeeId,
         expiresAt: invitation.expiresAt,
@@ -64,8 +64,8 @@ export function configureOrganizationRoutes(
       throw error;
     }
   });
-  app.post('/api/organization/members/:id/disable', admin, (req, res) => {
-    db.disableMember(res.locals['actor'], z.string().uuid().parse(req.params['id']));
+  app.post('/api/organization/members/:id/disable', admin, async (req, res) => {
+    await db.disableMember(res.locals['actor'], z.string().uuid().parse(req.params['id']));
     res.status(204).end();
   });
   const linkLimit = rateLimit({
@@ -76,7 +76,7 @@ export function configureOrganizationRoutes(
     legacyHeaders: false,
     message: { error: 'RECOVERY_RATE_LIMITED' },
   });
-  app.post('/api/organization/members/:id/recovery-link', admin, linkLimit, (req, res) => {
+  app.post('/api/organization/members/:id/recovery-link', admin, linkLimit, async (req, res) => {
     if (config.mode !== 'password') return;
     const { purpose } = z
       .object({ purpose: z.enum(['activate', 'reset']) })
@@ -84,7 +84,7 @@ export function configureOrganizationRoutes(
       .parse(req.body);
     const id = z.string().uuid().parse(req.params['id']);
     try {
-      const result = db.issueEmployeeLink(res.locals['actor'], id, purpose);
+      const result = await db.issueEmployeeLink(res.locals['actor'], id, purpose);
       res.status(201).json({
         employeeId: id,
         purpose,
