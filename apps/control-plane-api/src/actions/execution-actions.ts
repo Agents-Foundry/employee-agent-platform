@@ -143,10 +143,51 @@ const workspaceCommand: ExecutionAction = {
       : 'Run a project script',
 };
 
+/** A registry URL without credentials, query or fragment, compared without a trailing slash. */
+function registryKey(value: string | null): string | null {
+  try {
+    const url = value ? new URL(value) : null;
+    if (!url || url.username || url.password || url.search || url.hash) return null;
+    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Install the project's locked dependencies (ADR 0017). The registry must be the HTTPS
+ * `packageRegistryUrl` in the agent's signed configuration; the grant allows only its host,
+ * which the execution runtime's egress proxy enforces.
+ */
+const dependenciesInstall: ExecutionAction = {
+  action: 'workspace.dependencies.install',
+  operations: ['dependencies.install'],
+  resource: (operation) => ({
+    type: 'package.registry',
+    id: operation.kind === 'dependencies.install' ? (registryKey(operation.registryUrl) ?? '') : '',
+  }),
+  inScope: (operation, configuration) => {
+    const configured = registryKey(text(configuration, 'packageRegistryUrl'));
+    return (
+      operation.kind === 'dependencies.install' &&
+      configured !== null &&
+      configured.startsWith('https://') &&
+      registryKey(operation.registryUrl) === configured
+    );
+  },
+  hosts: (operation) =>
+    operation.kind === 'dependencies.install' ? [new URL(operation.registryUrl).hostname] : [],
+  summary: (operation) =>
+    operation.kind === 'dependencies.install'
+      ? `Install locked npm dependencies in ${operation.path} from ${operation.registryUrl}`
+      : 'Install dependencies',
+};
+
 const registry: Readonly<Record<string, ExecutionAction>> = {
   [repositoryRead.action]: repositoryRead,
   [repositoryWrite.action]: repositoryWrite,
   [workspaceCommand.action]: workspaceCommand,
+  [dependenciesInstall.action]: dependenciesInstall,
   [playwrightRun.action]: playwrightRun,
 };
 

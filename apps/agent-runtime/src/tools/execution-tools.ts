@@ -183,3 +183,33 @@ export class BuildTool extends ExecutionTool {
       : 'Run a project script';
   }
 }
+
+/** Catalog tool `dependencies@1.0.0`: install the project's locked npm dependencies. */
+export class DependencyTool extends ExecutionTool {
+  readonly id = 'dependencies';
+  protected readonly action = 'workspace.dependencies.install';
+  protected readonly kinds = ['dependencies.install'] as const;
+  readonly description =
+    "Install the project's locked npm dependencies (npm ci, install scripts disabled) in the " +
+    'sandbox (dependencies.install). The project needs a package-lock.json. Use the ' +
+    'packageRegistryUrl from your assignment configuration; no other registry is reachable.';
+  readonly inputSchema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind', 'path', 'registryUrl'],
+    properties: {
+      kind: { const: 'dependencies.install' },
+      path: {
+        type: 'string',
+        description: 'Workspace directory of the project, for example "repo".',
+      },
+      registryUrl: { type: 'string', description: 'The configured packageRegistryUrl.' },
+    },
+  };
+
+  summarize(input: ExecutionOperation): string {
+    return input.kind === 'dependencies.install'
+      ? `Install dependencies in ${input.path} from ${input.registryUrl}`
+      : 'Install dependencies';
+  }
+}
