@@ -108,7 +108,9 @@ model gateway, signed transport and approval pause/resume) and Phase D (the Acti
 Policy v2, expiring payload-bound approvals, single-use connector execution and Jira issue
 creation), Phase E (a separate execution runtime that runs git and Playwright only under
 control-plane-signed, single-use grants) and Phase F (QA stories run end to end on the
-generic runtime behind `QA_GENERIC_RUNTIME_ENABLED`) are implemented. Generic runs are
+generic runtime behind `QA_GENERIC_RUNTIME_ENABLED`) and Phase G (a Frontend Engineer role
+package running on the same runtimes, governed file writes, project scripts and draft pull
+requests, and a container sandbox) are implemented. Generic runs are
 off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
 
 - [Architecture V2](docs/architecture-v2.md) and the [gap analysis](docs/architecture-v2-gap-analysis.md)
@@ -116,7 +118,7 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
   [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0014](docs/adr/0014-qa-on-the-generic-runtime.md)
+  [0015](docs/adr/0015-frontend-engineer-and-sandboxed-execution.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

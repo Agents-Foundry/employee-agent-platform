@@ -113,12 +113,18 @@ describe('catalog of record', () => {
       try {
         // 1.1.0 and 1.2.0 stopped shipping but stay resolvable from the catalog of record.
         expect(db.catalog.bundle(qa.id, '1.1.0').blueprint.mission).toBe(qa.mission);
-        expect(db.catalog.summaries().map((s) => [s.version, s.latest])).toEqual([
+        const qaSummaries = db.catalog.summaries().filter((s) => s.id === qa.id);
+        expect(qaSummaries.map((s) => [s.version, s.latest])).toEqual([
           ['1.3.0', true],
           ['1.2.0', false],
           ['1.1.0', false],
         ]);
-        expect(db.catalog.legacyBlueprints().map((b) => b.version)).toEqual(['1.3.0']);
+        expect(
+          db.catalog
+            .legacyBlueprints()
+            .filter((b) => b.id === qa.id)
+            .map((b) => b.version),
+        ).toEqual(['1.3.0']);
         const sql = (db as unknown as { db: DatabaseSync }).db;
         expect(() => sql.prepare("UPDATE catalog_blueprint_versions SET digest='x'").run()).toThrow(
           'CATALOG_VERSION_IMMUTABLE',
@@ -139,33 +145,37 @@ describe('catalog of record', () => {
     try {
       const app = createDemoApp(db);
       const legacy = (await demoRequest(app).get('/api/blueprints').expect(200)).body;
-      // The legacy shape serves the latest version only (1.2.0 since Phase D).
-      expect(legacy).toEqual([
-        {
-          id: 'engineering.qa-engineer',
-          version: '1.2.0',
-          title: 'QA Engineer',
-          department: 'Engineering',
-          mission: latest.mission,
-          skills: [
-            'story-analysis',
-            'risk-based-test-planning',
-            'regression-analysis',
-            'defect-reporting',
-          ],
-          questionnaire: qa.questionnaire.map(({ scope: _scope, ...question }) => question),
-          capabilities: [
-            { action: 'repository.read', outcome: 'ALLOW' },
-            { action: 'jira.read', outcome: 'ALLOW' },
-            { action: 'qa.plan', outcome: 'ALLOW' },
-            { action: 'qa.execute_playwright', outcome: 'REQUIRE_APPROVAL' },
-            { action: 'jira.issue.create', outcome: 'REQUIRE_APPROVAL' },
-            { action: 'repository.pull_request.create', outcome: 'REQUIRE_APPROVAL' },
-            { action: 'production.deploy', outcome: 'DENY' },
-          ],
-        },
+      // The legacy shape serves the latest version of each blueprint (QA: 1.2.0 since Phase D).
+      expect(legacy.map((b: { id: string }) => b.id)).toEqual([
+        'engineering.frontend-engineer',
+        'engineering.qa-engineer',
       ]);
-      const summaries = (await demoRequest(app).get('/api/catalog/v1/blueprints').expect(200)).body;
+      expect(legacy[1]).toEqual({
+        id: 'engineering.qa-engineer',
+        version: '1.2.0',
+        title: 'QA Engineer',
+        department: 'Engineering',
+        mission: latest.mission,
+        skills: [
+          'story-analysis',
+          'risk-based-test-planning',
+          'regression-analysis',
+          'defect-reporting',
+        ],
+        questionnaire: qa.questionnaire.map(({ scope: _scope, ...question }) => question),
+        capabilities: [
+          { action: 'repository.read', outcome: 'ALLOW' },
+          { action: 'jira.read', outcome: 'ALLOW' },
+          { action: 'qa.plan', outcome: 'ALLOW' },
+          { action: 'qa.execute_playwright', outcome: 'REQUIRE_APPROVAL' },
+          { action: 'jira.issue.create', outcome: 'REQUIRE_APPROVAL' },
+          { action: 'repository.pull_request.create', outcome: 'REQUIRE_APPROVAL' },
+          { action: 'production.deploy', outcome: 'DENY' },
+        ],
+      });
+      const summaries = (
+        await demoRequest(app).get('/api/catalog/v1/blueprints').expect(200)
+      ).body.filter((summary: { id: string }) => summary.id === qa.id);
       expect(summaries).toEqual([
         expect.objectContaining({ id: qa.id, version: '1.2.0', latest: true }),
         expect.objectContaining({ id: qa.id, version: '1.1.0', latest: false }),
@@ -427,80 +437,26 @@ describe('organization installations', () => {
 });
 
 describe('second role through configuration only (ADR 0009)', () => {
-  it('resolves a new blueprint into a signed manifest without platform code changes', () => {
-    const catalog = clone();
-    catalog.tools.push({
-      id: 'code-editor',
-      version: '1.0.0',
-      description: 'Edit source files inside an isolated workspace.',
-      risk: 'MEDIUM',
-      executionLocation: 'EXECUTION_RUNTIME',
-      sideEffects: 'LOCAL_WRITE',
-      governedActions: [],
-      timeoutMs: 60_000,
-    });
-    catalog.skills.push({
-      id: 'frontend-implementation',
-      version: '1.0.0',
-      title: 'Frontend implementation',
-      description: 'Implement UI changes that follow the repository architecture.',
-      requires: {
-        tools: ['code-editor', 'repository'],
-        connectorCapabilities: ['sourceControl.read'],
-      },
-      activatesWhen: { workflows: ['implement-story'] },
-    });
-    catalog.workflows.push({
-      id: 'implement-story',
-      version: '1.0.0',
-      title: 'Implement story',
-      description: 'Implement, verify and propose a change.',
-      steps: [
-        { id: 'implement', title: 'Implement', skill: 'frontend-implementation' },
-        {
-          id: 'propose',
-          title: 'Open pull request',
-          skill: 'frontend-implementation',
-          action: 'repository.pull_request.create',
-        },
-      ],
-    });
-    catalog.blueprints.push({
-      ...structuredClone(qa),
-      id: 'engineering.frontend-engineer',
-      version: '0.1.0',
-      title: 'Frontend Engineer',
-      role: 'frontend-engineer',
-      mission: 'Implement approved frontend changes and propose them for review.',
-      persona: { profile: 'frontend-engineer-default' },
-      model: { profile: 'frontend-default' },
-      skills: [{ id: 'frontend-implementation', version: '1.0.0' }],
-      tools: [
-        { id: 'code-editor', version: '1.0.0' },
-        { id: 'repository', version: '1.0.0' },
-      ],
-      workflows: [{ id: 'implement-story', version: '1.0.0' }],
-      connectors: [qa.connectors[1]!],
-      mcp: [],
-      policy: {
-        profile: 'frontend-standard',
-        actions: ['repository.read', 'repository.pull_request.create', 'production.deploy'],
-      },
-      evaluations: { suite: 'frontend-engineer-v0' },
-      questionnaire: [
-        { id: 'projectName', label: 'Project name', type: 'text', required: true, scope: 'AGENT' },
-        qa.questionnaire.find((q) => q.id === 'sourceControl')!,
-      ],
-    });
-    const db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true, catalog });
+  it('resolves the shipped Frontend Engineer into a signed manifest without platform code', () => {
+    const frontend = builtInCatalog.blueprints.find(
+      (blueprint) => blueprint.id === 'engineering.frontend-engineer',
+    )!;
+    expect(frontend.version).toBe('1.0.0');
+    const db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
     try {
       const pending = db.requestProvisioning('employee_qa_demo', {
-        blueprintId: 'engineering.frontend-engineer',
-        blueprintVersion: '0.1.0',
+        blueprintId: frontend.id,
+        blueprintVersion: frontend.version,
         provider: 'test',
         model: 'test-model',
         credentialMode: 'ORGANIZATION_MANAGED',
-        answers: { projectName: 'Storefront', sourceControl: ['GitHub'] },
+        answers: {
+          projectName: 'Storefront',
+          repositoryUrl: 'https://github.com/acme/storefront',
+          projectScripts: 'lint, test',
+          issueTracker: ['Jira'],
+          sourceControl: ['GitHub'],
+        },
       });
       const { manifest } = db.decideProvisioning(
         pending.id,
@@ -512,26 +468,43 @@ describe('second role through configuration only (ADR 0009)', () => {
       if (manifest?.payload.apiVersion !== 'agents-foundry/v2') throw new Error('EXPECTED_V2');
       expect(manifest.payload).toMatchObject({
         identity: { role: 'frontend-engineer', name: 'Frontend Engineer · Storefront' },
-        skills: [{ id: 'frontend-implementation', version: '1.0.0' }],
-        tools: ['code-editor', 'repository'],
-        workflows: ['implement-story'],
-        connectors: [{ id: 'github', capabilities: ['sourceControl.read'] }],
-        mcp: [],
+        runtime: { profile: 'standard-agent', isolation: 'sandboxed' },
+        tools: [
+          'repository',
+          'code-editor',
+          'build',
+          'source-control',
+          'issue-tracker',
+          'artifact',
+        ],
+        workflows: ['implement-ui-change'],
+        connectors: [
+          { id: 'jira', capabilities: ['issueTracker.read'] },
+          { id: 'github', capabilities: ['sourceControl.read', 'sourceControl.write'] },
+        ],
+        configuration: {
+          repositoryUrl: 'https://github.com/acme/storefront',
+          projectScripts: 'lint, test',
+        },
       });
       expect(manifest.payload.policies.capabilities).toEqual([
         { action: 'repository.read', outcome: 'ALLOW' },
+        { action: 'repository.write', outcome: 'ALLOW' },
+        { action: 'workspace.command', outcome: 'ALLOW' },
+        { action: 'jira.read', outcome: 'ALLOW' },
         { action: 'repository.pull_request.create', outcome: 'REQUIRE_APPROVAL' },
         { action: 'production.deploy', outcome: 'DENY' },
       ]);
       const agentId = manifestSubject(manifest.payload).agentId;
       expect(db.getManifest(agentId, 'org_agents_foundry')).toEqual(manifest);
-      // The QA role is unaffected by the second role's presence.
       expect(
-        db.catalog
-          .legacyBlueprints()
-          .map((b) => b.id)
-          .sort(),
-      ).toEqual(['engineering.frontend-engineer', 'engineering.qa-engineer']);
+        db.pinnedWorkflow(manifest, 'implement-ui-change')?.steps.map((step) => step.action),
+      ).toEqual([
+        'jira.read',
+        'repository.write',
+        'workspace.command',
+        'repository.pull_request.create',
+      ]);
     } finally {
       db.close();
     }

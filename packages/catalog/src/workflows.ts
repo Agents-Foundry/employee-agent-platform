@@ -2,6 +2,34 @@ import type { WorkflowDefinition } from '../../contracts/src/catalog.js';
 
 export const workflows: WorkflowDefinition[] = [
   {
+    id: 'implement-ui-change',
+    version: '1.0.0',
+    title: 'Implement UI change',
+    description:
+      'Implement one work item in the workspace, verify it with the project scripts and propose it as a draft pull request.',
+    steps: [
+      { id: 'analyze', title: 'Scope the change', skill: 'change-scoping', action: 'jira.read' },
+      {
+        id: 'implement',
+        title: 'Implement the change',
+        skill: 'frontend-implementation',
+        action: 'repository.write',
+      },
+      {
+        id: 'verify',
+        title: 'Run lint, tests and build',
+        skill: 'frontend-verification',
+        action: 'workspace.command',
+      },
+      {
+        id: 'propose',
+        title: 'Open a draft pull request',
+        skill: 'change-proposal',
+        action: 'repository.pull_request.create',
+      },
+    ],
+  },
+  {
     id: 'validate-story',
     version: '1.0.0',
     title: 'Validate story',

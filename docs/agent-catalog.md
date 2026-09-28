@@ -35,12 +35,12 @@ Not implemented yet:
 All shapes are in `packages/contracts/src/catalog.ts`. Strict schemas are in `catalog-schemas.ts`,
 so role-package repositories can validate against the same contract.
 
-| Kind       | Key fields                                                                                    |
-| ---------- | --------------------------------------------------------------------------------------------- |
-| Skill      | `id`, `version`, `requires.tools`, `requires.connectorCapabilities`, `activatesWhen.workflows` |
-| Tool       | `id`, `version`, `risk`, `executionLocation`, `sideEffects`, `governedActions`, `timeoutMs`   |
-| Workflow   | `id`, `version`, `steps[]` of `{ id, title, skill, action? }`                                 |
-| Blueprint  | Identity, persona, runtime, model profile, pinned skill/tool/workflow versions, connector requirements with answer→provider mappings, conditional MCP, memory, knowledge, `policy.actions`, evaluation suite, and a questionnaire whose questions are scoped `INSTALLATION` or `AGENT` |
+| Kind      | Key fields                                                                                                                                                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Skill     | `id`, `version`, `requires.tools`, `requires.connectorCapabilities`, `activatesWhen.workflows`                                                                                                                                                                                         |
+| Tool      | `id`, `version`, `risk`, `executionLocation`, `sideEffects`, `governedActions`, `timeoutMs`                                                                                                                                                                                            |
+| Workflow  | `id`, `version`, `steps[]` of `{ id, title, skill, action? }`                                                                                                                                                                                                                          |
+| Blueprint | Identity, persona, runtime, model profile, pinned skill/tool/workflow versions, connector requirements with answer→provider mappings, conditional MCP, memory, knowledge, `policy.actions`, evaluation suite, and a questionnaire whose questions are scoped `INSTALLATION` or `AGENT` |
 
 Blueprints list the **actions** a role may ever request. The **outcome** of each action
 (`ALLOW`, `REQUIRE_APPROVAL` or `DENY`) always comes from the policy engine at resolution time,
@@ -81,12 +81,12 @@ to the blueprint's `INSTALLATION`-scoped questions. An agent created from it sup
 `AGENT`-scoped answers. Sending an installation-scoped answer is rejected, so employees' agents
 cannot diverge from organization settings.
 
-| Route under `/api/organization/agent-installations` | Method | Notes                                              |
-| --------------------------------------------------- | ------ | -------------------------------------------------- |
-| `/`                                                 | GET    | `?status=ACTIVE\|RETIRED\|all`                     |
-| `/`                                                 | POST   | `{ name, blueprintId, blueprintVersion, configuration }` |
+| Route under `/api/organization/agent-installations` | Method | Notes                                                             |
+| --------------------------------------------------- | ------ | ----------------------------------------------------------------- |
+| `/`                                                 | GET    | `?status=ACTIVE\|RETIRED\|all`                                    |
+| `/`                                                 | POST   | `{ name, blueprintId, blueprintVersion, configuration }`          |
 | `/:id`                                              | PUT    | `{ name, blueprintVersion, configuration, version }` (optimistic) |
-| `/:id/retire`                                       | POST   | `{ version }`; retirement is final                 |
+| `/:id/retire`                                       | POST   | `{ version }`; retirement is final                                |
 
 - Password-mode organization admins only, rechecked against live identity records.
 - The tenant comes from the session, and unknown fields (including `organizationId`) are
@@ -100,16 +100,17 @@ cannot diverge from organization settings.
 
 ## Catalog API
 
-| Route                                                | Who                  |
-| ---------------------------------------------------- | -------------------- |
-| `GET /api/catalog/v1/blueprints`                     | Any authenticated actor |
+| Route                                                  | Who                                                                   |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| `GET /api/catalog/v1/blueprints`                       | Any authenticated actor                                               |
 | `GET /api/catalog/v1/blueprints/:id/versions/:version` | Any authenticated actor; full bundle with policy-derived capabilities |
-| `GET /api/blueprints` (legacy)                       | Unchanged shape: the latest version of each blueprint |
+| `GET /api/blueprints` (legacy)                         | Unchanged shape: the latest version of each blueprint                 |
 
 ## Adding a role
 
 Add skills, tools, workflows and a blueprint as data, then add the entries to
-`packages/catalog/src/index.ts`. No platform code changes are needed. The catalog test suite
-proves this with a synthetic Frontend Engineer, which resolves into a signed manifest without
-touching the resolver. A new governed action still needs a policy-engine decision first, by
-design.
+`packages/catalog/src/index.ts`. No platform code changes are needed. The Frontend Engineer
+(Phase G, ADR 0015) is the proof. It ships as data only and runs end to end on the same
+runtimes, and a test checks that platform code names no role outside legacy QA compatibility.
+A new governed action still needs a policy-engine decision, and a new capability (a connector
+or an execution operation) needs platform support first, by design.

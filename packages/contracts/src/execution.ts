@@ -273,7 +273,12 @@ export interface ResourceLimits {
 export type ExecutionOperation =
   | { kind: 'command'; command: string; args: string[]; cwd: string }
   | { kind: 'file.read'; path: string }
-  | { kind: 'file.write'; path: string; contentArtifactId: string }
+  /**
+   * Write UTF-8 text inside the workspace (Phase G). Replaces the never-implemented
+   * `contentArtifactId` form: no producer or provider ever used it, and inline content is
+   * what the approval digest and the pull-request change set bind to.
+   */
+  | { kind: 'file.write'; path: string; content: string }
   | { kind: 'git.checkout'; repositoryUrl: string; ref: string; path: string }
   | { kind: 'git.status'; path: string }
   /** `path` is the workspace-relative project directory (default: workspace root). */

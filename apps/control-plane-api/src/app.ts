@@ -159,6 +159,8 @@ export function createApp(
     genericRuntimeEnabled: database.genericRuntimeEnabled,
     loadManifest: (agentId, organizationId, employeeId) =>
       database.getManifest(agentId, organizationId, employeeId),
+    loadConversation: (conversationId, organizationId, employeeId) =>
+      database.getConversation(conversationId, organizationId, employeeId),
   });
   configureCatalogRoutes(app, database.catalog, database.installations, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);

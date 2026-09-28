@@ -38,6 +38,20 @@ interface Recipient {
       <button type="button" (click)="refresh()" [disabled]="busy() || loading()">
         Refresh employees and assignments
       </button>
+      @if (blueprints().length > 1) {
+        <label
+          >Role<select
+            name="blueprintId"
+            [ngModel]="blueprint()?.id"
+            (ngModelChange)="chooseBlueprint($event)"
+            [disabled]="busy()"
+          >
+            @for (option of blueprints(); track option.id) {
+              <option [value]="option.id">{{ option.title }} · {{ option.version }}</option>
+            }
+          </select></label
+        >
+      }
       @if (blueprint(); as definition) {
         <form #agentForm="ngForm" (ngSubmit)="agentForm.valid && create()">
           <h3>{{ definition.title }} · {{ definition.version }}</h3>
@@ -273,6 +287,7 @@ export class AgentAdmin implements OnInit {
   readonly auth = inject(AuthSession);
   private readonly http = inject(HttpClient);
   readonly created = output<void>();
+  readonly blueprints = signal<AgentBlueprint[]>([]);
   readonly blueprint = signal<AgentBlueprint | null>(null);
   readonly recipients = signal<Recipient[]>([]);
   readonly assignments = signal<AgentAssignment[]>([]);
@@ -296,6 +311,15 @@ export class AgentAdmin implements OnInit {
     this.selected = checked
       ? [...new Set([...this.selected, id])]
       : this.selected.filter((value) => value !== id);
+  }
+  /** Switch role: answers and installations belong to one blueprint, so they reset. */
+  chooseBlueprint(id: string) {
+    const next = this.blueprints().find((candidate) => candidate.id === id);
+    if (!next || next.id === this.blueprint()?.id) return;
+    this.blueprint.set(next);
+    this.answers = {};
+    this.installationId = '';
+    this.pending = null;
   }
   matchingInstallations(blueprint: AgentBlueprint) {
     return this.installations().filter(
@@ -333,7 +357,10 @@ export class AgentAdmin implements OnInit {
       ]);
       this.installations.set(installations);
       if (!this.selectedInstallation()) this.installationId = '';
-      this.blueprint.set(blueprints[0] ?? null);
+      this.blueprints.set(blueprints);
+      // Keep the chosen role across refreshes; otherwise start with the first one listed.
+      const current = this.blueprint()?.id;
+      this.blueprint.set(blueprints.find((b) => b.id === current) ?? blueprints[0] ?? null);
       this.recipients.set(
         recipients.filter((member) => member.role === 'EMPLOYEE' && member.status === 'ACTIVE'),
       );

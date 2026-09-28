@@ -41,4 +41,42 @@ export const skills: SkillDefinition[] = [
     },
     activatesWhen: { workflows: ['validate-story', 'regression-test', 'post-release-validation'] },
   },
+  {
+    id: 'change-scoping',
+    version: '1.0.0',
+    title: 'Change scoping',
+    description: 'Read a work item and locate the components, routes and tests it affects.',
+    requires: {
+      tools: ['issue-tracker', 'repository'],
+      connectorCapabilities: ['issueTracker.read'],
+    },
+    activatesWhen: { workflows: ['implement-ui-change'] },
+  },
+  {
+    id: 'frontend-implementation',
+    version: '1.0.0',
+    title: 'Frontend implementation',
+    description: "Make focused UI changes that follow the repository's existing architecture.",
+    requires: {
+      tools: ['repository', 'code-editor'],
+      connectorCapabilities: ['sourceControl.read'],
+    },
+    activatesWhen: { workflows: ['implement-ui-change'] },
+  },
+  {
+    id: 'frontend-verification',
+    version: '1.0.0',
+    title: 'Frontend verification',
+    description: "Run the project's lint, test and build scripts and fix what they report.",
+    requires: { tools: ['build', 'artifact'], connectorCapabilities: [] },
+    activatesWhen: { workflows: ['implement-ui-change'] },
+  },
+  {
+    id: 'change-proposal',
+    version: '1.0.0',
+    title: 'Change proposal',
+    description: 'Describe verified changes and propose them as a draft pull request for review.',
+    requires: { tools: ['source-control'], connectorCapabilities: ['sourceControl.write'] },
+    activatesWhen: { workflows: ['implement-ui-change'] },
+  },
 ];

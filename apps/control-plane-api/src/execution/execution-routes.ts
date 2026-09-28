@@ -16,9 +16,12 @@ const startRunSchema = z
     agentId: z.string().min(1).max(120),
     title: z.string().trim().min(1).max(200).optional(),
     threadId: z.uuid().optional(),
+    /** Run in this conversation's thread; its approvals and outcome are posted back to it. */
+    conversationId: z.uuid().optional(),
     task: taskSpecSchema,
   })
-  .strict();
+  .strict()
+  .refine((input) => !(input.threadId && input.conversationId), 'threadId or conversationId');
 
 export interface ExecutionRouteOptions {
   /** `GENERIC_AGENT_RUNTIME_ENABLED`: starting generic runs is off unless explicitly enabled. */
@@ -28,6 +31,12 @@ export interface ExecutionRouteOptions {
     organizationId: string,
     employeeId: string,
   ) => AnySignedAgentManifest;
+  /** The employee's own conversation; throws CONVERSATION_NOT_FOUND otherwise. */
+  loadConversation: (
+    conversationId: string,
+    organizationId: string,
+    employeeId: string,
+  ) => { id: string; title: string; agentId: string };
 }
 
 /** Strip runtime bookkeeping from a run before it reaches a browser. */
@@ -78,6 +87,11 @@ export function configureExecutionRoutes(
       throw new ExecutionError(409, 'RUNTIME_MANIFEST_V2_REQUIRED');
     if (input.task.workflow && !manifest.payload.workflows.includes(input.task.workflow))
       throw new ExecutionError(400, 'WORKFLOW_NOT_IN_MANIFEST');
+    const conversation = input.conversationId
+      ? options.loadConversation(input.conversationId, actor.organizationId, actor.id)
+      : null;
+    if (conversation && conversation.agentId !== input.agentId)
+      throw new ExecutionError(409, 'CONVERSATION_AGENT_MISMATCH');
     const run = service.createRun({
       organizationId: actor.organizationId,
       employeeId: actor.id,
@@ -86,6 +100,7 @@ export function configureExecutionRoutes(
       task: input.task,
       manifest,
       ...(input.threadId ? { threadId: input.threadId } : {}),
+      ...(conversation ? { conversation: { id: conversation.id, title: conversation.title } } : {}),
     });
     res.status(202).json(runView(run));
   });

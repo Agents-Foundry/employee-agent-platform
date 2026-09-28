@@ -22,24 +22,35 @@ type Audit = (
   organizationId: string,
 ) => void;
 
-const settingsSchema = z
+const unique = (values: string[]) => new Set(values).size === values.length;
+const jiraSettings = z
   .object({
     authEmail: z.email().max(254).optional(),
     allowedProjects: z
       .array(z.string().regex(/^[A-Z][A-Z0-9]{1,9}$/))
       .max(50)
-      .refine((keys) => new Set(keys).size === keys.length, 'duplicate project key'),
+      .refine(unique, 'duplicate project key'),
   })
   .strict();
-const createSchema = z
+/** GitHub (Phase G): repositories as `owner/name`. Stored with an empty project list. */
+const githubSettings = z
   .object({
-    provider: z.enum(connectorProviders),
-    name: z.string().trim().min(1).max(120),
-    baseUrl: z.string().max(300),
-    secretRef: z.string().regex(secretReferencePattern),
-    settings: settingsSchema,
+    allowedRepositories: z
+      .array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/))
+      .max(50)
+      .refine((names) => unique(names.map((name) => name.toLowerCase())), 'duplicate repository'),
   })
-  .strict();
+  .strict()
+  .transform((settings) => ({ allowedProjects: [] as string[], ...settings }));
+const common = {
+  name: z.string().trim().min(1).max(120),
+  baseUrl: z.string().max(300),
+  secretRef: z.string().regex(secretReferencePattern),
+};
+const createSchema = z.discriminatedUnion('provider', [
+  z.object({ provider: z.literal('jira'), ...common, settings: jiraSettings }).strict(),
+  z.object({ provider: z.literal('github'), ...common, settings: githubSettings }).strict(),
+]) satisfies z.ZodType<{ provider: (typeof connectorProviders)[number] }>;
 
 const privateSuffixes = ['.localhost', '.local', '.internal', '.lan', '.home.arpa'];
 

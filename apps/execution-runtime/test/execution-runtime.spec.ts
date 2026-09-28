@@ -1,6 +1,14 @@
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +30,7 @@ import { ExecutionArtifactStore } from '../src/artifact-store.js';
 import { ExecutionRefused, ExecutionService } from '../src/execution-service.js';
 import { GrantVerifier } from '../src/grant-verifier.js';
 import { runProcess } from '../src/process-runner.js';
+import { ContainerExecutionProvider, dockerRunArgs } from '../src/providers/container-provider.js';
 import { LocalExecutionProvider } from '../src/providers/local-provider.js';
 import { createExecutionServer } from '../src/server.js';
 import { StateStore } from '../src/state-store.js';
@@ -280,6 +289,57 @@ describe('execution runtime', () => {
     }
   });
 
+  it('writes files inside the workspace only, never through links or into .git', async () => {
+    const first = await run({ ...checkout, repositoryUrl });
+    const workspace = join(root, 'workspaces', first.workspace.id);
+    const created = await run({
+      kind: 'file.write',
+      path: 'repo/src/banner.ts',
+      content: 'export const banner = 1;\n',
+    });
+    expect(created).toMatchObject({
+      result: { status: 'SUCCEEDED' },
+      output: 'Created repo/src/banner.ts (25 bytes).',
+    });
+    expect(readFileSync(join(workspace, 'repo', 'src', 'banner.ts'), 'utf8')).toBe(
+      'export const banner = 1;\n',
+    );
+    expect(
+      (await run({ kind: 'file.write', path: 'repo/README.md', content: '# New\n' })).output,
+    ).toBe('Updated repo/README.md (6 bytes).');
+    expect((await run({ kind: 'git.status', path: 'repo' })).output).toContain(' M README.md');
+
+    // A directory link inside the workspace pointing outside it is never written through.
+    const outside = mkdtempSync(join(tmpdir(), 'af-outside-'));
+    try {
+      symlinkSync(outside, join(workspace, 'repo', 'link'), 'junction');
+      const escaped = await run({ kind: 'file.write', path: 'repo/link/x.txt', content: 'x' });
+      expect(escaped.result).toMatchObject({
+        status: 'FAILED',
+        error: { code: 'PATH_OUTSIDE_WORKSPACE' },
+      });
+      const nested = await run({ kind: 'file.write', path: 'repo/link/a/b.txt', content: 'x' });
+      expect(nested.result.error?.code).toBe('PATH_OUTSIDE_WORKSPACE');
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+    for (const operation of [
+      { kind: 'file.write', path: 'repo/.git/config', content: 'x' },
+      { kind: 'file.write', path: '../x', content: 'x' },
+      { kind: 'file.write', path: 'big.txt', content: 'x'.repeat(128 * 1024 + 1) },
+    ])
+      expect(await refusal(run(operation as ExecutionOperation))).toBe(
+        '400 EXECUTION_OPERATION_INVALID',
+      );
+    // The local provider never runs repository code.
+    const command = await run({ kind: 'command', command: 'npm', args: ['test'], cwd: 'repo' });
+    expect(command.result).toMatchObject({
+      status: 'DENIED',
+      error: { code: 'OPERATION_NOT_SUPPORTED' },
+    });
+  });
+
   it('refuses file:// repositories unless explicitly enabled', async () => {
     const response = await run({ ...checkout, repositoryUrl }, undefined, make(false, false));
     expect(response.result.error?.code).toBe('REPOSITORY_PROTOCOL_FORBIDDEN');
@@ -324,6 +384,175 @@ describe('execution runtime', () => {
   });
 });
 
+describe('container provider', () => {
+  const limits = {
+    timeoutMs: 60_000,
+    cpuMillis: 1500,
+    memoryMb: 512,
+    maxProcesses: 32,
+    network: { mode: 'NONE' as const, allowedHosts: [] },
+  };
+
+  it('builds a locked-down docker run with only the given environment', () => {
+    process.env['AF_TEST_SECRET'] = 'must-not-leak';
+    try {
+      const args = dockerRunArgs({
+        name: 'af-exec-1',
+        image: 'node:22-bookworm-slim',
+        workspaceRoot: '/srv/ws/1',
+        cwd: 'repo',
+        argv: ['npm', 'run', 'test'],
+        env: { HOME: '/tmp' },
+        limits,
+        network: 'none',
+        user: '1000:1000',
+      });
+      const flag = (name: string) => args[args.indexOf(name) + 1];
+      expect(flag('--network')).toBe('none');
+      expect(flag('--cpus')).toBe('1.500');
+      expect(flag('--memory')).toBe('512m');
+      expect(flag('--memory-swap')).toBe('512m');
+      expect(flag('--pids-limit')).toBe('32');
+      expect(flag('--cap-drop')).toBe('ALL');
+      expect(flag('--security-opt')).toBe('no-new-privileges');
+      expect(flag('--pull')).toBe('never');
+      expect(flag('--user')).toBe('1000:1000');
+      expect(flag('--mount')).toBe('type=bind,source=/srv/ws/1,target=/workspace');
+      expect(flag('--workdir')).toBe('/workspace/repo');
+      expect(args).toContain('--read-only');
+      expect(args.slice(-4)).toEqual(['node:22-bookworm-slim', 'npm', 'run', 'test']);
+      expect(args.filter((arg) => arg === '--env')).toHaveLength(1);
+      expect(args.join(' ')).not.toContain('must-not-leak');
+    } finally {
+      delete process.env['AF_TEST_SECRET'];
+    }
+  });
+
+  const image = 'node:22-bookworm-slim';
+  const docker = (() => {
+    try {
+      execFileSync('docker', ['image', 'inspect', image], { stdio: 'ignore', timeout: 20_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  describe.skipIf(!docker)(`with Docker (${image})`, () => {
+    let root: string;
+    let state: StateStore;
+    let service: ExecutionService;
+    const checkout = { kind: 'git.checkout' as const, ref: 'main', path: 'repo' };
+    const sandboxed = (
+      operation: ExecutionOperation,
+      overrides: Partial<ExecutionGrantPayload> = {},
+    ) =>
+      service.execute(
+        {
+          protocol: EXECUTION_PROTOCOL_V1,
+          grant: grantFor(operation, { isolation: 'sandboxed', limits, ...overrides }),
+          operation,
+        },
+        new AbortController().signal,
+      );
+
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'af-sandbox-'));
+      state = new StateStore(':memory:');
+      service = new ExecutionService({
+        verifier: new GrantVerifier(spki),
+        provider: new ContainerExecutionProvider({ image, allowFileRepositories: true }),
+        state,
+        artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
+        workspaceRoot: root,
+        // No allowUnsandboxed: the container provider satisfies sandboxed grants itself.
+      });
+    });
+    afterEach(() => {
+      state.close();
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it('runs project scripts with no network, no secrets and a read-only root filesystem', async () => {
+      process.env['AF_TEST_SECRET'] = 'must-not-leak';
+      try {
+        expect((await sandboxed({ ...checkout, repositoryUrl })).result.status).toBe('SUCCEEDED');
+        const probe = [
+          "const fs = require('node:fs');",
+          "console.log('secret:' + (process.env.AF_TEST_SECRET ?? 'absent'));",
+          "try { fs.writeFileSync('/etc/af-probe', 'x'); console.log('rootfs:writable'); } catch { console.log('rootfs:read-only'); }",
+          "fs.writeFileSync('dist.txt', 'built');",
+          "fetch('https://example.com').then(() => console.log('network:open'), () => console.log('network:blocked'));",
+        ].join('\n');
+        for (const [path, content] of [
+          ['repo/probe.js', probe],
+          [
+            'repo/package.json',
+            JSON.stringify({
+              scripts: { test: 'node probe.js', hang: 'node -e "setInterval(()=>{},1000)"' },
+            }),
+          ],
+        ])
+          expect(
+            (await sandboxed({ kind: 'file.write', path: path!, content: content! })).result.status,
+          ).toBe('SUCCEEDED');
+        const tested = await sandboxed({
+          kind: 'command',
+          command: 'npm',
+          args: ['run', 'test'],
+          cwd: 'repo',
+        });
+        expect(tested.result.status, tested.output).toBe('SUCCEEDED');
+        expect(tested.output).toContain('secret:absent');
+        expect(tested.output).toContain('rootfs:read-only');
+        expect(tested.output).toContain('network:blocked');
+        const built = await sandboxed({ kind: 'file.read', path: 'repo/dist.txt' });
+        expect(built.output).toBe('built');
+      } finally {
+        delete process.env['AF_TEST_SECRET'];
+      }
+    });
+
+    it('kills timed-out containers and refuses unlisted commands and unenforceable egress', async () => {
+      await sandboxed({ ...checkout, repositoryUrl });
+      await sandboxed({
+        kind: 'file.write',
+        path: 'repo/package.json',
+        content: JSON.stringify({ scripts: { hang: 'node -e "setInterval(()=>{},1000)"' } }),
+      });
+      const hung = await sandboxed(
+        { kind: 'command', command: 'npm', args: ['run', 'hang'], cwd: 'repo' },
+        { limits: { ...limits, timeoutMs: 5000 } },
+      );
+      expect(hung.result).toMatchObject({
+        status: 'TIMED_OUT',
+        error: { code: 'OPERATION_TIMED_OUT' },
+      });
+      const running = execFileSync(
+        'docker',
+        ['ps', '--all', '--quiet', '--filter', 'name=af-exec-'],
+        { encoding: 'utf8' },
+      ).trim();
+      expect(running).toBe('');
+      const node = await sandboxed({ kind: 'command', command: 'node', args: ['-v'], cwd: 'repo' });
+      expect(node.result.error?.code).toBe('COMMAND_NOT_ALLOWED');
+      const egress = await sandboxed(
+        { kind: 'command', command: 'npm', args: ['run', 'hang'], cwd: 'repo' },
+        {
+          limits: {
+            ...limits,
+            network: { mode: 'ALLOW_LIST', allowedHosts: ['registry.npmjs.org'] },
+          },
+        },
+      );
+      expect(egress.result).toMatchObject({
+        status: 'DENIED',
+        error: { code: 'EGRESS_CONTROL_UNAVAILABLE' },
+      });
+    });
+  });
+});
+
 describe('process runner', () => {
   it('kills the process tree on timeout and caps output', async () => {
     const started = Date.now();
@@ -352,7 +581,7 @@ describe('process runner', () => {
 
 describe('architecture boundaries', () => {
   it('imports only contracts from the monorepo, never control-plane or agent-runtime code', async () => {
-    const { readdirSync, readFileSync: read } = await import('node:fs');
+    const { readFileSync: read } = await import('node:fs');
     const source = join(import.meta.dirname, '..', 'src');
     const files: string[] = [];
     const walk = (directory: string) => {

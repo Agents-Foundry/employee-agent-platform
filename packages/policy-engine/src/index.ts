@@ -1,5 +1,7 @@
 export type GovernedAction =
   | 'repository.read'
+  | 'repository.write'
+  | 'workspace.command'
   | 'jira.read'
   | 'qa.plan'
   | 'qa.execute_playwright'
@@ -18,6 +20,17 @@ const decisions: Record<GovernedAction, PolicyDecision> = {
     outcome: 'ALLOW',
     risk: 'LOW',
     reason: 'Read-only repository context is allowed for assigned projects.',
+  },
+  'repository.write': {
+    outcome: 'ALLOW',
+    risk: 'LOW',
+    reason: "Writing inside the agent's private workspace changes nothing outside it.",
+  },
+  'workspace.command': {
+    outcome: 'ALLOW',
+    risk: 'MEDIUM',
+    reason:
+      'Allow-listed project scripts run inside the sandboxed workspace without network access.',
   },
   'jira.read': {
     outcome: 'ALLOW',
@@ -47,7 +60,7 @@ const decisions: Record<GovernedAction, PolicyDecision> = {
   'production.deploy': {
     outcome: 'DENY',
     risk: 'CRITICAL',
-    reason: 'The QA employee agent cannot deploy to production.',
+    reason: 'Employee agents cannot deploy to production.',
   },
 };
 

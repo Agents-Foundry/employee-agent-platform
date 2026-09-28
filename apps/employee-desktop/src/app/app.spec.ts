@@ -164,22 +164,20 @@ describe('App', () => {
       artifacts: [],
     });
     await vi.waitFor(() =>
-      http
-        .expectOne(`${api}/execution/v1/runs/run-1`)
-        .flush(
-          detail(
-            'WAITING_FOR_APPROVAL',
-            [{ id: 's1', title: 'Tool call: browser', status: 'WAITING_FOR_APPROVAL' }],
-            [
-              {
-                id: 'abcdef1234',
-                action: 'qa.execute_playwright',
-                risk: 'MEDIUM',
-                status: 'PENDING',
-              },
-            ],
-          ),
+      http.expectOne(`${api}/execution/v1/runs/run-1`).flush(
+        detail(
+          'WAITING_FOR_APPROVAL',
+          [{ id: 's1', title: 'Tool call: browser', status: 'WAITING_FOR_APPROVAL' }],
+          [
+            {
+              id: 'abcdef1234',
+              action: 'qa.execute_playwright',
+              risk: 'MEDIUM',
+              status: 'PENDING',
+            },
+          ],
         ),
+      ),
     );
     await submitted;
     await fixture.whenStable();
@@ -216,6 +214,117 @@ describe('App', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     http.expectNone(`${api}/execution/v1/runs/run-1`);
     http.verify();
+    App.followIntervalMs = 2000;
+  });
+
+  it('starts a generic run of the workflow of an agent without the QA workflow', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const api = 'http://localhost:4100/api';
+    fixture.detectChanges();
+    http.expectOne(`${api}/bootstrap`).flush({
+      organization: { id: 'org' },
+      employee: { id: 'employee', organizationId: 'org' },
+      agents: [{ id: 'fe-agent', name: 'Storefront FE', status: 'ACTIVE' }],
+    });
+    await fixture.whenStable();
+    http.expectOne(`${api}/blueprints`).flush([
+      {
+        id: 'engineering.frontend-engineer',
+        version: '1.0.0',
+        title: 'Frontend Engineer',
+        mission: 'FE',
+        questionnaire: [],
+      },
+      {
+        id: 'engineering.qa-engineer',
+        version: '1.2.0',
+        title: 'QA Engineer',
+        mission: 'QA',
+        questionnaire: [],
+      },
+    ]);
+    await fixture.whenStable();
+    http.expectOne(`${api}/provisioning`).flush([]);
+    await fixture.whenStable();
+    await vi.waitFor(() => http.expectOne((req) => req.url.endsWith('/conversations')).flush([]));
+    await fixture.whenStable();
+    fixture.detectChanges();
+    // Employees still default to requesting QA agents; other roles are selectable.
+    expect(fixture.nativeElement.textContent).toContain('QA Engineer · Blueprint 1.2.0');
+
+    // A verified v2 manifest (verification itself is covered above) without validate-story.
+    const component = fixture.componentInstance as unknown as {
+      verifiedManifest: { set(value: unknown): void };
+      activeConversation: { set(value: unknown): void };
+      selectedAgentId: string;
+      storyKey: string;
+      prompt: string;
+      submit(): Promise<void>;
+    };
+    component.verifiedManifest.set({
+      payload: {
+        apiVersion: 'agents-foundry/v2',
+        workflows: ['implement-ui-change'],
+        configuration: { projectName: 'Storefront' },
+      },
+    });
+    component.selectedAgentId = 'fe-agent';
+    component.storyKey = 'ui-7';
+    component.prompt = 'Add the free-shipping banner.';
+    const conversation = {
+      id: 'conversation-2',
+      employeeId: 'employee',
+      agentId: 'fe-agent',
+      title: 'UI-7',
+      messages: [],
+    };
+    component.activeConversation.set(conversation);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('input[name="targetUrl"]')).toBeNull();
+    App.followIntervalMs = 60_000;
+    const submitted = component.submit();
+    const message = http.expectOne(`${api}/conversations/conversation-2/messages`);
+    expect(message.request.body.content).toBe('Add the free-shipping banner.\nWork item: ui-7');
+    message.flush({});
+    await vi.waitFor(() => {
+      const start = http.expectOne(`${api}/execution/v1/runs`);
+      expect(start.request.body).toEqual({
+        agentId: 'fe-agent',
+        conversationId: 'conversation-2',
+        task: {
+          objective: 'Add the free-shipping banner.',
+          workflow: 'implement-ui-change',
+          workItem: { system: 'issue-tracker', key: 'UI-7' },
+          inputs: {},
+        },
+      });
+      start.flush({ id: 'run-2', threadId: 'thread-2', status: 'QUEUED' });
+    });
+    await vi.waitFor(() =>
+      http
+        .expectOne(`${api}/conversations/conversation-2`)
+        .flush({ ...conversation, agentId: 'agent_qa_engineer' }),
+    );
+    await vi.waitFor(() => http.expectOne((req) => req.url.endsWith('/conversations')).flush([]));
+    await vi.waitFor(() =>
+      http.expectOne(`${api}/execution/v1/runs/run-2`).flush({
+        run: {
+          id: 'run-2',
+          status: 'RUNNING',
+          statusReason: null,
+          task: { objective: 'x', workflow: 'implement-ui-change', inputs: {} },
+        },
+        steps: [],
+        approvals: [],
+        artifacts: [],
+      }),
+    );
+    await submitted;
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('implement-ui-change');
+    http.expectNone(`${api}/qa/runs`);
+    fixture.destroy();
     App.followIntervalMs = 2000;
   });
 });

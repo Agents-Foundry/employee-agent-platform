@@ -617,4 +617,55 @@ describe('migration 006 upgrade', () => {
       sql.close();
     }
   });
+
+  it('rebuilds connector connections for GitHub without losing rows or protections (011)', () => {
+    const sql = new DatabaseSync(':memory:');
+    try {
+      sql.exec('PRAGMA foreign_keys=ON');
+      const legacy = Object.create(ControlPlaneDatabase.prototype) as {
+        db: DatabaseSync;
+        migrate(): void;
+      };
+      legacy.db = sql;
+      legacy.migrate();
+      migrateOrganization(sql, 10);
+      sql.exec(`INSERT INTO organizations (id,name,slug) VALUES ('o','O','o');
+        INSERT INTO employees (id,organization_id,display_name,email,role,team) VALUES ('e','o','E','e@example.com','ADMIN','QA');
+        INSERT INTO organization_connector_connections (id,organization_id,provider,name,base_url,secret_ref,settings,
+          status,version,created_by,created_at,updated_by,updated_at)
+          VALUES ('k','o','jira','Jira','https://o.atlassian.net','secret://jira','{"allowedProjects":["QA"]}',
+          'ACTIVE',1,'e','2026-01-01','e','2026-01-01');`);
+      expect(() =>
+        sql.exec(`INSERT INTO organization_connector_connections VALUES ('g','o','github','G','https://api.github.com',
+          'secret://gh','{}','ACTIVE',1,'e','2026-01-01','e','2026-01-01')`),
+      ).toThrow();
+      migrateOrganization(sql, 11);
+      expect(
+        sql.prepare('SELECT id, provider, settings FROM organization_connector_connections').all(),
+      ).toEqual([{ id: 'k', provider: 'jira', settings: '{"allowedProjects":["QA"]}' }]);
+      sql.exec(`INSERT INTO organization_connector_connections (id,organization_id,provider,name,base_url,secret_ref,settings,
+        status,version,created_by,created_at,updated_by,updated_at) VALUES ('g','o','github','G','https://api.github.com',
+        'secret://gh','{}','ACTIVE',1,'e','2026-01-01','e','2026-01-01')`);
+      expect(() => sql.exec("DELETE FROM organization_connector_connections WHERE id='k'")).toThrow(
+        'CONNECTION_HISTORY_RETAINED',
+      );
+      expect(() =>
+        sql.exec("UPDATE organization_connector_connections SET provider='github' WHERE id='k'"),
+      ).toThrow('CONNECTION_IDENTITY_IMMUTABLE');
+      expect(() =>
+        sql.exec(`INSERT INTO organization_connector_connections (id,organization_id,provider,name,base_url,secret_ref,
+          settings,status,version,created_by,created_at,updated_by,updated_at) VALUES ('j','o','jira','J2',
+          'https://o.atlassian.net','secret://j','{}','ACTIVE',1,'e','2026-01-01','e','2026-01-01')`),
+      ).toThrow();
+      expect(sql.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(
+        sql
+          .prepare('PRAGMA table_info(agent_action_requests)')
+          .all()
+          .some((column) => column['name'] === 'change_set'),
+      ).toBe(true);
+    } finally {
+      sql.close();
+    }
+  });
 });

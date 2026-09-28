@@ -1,7 +1,7 @@
 # Execution runtime (`apps/execution-runtime`)
 
 The execution runtime is a separate process that runs workspace operations for agent runs:
-repository checkout, git status, file reads and Playwright tests. It acts only on
+repository checkout, git status, file reads and writes, project scripts and Playwright tests. It acts only on
 control-plane-signed, single-use execution grants
 ([ADR 0007](adr/0007-separate-execution-runtime.md),
 [ADR 0013](adr/0013-execution-grants.md)).
@@ -21,13 +21,14 @@ agent runtime tool (repository / browser)
 
 ## Operations
 
-| Operation               | Governed by             | Tool         | Notes                                                                                                                    |
-| ----------------------- | ----------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `git.checkout`          | `repository.read`       | `repository` | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only                           |
-| `git.status`            | `repository.read`       | `repository` | `git status --porcelain=v1 --branch`                                                                                     |
-| `file.read`             | `repository.read`       | `repository` | Text only, capped at 256 KiB; the path must stay inside the workspace after resolving symlinks                           |
-| `playwright.run`        | `qa.execute_playwright` | `browser`    | Runs the project's installed `@playwright/test` with a JSON reporter against the configured QA origin; requires approval |
-| `command`, `file.write` | —                       | —            | In the contract but never granted in Phase E (`OPERATION_NOT_ALLOWED`); the local provider refuses them                  |
+| Operation        | Governed by             | Tool          | Notes                                                                                                                                                |
+| ---------------- | ----------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git.checkout`   | `repository.read`       | `repository`  | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only                                                       |
+| `git.status`     | `repository.read`       | `repository`  | `git status --porcelain=v1 --branch`                                                                                                                 |
+| `file.read`      | `repository.read`       | `repository`  | Text only, capped at 256 KiB; the path must stay inside the workspace after resolving symlinks                                                       |
+| `playwright.run` | `qa.execute_playwright` | `browser`     | Runs the project's installed `@playwright/test` with a JSON reporter against the configured QA origin; requires approval                             |
+| `file.write`     | `repository.write`      | `code-editor` | Phase G. Inline UTF-8 content, at most 128 KiB; the deepest existing ancestor must resolve inside the workspace, and links are never written through |
+| `command`        | `workspace.command`     | `build`       | Phase G. Only `npm run <script>` for the agent's configured `projectScripts`; network `NONE`; container provider only                                |
 
 ## Local provider guarantees
 
@@ -44,27 +45,48 @@ whose manifest requires `sandboxed` (the QA Engineer does) are refused
 (`ISOLATION_UNAVAILABLE`) unless `EXECUTION_ALLOW_UNSANDBOXED=true` is set. Set that only for
 development.
 
+## Container provider (Phase G)
+
+`EXECUTION_PROVIDER=container` selects `ContainerExecutionProvider` (`isolation: sandboxed`,
+[ADR 0015](adr/0015-frontend-engineer-and-sandboxed-execution.md)).
+
+| Where                    | Operations                                              | Enforced                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container (`docker run`) | `command`, `playwright.run` (all repository code)       | No capabilities, `no-new-privileges`, read-only root filesystem with a private `/tmp`, the grant's CPU, memory and process limits, `--pull never`, the workspace as the only mount, only the variables the provider sets, `--network none` for grants without hosts, and timeouts that remove the container |
+| Host (local provider)    | `git.checkout`, `git.status`, `file.read`, `file.write` | Everything in the local provider table; these run no repository code, but they are not network-isolated                                                                                                                                                                                                     |
+
+The provider cannot restrict egress to an allow-list, so grants that need network (Playwright
+against a QA environment) are refused with `EGRESS_CONTROL_UNAVAILABLE`. The operator can accept
+that by setting `EXECUTION_ALLOW_UNRESTRICTED_EGRESS=true`, which runs them on the default bridge
+network. Executables are allow-listed too (`npm` by default). Images must already be present.
+
 ## Configuration
 
-| Variable                                | Default                   | Purpose                                                                 |
-| --------------------------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `EXECUTION_GRANT_VERIFICATION_KEY`      | required                  | Control-plane public key (base64 SPKI from `GET /api/manifest-key`)     |
-| `EXECUTION_RUNTIME_HOST` / `_PORT`      | `127.0.0.1` / `4500`      | Listen address; keep it on loopback or behind mTLS                      |
-| `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                       |
-| `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider              |
-| `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                        |
-| `EXECUTION_RUNTIME_URL` (agent runtime) | unset                     | When set, the agent runtime offers the `repository` and `browser` tools |
+| Variable                                | Default                   | Purpose                                                                                                  |
+| --------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `EXECUTION_GRANT_VERIFICATION_KEY`      | required                  | Control-plane public key (base64 SPKI from `GET /api/manifest-key`)                                      |
+| `EXECUTION_RUNTIME_HOST` / `_PORT`      | `127.0.0.1` / `4500`      | Listen address; keep it on loopback or behind mTLS                                                       |
+| `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                                                        |
+| `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider                                               |
+| `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                         |
+| `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                   |
+| `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                           |
+| `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`                                                      |
+| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS`   | `false`                   | Run grants that need network on the bridge network (no allow-list)                                       |
+| `EXECUTION_RUNTIME_URL` (agent runtime) | unset                     | When set, the agent runtime offers the workspace tools (`repository`, `browser`, `code-editor`, `build`) |
 
 ```bash
 npm run dev:execution   # execution runtime
 npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.0.1:4500
 ```
 
-## Limitations (Phase E)
+## Limitations
 
-- There is no sandboxing provider yet (containers or micro-VMs with egress control).
-- There is no dependency installation, so projects must already contain `@playwright/test`.
+- There is no egress allow-list enforcement: the container provider offers no network or
+  unrestricted network, nothing in between.
+- There is no dependency installation. Scripts run offline, so `node_modules` (including
+  `@playwright/test`) must come with the checkout or the image.
 - Only public HTTPS repositories work; checkouts are of branches or tags, not commit SHAs.
-- Shell commands and file writes are not exposed to agents.
+- Shell commands are never granted; only allow-listed `npm run` scripts are.
 - If the execution runtime crashes mid-operation, the grant stays `RUNNING` and can't be
   reused. The action must be requested again.

@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import { ExecutionArtifactStore } from './artifact-store.js';
 import { ExecutionService } from './execution-service.js';
 import { GrantVerifier } from './grant-verifier.js';
+import { ContainerExecutionProvider } from './providers/container-provider.js';
+import type { ExecutionProvider } from './providers/execution-provider.js';
 import { LocalExecutionProvider } from './providers/local-provider.js';
 import { createExecutionServer } from './server.js';
 import { StateStore } from './state-store.js';
@@ -15,9 +17,23 @@ function required(name: string): string {
 const root = process.env['EXECUTION_RUNTIME_STATE_DIR'] ?? '.data/execution-runtime';
 const host = process.env['EXECUTION_RUNTIME_HOST'] ?? '127.0.0.1';
 const port = Number(process.env['EXECUTION_RUNTIME_PORT'] ?? 4500);
-const provider = new LocalExecutionProvider({
+const hostOptions = {
   allowFileRepositories: process.env['EXECUTION_ALLOW_FILE_REPOSITORIES'] === 'true',
-});
+};
+const providerId = process.env['EXECUTION_PROVIDER'] ?? 'local';
+if (providerId !== 'local' && providerId !== 'container')
+  throw new Error('EXECUTION_PROVIDER_UNKNOWN');
+const provider: ExecutionProvider =
+  providerId === 'container'
+    ? new ContainerExecutionProvider({
+        ...hostOptions,
+        image: required('EXECUTION_SANDBOX_IMAGE'),
+        ...(process.env['EXECUTION_PLAYWRIGHT_IMAGE']
+          ? { playwrightImage: process.env['EXECUTION_PLAYWRIGHT_IMAGE'] }
+          : {}),
+        allowUnrestrictedEgress: process.env['EXECUTION_ALLOW_UNRESTRICTED_EGRESS'] === 'true',
+      })
+    : new LocalExecutionProvider(hostOptions);
 const state = new StateStore(join(root, 'state.db'));
 const service = new ExecutionService({
   verifier: new GrantVerifier(required('EXECUTION_GRANT_VERIFICATION_KEY')),

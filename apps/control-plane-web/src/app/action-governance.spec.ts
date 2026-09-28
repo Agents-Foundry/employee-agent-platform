@@ -112,4 +112,35 @@ describe('action governance', () => {
     expect(component.error()).toContain('HTTPS');
     expect(component.name).toBe('Jira');
   });
+
+  it('connects GitHub with an allow-list of repositories and no issue-tracker fields', async () => {
+    TestBed.inject(AuthSession).config.set({ mode: 'password' });
+    const component = TestBed.createComponent(ActionGovernance).componentInstance,
+      http = TestBed.inject(HttpTestingController);
+    Object.assign(component, {
+      provider: 'github',
+      name: 'Acme GitHub',
+      baseUrl: 'https://api.github.com',
+      secretRef: 'secret://github-token',
+      authEmail: 'ignored@example.com',
+      projects: 'QA',
+      repositories: 'acme/storefront, acme/admin, acme/storefront',
+    });
+    const connecting = component.connect();
+    const created = http.expectOne(`${API_URL}/organization/connector-connections`);
+    expect(created.request.body).toEqual({
+      provider: 'github',
+      name: 'Acme GitHub',
+      baseUrl: 'https://api.github.com',
+      secretRef: 'secret://github-token',
+      settings: { allowedRepositories: ['acme/storefront', 'acme/admin'] },
+    });
+    created.flush({});
+    await Promise.resolve();
+    http.expectOne(`${API_URL}/organization/connector-connections`).flush([]);
+    http.expectOne(`${API_URL}/organization/action-policies`).flush([]);
+    await connecting;
+    expect(component.notice()).toContain('Acme GitHub connected');
+    expect(component.repositories).toBe('');
+  });
 });

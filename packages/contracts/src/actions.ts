@@ -2,7 +2,7 @@
 // Pure types and constants: safe for Angular, Node and runtimes.
 
 /** Connector providers with an implementation in the control plane. */
-export const connectorProviders = ['jira'] as const;
+export const connectorProviders = ['jira', 'github'] as const;
 export type ConnectorProvider = (typeof connectorProviders)[number];
 
 /**
@@ -14,8 +14,10 @@ export const secretReferencePattern = /^secret:\/\/[a-z0-9][a-z0-9._-]{0,63}$/;
 export interface ConnectorConnectionSettings {
   /** Account the API token belongs to (Jira Cloud basic authentication). */
   authEmail?: string;
-  /** Project keys the gateway allows writes to. Empty means none. */
+  /** Issue-tracker project keys the gateway allows. Empty means none (always empty for GitHub). */
   allowedProjects: string[];
+  /** Source-control repositories (`owner/name`) the gateway allows (Phase G, GitHub). */
+  allowedRepositories?: string[];
 }
 
 /** An organization's configured connection to an external system. Admin-visible; holds no secret. */

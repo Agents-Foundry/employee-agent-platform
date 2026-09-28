@@ -4,6 +4,7 @@ import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import type {
   ConnectorConnection,
+  ConnectorProvider,
   GovernedActionSummary,
   OrganizationPolicyOutcome,
 } from '@agents-foundry/contracts';
@@ -41,9 +42,13 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
             <strong>{{ connection.name }}</strong>
             <small>{{ connection.provider }} · {{ connection.baseUrl }}</small>
             <small
-              >Credential {{ connection.secretRef }} · Projects
-              {{ connection.settings.allowedProjects.join(', ') || 'none' }}</small
-            >
+              >Credential {{ connection.secretRef }} ·
+              @if (connection.provider === 'github') {
+                Repositories {{ connection.settings.allowedRepositories?.join(', ') || 'none' }}
+              } @else {
+                Projects {{ connection.settings.allowedProjects.join(', ') || 'none' }}
+              }
+            </small>
           </div>
           <small>{{ connection.status }}</small>
           @if (connection.status === 'ACTIVE') {
@@ -51,20 +56,32 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
           }
         </article>
       } @empty {
-        <p>No connections yet. Issue-tracker writes are denied until one is configured.</p>
+        <p>
+          No connections yet. Issue-tracker and source-control actions are denied until one is
+          configured.
+        </p>
       }
       <form #connectionForm="ngForm" (ngSubmit)="connectionForm.valid && connect()">
-        <h4>Connect Jira</h4>
+        <h4>Add a connection</h4>
+        <label
+          >System<select name="provider" [(ngModel)]="provider" [disabled]="busy()">
+            <option value="jira">Jira Cloud (issue tracker)</option>
+            <option value="github">GitHub (draft pull requests)</option>
+          </select></label
+        >
         <label
           >Name<input name="name" [(ngModel)]="name" required maxlength="120" [disabled]="busy()"
         /></label>
         <label
-          >Site URL<input
+          >{{ provider === 'github' ? 'API URL' : 'Site URL'
+          }}<input
             name="baseUrl"
             type="url"
             [(ngModel)]="baseUrl"
             required
-            placeholder="https://your-site.atlassian.net"
+            [placeholder]="
+              provider === 'github' ? 'https://api.github.com' : 'https://your-site.atlassian.net'
+            "
             [disabled]="busy()"
         /></label>
         <label
@@ -79,20 +96,34 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
             >A reference to a token in the platform secret store. Never paste the token here.</small
           ></label
         >
-        <label
-          >Account email<input
-            name="authEmail"
-            type="email"
-            [(ngModel)]="authEmail"
-            [disabled]="busy()"
-        /></label>
-        <label
-          >Allowed project keys<input
-            name="projects"
-            [(ngModel)]="projects"
-            placeholder="QA, WEB"
-            [disabled]="busy()"
-        /></label>
+        @if (provider === 'github') {
+          <label
+            >Allowed repositories<input
+              name="repositories"
+              [(ngModel)]="repositories"
+              placeholder="acme/storefront, acme/admin"
+              [disabled]="busy()"
+            /><small
+              >Agents can only propose draft pull requests to these repositories, and only to the
+              repository they are configured for.</small
+            ></label
+          >
+        } @else {
+          <label
+            >Account email<input
+              name="authEmail"
+              type="email"
+              [(ngModel)]="authEmail"
+              [disabled]="busy()"
+          /></label>
+          <label
+            >Allowed project keys<input
+              name="projects"
+              [(ngModel)]="projects"
+              placeholder="QA, WEB"
+              [disabled]="busy()"
+          /></label>
+        }
         <button type="submit" [disabled]="busy() || !connectionForm.valid">
           {{ busy() ? 'Saving…' : 'Add connection' }}
         </button>
@@ -234,6 +265,8 @@ export class ActionGovernance implements OnInit {
   secretRef = '';
   authEmail = '';
   projects = '';
+  repositories = '';
+  provider: ConnectorProvider = 'jira';
 
   ngOnInit() {
     if (this.auth.config()?.mode === 'password') void this.refresh();
@@ -263,28 +296,34 @@ export class ActionGovernance implements OnInit {
 
   async connect() {
     if (this.busy()) return;
-    const allowedProjects = [
+    const list = (value: string, normalize: (item: string) => string) => [
       ...new Set(
-        this.projects
+        value
           .split(',')
-          .map((key) => key.trim().toUpperCase())
+          .map((item) => normalize(item.trim()))
           .filter(Boolean),
       ),
     ];
+    const settings =
+      this.provider === 'github'
+        ? { allowedRepositories: list(this.repositories, (name) => name) }
+        : {
+            ...(this.authEmail.trim() ? { authEmail: this.authEmail.trim() } : {}),
+            allowedProjects: list(this.projects, (key) => key.toUpperCase()),
+          };
     await this.mutate(
       () =>
         this.http.post(`${API_URL}/organization/connector-connections`, {
-          provider: 'jira',
+          provider: this.provider,
           name: this.name.trim(),
           baseUrl: this.baseUrl.trim(),
           secretRef: this.secretRef.trim(),
-          settings: {
-            ...(this.authEmail.trim() ? { authEmail: this.authEmail.trim() } : {}),
-            allowedProjects,
-          },
+          settings,
         }),
       `${this.name.trim()} connected.`,
-      'The connection was rejected. Use an HTTPS site address, a secret:// reference and valid project keys; only one Jira connection can be active.',
+      this.provider === 'github'
+        ? 'The connection was rejected. Use an HTTPS API address, a secret:// reference and owner/name repositories; only one GitHub connection can be active.'
+        : 'The connection was rejected. Use an HTTPS site address, a secret:// reference and valid project keys; only one Jira connection can be active.',
     );
     if (!this.error()) {
       this.name = '';
@@ -292,6 +331,7 @@ export class ActionGovernance implements OnInit {
       this.secretRef = '';
       this.authEmail = '';
       this.projects = '';
+      this.repositories = '';
     }
   }
 

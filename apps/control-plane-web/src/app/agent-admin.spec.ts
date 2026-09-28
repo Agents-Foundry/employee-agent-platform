@@ -66,6 +66,50 @@ describe('admin agent setup', () => {
     expect(component.notice()).toContain('1 agent assignment');
   });
 
+  it('lets the admin choose the role and keeps that choice across refreshes', async () => {
+    TestBed.inject(AuthSession).config.set({ mode: 'password' });
+    const component = TestBed.createComponent(AgentAdmin).componentInstance,
+      http = TestBed.inject(HttpTestingController);
+    const blueprints = [
+      {
+        id: 'engineering.frontend-engineer',
+        version: '1.0.0',
+        title: 'Frontend Engineer',
+        questionnaire: [],
+        capabilities: [],
+      },
+      {
+        id: 'engineering.qa-engineer',
+        version: '1.2.0',
+        title: 'QA Engineer',
+        questionnaire: [],
+        capabilities: [],
+      },
+    ];
+    const load = () => {
+      http.expectOne(`${API_URL}/blueprints`).flush(blueprints);
+      http.expectOne(`${API_URL}/organization/members`).flush([]);
+      http.expectOne(`${API_URL}/organization/agents`).flush([]);
+      http.expectOne(`${API_URL}/organization/agent-installations`).flush([]);
+    };
+    let refreshing = component.refresh();
+    load();
+    await refreshing;
+    expect(component.blueprint()?.id).toBe('engineering.frontend-engineer');
+    component.answers = { projectName: 'Storefront' };
+    component.installationId = 'installation-1';
+    component.chooseBlueprint('engineering.qa-engineer');
+    expect(component.blueprint()?.version).toBe('1.2.0');
+    expect(component.answers).toEqual({});
+    expect(component.installationId).toBe('');
+    component.chooseBlueprint('unknown');
+    expect(component.blueprint()?.id).toBe('engineering.qa-engineer');
+    refreshing = component.refresh();
+    load();
+    await refreshing;
+    expect(component.blueprint()?.id).toBe('engineering.qa-engineer');
+  });
+
   it('creates from an installation with only the per-agent answers', async () => {
     TestBed.inject(AuthSession).config.set({ mode: 'password' });
     const fixture = TestBed.createComponent(AgentAdmin),
