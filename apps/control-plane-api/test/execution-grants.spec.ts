@@ -233,6 +233,8 @@ describe('execution grants', () => {
       Date.parse(approval.expiresAt),
     );
     expect(signed.payload.limits.network.allowedHosts).toEqual(['qa.example.com']);
+    // Chromium needs more processes than other operations' default of 64.
+    expect(signed.payload.limits.maxProcesses).toBe(256);
   });
 
   it('compares repositories by host, path and optional .git suffix only', () => {

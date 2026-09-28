@@ -2,6 +2,9 @@ import type { ExecutionOperation, ExecutionOperationKind } from '@agents-foundry
 
 type Configuration = Record<string, string | string[]>;
 
+/** Process and thread limit granted to an operation's sandbox unless its action needs more. */
+export const DEFAULT_MAX_PROCESSES = 64;
+
 /**
  * A governed action performed by an execution runtime under a signed grant (ADR 0013). The
  * control plane binds the grant to one operation and checks that the operation's external
@@ -16,6 +19,8 @@ export interface ExecutionAction {
   hosts(operation: ExecutionOperation): string[];
   /** Written by the control plane from the validated operation; shown to approvers. */
   summary(operation: ExecutionOperation): string;
+  /** Process and thread limit for the sandbox; `DEFAULT_MAX_PROCESSES` when unset. */
+  maxProcesses?: number;
 }
 
 function text(configuration: Configuration, key: string): string | null {
@@ -86,6 +91,9 @@ const playwrightRun: ExecutionAction = {
     operation.kind === 'playwright.run'
       ? `Run Playwright project ${operation.project} against ${new URL(operation.baseUrl).origin}`
       : 'Run Playwright',
+  // Chromium's page processes crash under 64 processes and threads; one page needs about 96,
+  // and the test runner and its workers need more.
+  maxProcesses: 256,
 };
 
 /** Write a file inside the agent's workspace (Phase G). Nothing outside the workspace changes. */

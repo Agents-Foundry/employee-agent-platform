@@ -315,7 +315,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
     } catch {
       throw new OperationFailure(
         'PLAYWRIGHT_NOT_INSTALLED',
-        'The project has no installed @playwright/test; dependency installation is not supported yet.',
+        'The project has no installed @playwright/test; the local provider cannot install dependencies.',
       );
     }
     const result = await runProcess(

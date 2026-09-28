@@ -20,7 +20,11 @@ import { canonicalManifest } from '../../../../packages/contracts/src/manifest.j
 import { EXECUTION_GRANT_KIND } from '../../../../packages/contracts/src/execution-runtime/v1/protocol.js';
 import { ExecutionError, type ExecutionService } from '../execution/execution-service.js';
 import { controlPlaneAction, type ChangeSet, type ControlPlaneAction } from './action-registry.js';
-import { executionAction, type ExecutionAction } from './execution-actions.js';
+import {
+  DEFAULT_MAX_PROCESSES,
+  executionAction,
+  type ExecutionAction,
+} from './execution-actions.js';
 import { parseExecutionOperation } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import type { ActionPolicyService } from './action-policy-service.js';
 import { ConnectorError } from './connectors/jira.js';
@@ -485,7 +489,7 @@ export class ActionGateway {
         timeoutMs: Math.max(1000, Math.min(current.execution.timeoutMs, 3_600_000)),
         cpuMillis: 2000,
         memoryMb: 2048,
-        maxProcesses: 64,
+        maxProcesses: current.execution.policy.maxProcesses ?? DEFAULT_MAX_PROCESSES,
         network: hosts.length
           ? { mode: 'ALLOW_LIST', allowedHosts: hosts }
           : { mode: 'NONE', allowedHosts: [] },
