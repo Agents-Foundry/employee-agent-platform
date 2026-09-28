@@ -14,6 +14,8 @@ export interface TestStore {
   connect: () => Promise<PgStore>;
   /** Closes every connection and drops the database. */
   drop: () => Promise<void>;
+  /** Direct connection URLs for each role, for database-level tests. */
+  urls: { owner: string; tenant: string; platform: string };
 }
 
 /** A fresh, migrated PostgreSQL database for one test, cloned from the suite template. */
@@ -21,11 +23,16 @@ export async function testStore(): Promise<TestStore> {
   const adminUrl = inject('postgresAdminUrl');
   const database = `af_test_${randomBytes(8).toString('hex')}`;
   await cloneDatabase(adminUrl, database, TEMPLATE_DATABASE, TEST_ROLES.owner.name);
+  const urls = {
+    owner: roleUrl(adminUrl, database, TEST_ROLES.owner),
+    tenant: roleUrl(adminUrl, database, TEST_ROLES.tenant),
+    platform: roleUrl(adminUrl, database, TEST_ROLES.platform),
+  };
   const stores: PgStore[] = [];
   const connect = async () => {
     const store = await PgStore.connect({
-      tenantUrl: roleUrl(adminUrl, database, TEST_ROLES.tenant),
-      platformUrl: roleUrl(adminUrl, database, TEST_ROLES.platform),
+      tenantUrl: urls.tenant,
+      platformUrl: urls.platform,
       maxConnections: 4,
     });
     stores.push(store);
@@ -34,6 +41,7 @@ export async function testStore(): Promise<TestStore> {
   return {
     store: await connect(),
     connect,
+    urls,
     drop: async () => {
       await Promise.all(stores.map((store) => store.close()));
       await dropDatabase(adminUrl, database);
