@@ -187,7 +187,8 @@ error handling and documentation. A type, table or route stub alone does not cou
 ### Phase G limitations
 
 - No egress allow-list: container grants that need network are refused unless the operator
-  accepts unrestricted egress (QA Playwright runs, for now).
+  accepts unrestricted egress (QA Playwright runs, for now). Resolved by the egress proxy
+  ([ADR 0016](adr/0016-egress-proxy.md)).
 - No dependency installation; scripts run offline.
 - Pull requests are GitHub-only, and each change set is limited to 100 files and 1 MiB.
 - Git and file operations run on the host, confined but not network-isolated.
@@ -203,17 +204,17 @@ error handling and documentation. A type, table or route stub alone does not cou
 | `EXECUTION_ALLOW_UNSANDBOXED`         | `false` | Execution runtime accepts sandboxed grants on the local provider (development only)            |
 | `QA_GENERIC_RUNTIME_ENABLED`          | `false` | `/api/qa/runs` queues generic `validate-story` runs for eligible agents                        |
 | `EXECUTION_PROVIDER`                  | `local` | `container` runs repository code in locked-down containers (sandboxed isolation)               |
-| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS` | `false` | Container provider runs network-needing grants without an allow-list (development only)        |
+| `EXECUTION_EGRESS_PROXY`              | `true`  | Container provider enforces grant host allow-lists through a per-operation egress proxy        |
+| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS` | `false` | Without the proxy: network-needing grants run with no allow-list (development only)            |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
 
 ## Next recommended phase
 
-All planned phases (A–G) are delivered. The highest-value follow-ups are:
+All planned phases (A–G) are delivered, and grant host allow-lists are enforced by an egress
+proxy ([ADR 0016](adr/0016-egress-proxy.md)). The highest-value follow-ups are:
 
-- an egress proxy that enforces each grant's host allow-list, so QA Playwright runs need no
-  override;
 - dependency installation through a governed, allow-listed registry mirror;
 - PostgreSQL with row-level security for multi-tenant production, replacing SQLite's
   application-level isolation;

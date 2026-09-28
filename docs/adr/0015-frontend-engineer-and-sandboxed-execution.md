@@ -1,6 +1,6 @@
 # ADR 0015: Frontend Engineer, sandboxed execution and governed pull requests
 
-- Status: Accepted
+- Status: Accepted; egress allow-lists added by ADR 0016
 - Date: 2026-09-26
 
 ## Context
