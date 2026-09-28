@@ -28,7 +28,7 @@ This clean-slate repository implements the first end-to-end control boundary:
 
 ```text
 apps/
-  control-plane-api/   Express API and central SQLite development store
+  control-plane-api/   Express API on PostgreSQL with row-level security
   control-plane-web/   Angular admin control plane
   employee-desktop/    Angular employee UI plus Tauri shell
   agent-runtime/       Separate agent runtime process (kernel, model gateway, tools)
@@ -40,14 +40,17 @@ docs/
   adr/                  Architecture decision records
 ```
 
-SQLite is the zero-dependency development persistence layer. Its repository boundary is intentionally isolated so production can move to managed PostgreSQL without changing the API contract.
+The control plane stores its data in PostgreSQL. Every tenant table is isolated by forced row-level security, with separate database roles for tenant work, cross-tenant sign-in and migrations ([ADR 0018](docs/adr/0018-postgresql-row-level-security.md)).
 
 ## Local development
 
-Prerequisites: Node.js 24 LTS, npm 11, and (for the native desktop build) the Rust toolchain plus Tauri system dependencies.
+Prerequisites: Node.js 24 LTS, npm 11, Docker (for a local PostgreSQL, and for the tests), and (for the native desktop build) the Rust toolchain plus Tauri system dependencies.
 
 ```bash
 npm install
+cp .env.example .env        # local PostgreSQL URLs with development-only passwords
+npm run db:dev              # PostgreSQL 16 in Docker on 127.0.0.1:55433
+npm run db:bootstrap        # database and roles; the API applies migrations at startup
 npm run dev:api:demo
 npm run start:admin
 npm run start:employee
@@ -64,6 +67,8 @@ Run every build and test gate:
 ```bash
 npm run check
 ```
+
+The control-plane tests start a throwaway PostgreSQL container, or use `TEST_DATABASE_ADMIN_URL` (a superuser URL) when set, as CI does. An existing SQLite database can be imported into an empty PostgreSQL database with `npm run db:import-sqlite -- <path>`.
 
 ## QA POC flow
 
@@ -120,7 +125,8 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
   [0015](docs/adr/0015-frontend-engineer-and-sandboxed-execution.md),
   [0016](docs/adr/0016-egress-proxy.md),
-  [0017](docs/adr/0017-dependency-installation.md)
+  [0017](docs/adr/0017-dependency-installation.md),
+  [0018](docs/adr/0018-postgresql-row-level-security.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

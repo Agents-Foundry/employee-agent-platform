@@ -2,9 +2,9 @@
 
 ## Gap analysis against the master implementation brief
 
-The current repository is Angular standalone applications, an Express API, and Node SQLite.
-It is **not** a Supabase/PostgreSQL application and has no Supabase migrations. Preserve this
-working architecture until a separately planned datastore migration is justified.
+The current repository is Angular standalone applications, an Express API, and PostgreSQL with
+row-level security ([ADR 0018](adr/0018-postgresql-row-level-security.md)). It is **not** a
+Supabase application and has no Supabase migrations.
 
 Already implemented before this milestone: cookie sessions, Google Workspace pilot login,
 password-only tenant onboarding through an operator CLI, mandatory password initialization
@@ -49,10 +49,13 @@ to an organization. It adds single-use account-link invitations. The migration v
 foreign key before committing the table rebuild.
 `schema_migrations` records versions, SQL checksums and applied timestamps. Each migration runs
 inside `BEGIN IMMEDIATE`; failures roll back and changed applied migrations fail closed.
-The pre-existing baseline schema remains in `database.ts`; no existing table is duplicated.
-Startup applies pending migrations automatically. Back up the SQLite database and signing key
-before deployment. Test a copy first; never edit an applied migration or drop tables to roll back.
+The pre-existing base tables are in `000-legacy-base.ts`; no existing table is duplicated.
 These additive migrations preserve existing tenant, employee, agent and manifest identifiers.
+
+These were SQLite migrations. The control plane now runs on PostgreSQL, whose baseline migration
+reproduces schema 011 ([ADR 0018](adr/0018-postgresql-row-level-security.md)). The SQLite series
+remains only to import existing SQLite files (`npm run db:import-sqlite`). Back up the database
+and signing key before deployment, and never edit an applied migration.
 
 ### API
 
@@ -99,8 +102,10 @@ Every new business table carries `organization_id`; reference pairs use composit
 to prevent cross-tenant parents, members, positions and job dependencies. Each service rechecks
 the administrator against live enabled identities. Origin protection and session handling are
 reused. Unknown input keys are rejected. SQL values are bound, and dynamic identifiers are
-limited to static allow-lists. SQLite has no native PostgreSQL RLS: these constraints and
-server authorization must not be described as RLS or as protection from a database superuser.
+limited to static allow-lists. PostgreSQL row-level security now enforces the same boundary in
+the database for tenant-scoped work
+([ADR 0018](adr/0018-postgresql-row-level-security.md)). It does not protect against a database
+superuser or the platform role, which runs sign-in and other cross-tenant work.
 
 Login identity (`users`) is separate from tenant employment (`employees`) and the explicit
 access grant (`organization_memberships`). Session checks require all three, the login
@@ -126,7 +131,7 @@ reverse-proxy routing. Domain registration does not configure those services.
 Circular unit and position hierarchies are rejected by database triggers. A job role's discipline
 must belong to its selected family. Active dependants block archival. New dependencies must be
 active; moving a discipline to an incompatible family is rejected. Change-event UPDATE/DELETE
-is blocked by triggers; database-file administrators can still bypass those controls. Off-system
+is blocked by triggers; database superusers and the schema owner can still bypass those controls. Off-system
 tamper-evident retention is a later governance capability, not delivered here.
 
 ```mermaid
@@ -175,7 +180,7 @@ discipline creation through a server-backed picker, and persistence across brows
 - Tree view is paginated, one-level drill-down, not an expandable drag-and-drop tree.
 - New screens are password-mode only; Google pilot identities remain file-managed.
 - The new immutable audit store has no dedicated administration viewer yet.
-- SQLite and the current single API process have not been validated for thousands of tenants.
+- The API has not been load-tested with thousands of tenants.
 - Setup progress is derived from current records and can regress when records are archived or disabled. It is not a persisted wizard, deployment approval, or agent-readiness gate.
 - This does not complete Phase 1 or the full master acceptance scenario.
 

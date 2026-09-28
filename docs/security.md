@@ -15,7 +15,7 @@
 
 Explicit actor headers now work only in opt-in local demo mode. Google mode requires a server-side Workspace login and an HttpOnly application session on every business route. Roles and organizations come from operator-managed membership records; browser headers are ignored. See [Google Workspace security and setup](google-workspace.md).
 
-Demo headers remain public and forgeable, and demo mode cannot run with NODE_ENV=production. Google sign-in does not complete the remaining production work: database-level tenant isolation, vaults, and key rotation are still pending. See [provisioning](provisioning.md) for manifest-key storage, trust, and rotation limitations.
+Demo headers remain public and forgeable, and demo mode cannot run with NODE_ENV=production. Google sign-in does not complete the remaining production work: vaults and key rotation are still pending. Database-level tenant isolation is PostgreSQL row-level security ([ADR 0018](adr/0018-postgresql-row-level-security.md)). See [provisioning](provisioning.md) for manifest-key storage, trust, and rotation limitations.
 
 ## Key management
 

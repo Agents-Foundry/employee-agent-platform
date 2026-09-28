@@ -194,6 +194,36 @@ error handling and documentation. A type, table or route stub alone does not cou
 - Pull requests are GitHub-only, and each change set is limited to 100 files and 1 MiB.
 - Git and file operations run on the host, confined but not network-isolated.
 
+## PostgreSQL with row-level security — delivered
+
+See [ADR 0018](adr/0018-postgresql-row-level-security.md).
+
+- The control plane runs on PostgreSQL. Every service, route and CLI is async, and each unit of
+  work is one SERIALIZABLE transaction, retried on conflicts.
+- Every tenant table (37, plus `organizations`) forces row-level security keyed on
+  `app.organization_id`, set per transaction.
+- Separate roles:
+  - tenant work runs as a role that cannot bypass row-level security;
+  - sign-in, sessions, invitations and runtime claims run in an explicit platform scope;
+  - migrations run as the schema owner.
+- The tenant role is never granted password hashes, session or invitation tokens, login
+  state, runtime nonces or migration history.
+- `npm run db:dev`, `db:bootstrap`, `db:migrate` and `db:import-sqlite`. The importer copies an
+  existing SQLite database into an empty PostgreSQL database in one verified transaction.
+- Tests clone a migrated template database per test. A database-level suite checks
+  isolation in every tenant table, the role privileges, scope misuse, migration tampering and
+  concurrent approval decisions.
+
+### Limitations
+
+- The platform role bypasses row-level security. Its flows keep explicit organization filters.
+- Unique constraints are global, so they can reveal that a value (for example, an email
+  address) exists in another tenant.
+- Verified tenant domains are looked up per request, without a cache.
+- The catalog is loaded at startup. A version registered later by another instance fails
+  closed until restart.
+- Timestamps and JSON stay text columns.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -218,8 +248,10 @@ egress proxy ([ADR 0016](adr/0016-egress-proxy.md)), and Frontend Engineer 1.1.0
 locked dependencies from its configured registry
 ([ADR 0017](adr/0017-dependency-installation.md)). An opt-in check runs real Chromium behind
 the proxy, and Playwright grants allow 256 processes, because Chromium crashes under 64. The
-highest-value follow-ups are:
+control plane now runs on PostgreSQL with row-level security
+([ADR 0018](adr/0018-postgresql-row-level-security.md)). The highest-value follow-ups are:
 
-- PostgreSQL with row-level security for multi-tenant production, replacing SQLite's
-  application-level isolation;
-- more roles as catalog data, with evaluation suites.
+- more roles as catalog data, with evaluation suites;
+- caching verified tenant domains, which each request now looks up in the database;
+- native timestamp and JSON column types, which stay text for now so digests and ordering do
+  not change.
