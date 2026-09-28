@@ -21,14 +21,15 @@ agent runtime tool (repository / browser)
 
 ## Operations
 
-| Operation        | Governed by             | Tool          | Notes                                                                                                                                                |
-| ---------------- | ----------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git.checkout`   | `repository.read`       | `repository`  | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only                                                       |
-| `git.status`     | `repository.read`       | `repository`  | `git status --porcelain=v1 --branch`                                                                                                                 |
-| `file.read`      | `repository.read`       | `repository`  | Text only, capped at 256 KiB; the path must stay inside the workspace after resolving symlinks                                                       |
-| `playwright.run` | `qa.execute_playwright` | `browser`     | Runs the project's installed `@playwright/test` with a JSON reporter against the configured QA origin; requires approval                             |
-| `file.write`     | `repository.write`      | `code-editor` | Phase G. Inline UTF-8 content, at most 128 KiB; the deepest existing ancestor must resolve inside the workspace, and links are never written through |
-| `command`        | `workspace.command`     | `build`       | Phase G. Only `npm run <script>` for the agent's configured `projectScripts`; network `NONE`; container provider only                                |
+| Operation              | Governed by                      | Tool           | Notes                                                                                                                                                                               |
+| ---------------------- | -------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git.checkout`         | `repository.read`                | `repository`   | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only                                                                                      |
+| `git.status`           | `repository.read`                | `repository`   | `git status --porcelain=v1 --branch`                                                                                                                                                |
+| `file.read`            | `repository.read`                | `repository`   | Text only, capped at 256 KiB; the path must stay inside the workspace after resolving symlinks                                                                                      |
+| `playwright.run`       | `qa.execute_playwright`          | `browser`      | Runs the project's installed `@playwright/test` with a JSON reporter against the configured QA origin; requires approval                                                            |
+| `file.write`           | `repository.write`               | `code-editor`  | Phase G. Inline UTF-8 content, at most 128 KiB; the deepest existing ancestor must resolve inside the workspace, and links are never written through                                |
+| `command`              | `workspace.command`              | `build`        | Phase G. Only `npm run <script>` for the agent's configured `projectScripts`; network `NONE`; container provider only                                                               |
+| `dependencies.install` | `workspace.dependencies.install` | `dependencies` | `npm ci --ignore-scripts` from the agent's configured `packageRegistryUrl` only, behind the egress proxy; container provider only ([ADR 0017](adr/0017-dependency-installation.md)) |
 
 ## Local provider guarantees
 
@@ -106,8 +107,8 @@ npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.
 
 - Egress is allow-listed by hostname only: any port on an allowed host is reachable, and TLS
   is not intercepted. Real Chromium through the proxy is not covered by tests yet.
-- There is no dependency installation. Scripts run offline, so `node_modules` (including
-  `@playwright/test`) must come with the checkout or the image.
+- Dependency installation is npm only (`npm ci`, install scripts disabled), from one
+  configured registry without credentials. Packages that need install scripts do not work.
 - Only public HTTPS repositories work; checkouts are of branches or tags, not commit SHAs.
 - Shell commands are never granted; only allow-listed `npm run` scripts are.
 - If the execution runtime crashes mid-operation, the grant stays `RUNNING` and can't be
