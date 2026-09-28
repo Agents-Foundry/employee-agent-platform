@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import pg from 'pg';
+import { CONNECT_TIMEOUT_MS } from './pg-store.js';
 import { baselineSql } from './migrations/0001-baseline.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
@@ -19,7 +20,10 @@ function checksum(sql: string): string {
  * so concurrent starts do not race. A changed released migration fails closed.
  */
 export async function migrate(ownerUrl: string): Promise<number[]> {
-  const client = new pg.Client({ connectionString: ownerUrl });
+  const client = new pg.Client({
+    connectionString: ownerUrl,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
   await client.connect();
   const applied: number[] = [];
   try {

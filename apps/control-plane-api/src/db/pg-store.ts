@@ -40,6 +40,8 @@ export function constraintKind(error: unknown): ConstraintKind | undefined {
 /** Serialization failures and deadlocks: the whole transaction is retried. */
 const RETRYABLE = new Set(['40001', '40P01']);
 const MAX_ATTEMPTS = 8;
+/** Unreachable servers fail fast instead of hanging requests or CLI runs. */
+export const CONNECT_TIMEOUT_MS = 10_000;
 
 const positional = new Map<string, string>();
 
@@ -112,6 +114,7 @@ export class PgStore {
   static async connect(config: PgStoreConfig): Promise<PgStore> {
     const options = (connectionString: string): pg.PoolConfig => ({
       connectionString,
+      connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
       max: config.maxConnections ?? 10,
       types,
       application_name: 'agents-foundry-control-plane',

@@ -8,7 +8,8 @@
     "dev:demo": "tsx watch --env-file-if-exists=../../.env src/server.ts --demo",
     "start": "node --env-file-if-exists=../../.env dist/apps/control-plane-api/src/server.js",
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run --coverage"
+    "test": "vitest run --coverage",
+    "db": "tsx --env-file-if-exists=../../.env src/db/cli.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

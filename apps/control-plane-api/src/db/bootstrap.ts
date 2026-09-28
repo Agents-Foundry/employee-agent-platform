@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { CONNECT_TIMEOUT_MS } from './pg-store.js';
 
 /** A login role; the password is only ever sent inside a quoted literal. */
 export interface LoginRole {
@@ -29,7 +30,10 @@ function name(value: string): string {
  * roles get their attributes and passwords reset; an existing database is kept.
  */
 export async function bootstrapDatabase(adminUrl: string, options: BootstrapOptions) {
-  const admin = new pg.Client({ connectionString: adminUrl });
+  const admin = new pg.Client({
+    connectionString: adminUrl,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
   await admin.connect();
   try {
     const role = async (roleName: string, attributes: string) => {
@@ -65,7 +69,10 @@ export async function bootstrapDatabase(adminUrl: string, options: BootstrapOpti
   // The public schema belongs to the database owner; nobody else may create objects in it.
   const database = new URL(adminUrl);
   database.pathname = `/${options.database}`;
-  const client = new pg.Client({ connectionString: database.href });
+  const client = new pg.Client({
+    connectionString: database.href,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
   await client.connect();
   try {
     await client.query(`ALTER SCHEMA public OWNER TO ${name(options.owner.name)};
@@ -91,7 +98,10 @@ export async function cloneDatabase(
   template: string,
   owner: string,
 ): Promise<void> {
-  const admin = new pg.Client({ connectionString: adminUrl });
+  const admin = new pg.Client({
+    connectionString: adminUrl,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
   await admin.connect();
   try {
     await admin.query(
@@ -104,7 +114,10 @@ export async function cloneDatabase(
 
 /** Drops a database created for tests. */
 export async function dropDatabase(adminUrl: string, database: string): Promise<void> {
-  const admin = new pg.Client({ connectionString: adminUrl });
+  const admin = new pg.Client({
+    connectionString: adminUrl,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  });
   await admin.connect();
   try {
     await admin.query(`DROP DATABASE IF EXISTS ${name(database)} WITH (FORCE)`);
