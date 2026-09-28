@@ -216,7 +216,9 @@ deny into an allow.
 All planned phases (A–G) are delivered. Since then, grant host allow-lists are enforced by an
 egress proxy ([ADR 0016](adr/0016-egress-proxy.md)), and Frontend Engineer 1.1.0 installs
 locked dependencies from its configured registry
-([ADR 0017](adr/0017-dependency-installation.md)). The highest-value follow-ups are:
+([ADR 0017](adr/0017-dependency-installation.md)). An opt-in check runs real Chromium behind
+the proxy, and Playwright grants allow 256 processes, because Chromium crashes under 64. The
+highest-value follow-ups are:
 
 - PostgreSQL with row-level security for multi-tenant production, replacing SQLite's
   application-level isolation;
