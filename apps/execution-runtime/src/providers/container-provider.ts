@@ -456,7 +456,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     } catch {
       throw new OperationFailure(
         'PLAYWRIGHT_NOT_INSTALLED',
-        'The project has no installed @playwright/test; dependency installation is not supported yet.',
+        'The project has no installed @playwright/test; install its dependencies first.',
       );
     }
     const { result, egress } = await this.run(

@@ -233,6 +233,7 @@ describe('execution runtime end to end under control-plane grants', () => {
     ]);
     expect(provider.seen[0]!.limits).toMatchObject({
       timeoutMs: 120_000,
+      maxProcesses: 64,
       network: { mode: 'ALLOW_LIST', allowedHosts: ['example.com'] },
     });
     let detail = db.execution.getRun(employee, run.id);

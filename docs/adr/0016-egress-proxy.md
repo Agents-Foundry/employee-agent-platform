@@ -60,6 +60,8 @@ operator set `EXECUTION_ALLOW_UNRESTRICTED_EGRESS=true` and gave them open netwo
   QA environments work.
 - Git checkout and file operations still run on the host and are not network-isolated
   (ADR 0015).
-- The integration tests use Node's `fetch` and a stand-in Playwright CLI. Real Chromium
-  through the proxy has not been exercised yet. If it ignores the proxy variables, its
-  requests fail closed.
+- The integration tests use Node's `fetch` and a stand-in Playwright CLI. An opt-in check
+  (`AF_PLAYWRIGHT_CHECK=1`, `test/playwright-egress.spec.ts`) runs real `@playwright/test`
+  and Chromium: the page loads through the proxy, and Chromium's request to a host outside
+  the grant is refused. It showed that Chromium's page process crashes under 64 processes,
+  so `qa.execute_playwright` grants allow 256; other operations keep 64.

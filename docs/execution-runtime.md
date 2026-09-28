@@ -91,7 +91,7 @@ allow-list.
 | `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                         |
 | `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                   |
 | `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                           |
-| `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`                                                      |
+| `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`; `sandbox/playwright.Dockerfile` builds one          |
 | `EXECUTION_EGRESS_PROXY`                | `true`                    | Container provider: enforce grant host allow-lists with the egress proxy                                 |
 | `EXECUTION_EGRESS_PROXY_IMAGE`          | the sandbox image         | Image that runs the egress proxy; it needs `node`                                                        |
 | `EXECUTION_EGRESS_PROXY_DIR`            | the package's `sandbox/`  | Directory containing `egress-proxy.mjs`                                                                  |
@@ -106,7 +106,11 @@ npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.
 ## Limitations
 
 - Egress is allow-listed by hostname only: any port on an allowed host is reachable, and TLS
-  is not intercepted. Real Chromium through the proxy is not covered by tests yet.
+  is not intercepted. Real Chromium through the proxy is covered only by an opt-in check
+  (`AF_PLAYWRIGHT_CHECK=1 npx vitest run test/playwright-egress.spec.ts` in
+  `apps/execution-runtime`), because it needs a Playwright image and the public npm registry.
+- Grants allow 64 processes and threads; `qa.execute_playwright` allows 256, because
+  Chromium crashes under 64.
 - Dependency installation is npm only (`npm ci`, install scripts disabled), from one
   configured registry without credentials. Packages that need install scripts do not work.
 - Only public HTTPS repositories work; checkouts are of branches or tags, not commit SHAs.
