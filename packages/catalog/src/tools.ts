@@ -62,6 +62,17 @@ export const tools: ToolDefinition[] = [
     timeoutMs: 600_000,
   },
   {
+    id: 'dependencies',
+    version: '1.0.0',
+    description:
+      "Install the project's locked npm dependencies in the sandbox from the configured registry.",
+    risk: 'MEDIUM',
+    executionLocation: 'EXECUTION_RUNTIME',
+    sideEffects: 'LOCAL_WRITE',
+    governedActions: ['workspace.dependencies.install'],
+    timeoutMs: 900_000,
+  },
+  {
     id: 'source-control',
     version: '1.0.0',
     description: 'Propose workspace changes as a draft pull request, only when approved.',

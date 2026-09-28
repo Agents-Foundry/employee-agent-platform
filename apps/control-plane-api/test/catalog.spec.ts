@@ -509,4 +509,59 @@ describe('second role through configuration only (ADR 0009)', () => {
       db.close();
     }
   });
+
+  it('adds governed dependency installs in Frontend Engineer 1.1.0 as data only', () => {
+    const db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
+    try {
+      const pending = db.requestProvisioning('employee_qa_demo', {
+        blueprintId: 'engineering.frontend-engineer',
+        blueprintVersion: '1.1.0',
+        provider: 'test',
+        model: 'test-model',
+        credentialMode: 'ORGANIZATION_MANAGED',
+        answers: {
+          projectName: 'Storefront',
+          repositoryUrl: 'https://github.com/acme/storefront',
+          packageRegistryUrl: 'https://npm.acme.internal/',
+          issueTracker: ['Jira'],
+          sourceControl: ['GitHub'],
+        },
+      });
+      const { manifest } = db.decideProvisioning(
+        pending.id,
+        'org_agents_foundry',
+        'admin_demo',
+        'APPROVED',
+        'ok',
+      );
+      if (manifest?.payload.apiVersion !== 'agents-foundry/v2') throw new Error('EXPECTED_V2');
+      expect(manifest.payload.tools).toEqual([
+        'repository',
+        'code-editor',
+        'build',
+        'dependencies',
+        'source-control',
+        'issue-tracker',
+        'artifact',
+      ]);
+      expect(manifest.payload.configuration).toMatchObject({
+        packageRegistryUrl: 'https://npm.acme.internal/',
+      });
+      expect(manifest.payload.policies.capabilities).toContainEqual({
+        action: 'workspace.dependencies.install',
+        outcome: 'ALLOW',
+      });
+      expect(
+        db.pinnedWorkflow(manifest, 'implement-ui-change')?.steps.map((step) => step.action),
+      ).toEqual([
+        'jira.read',
+        'repository.write',
+        'workspace.dependencies.install',
+        'workspace.command',
+        'repository.pull_request.create',
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });

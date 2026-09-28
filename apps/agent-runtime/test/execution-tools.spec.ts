@@ -6,6 +6,7 @@ import {
   BrowserTool,
   BuildTool,
   CodeEditorTool,
+  DependencyTool,
   RepositoryTool,
 } from '../src/tools/execution-tools.js';
 import { SourceControlTool } from '../src/tools/source-control-tool.js';
@@ -75,6 +76,25 @@ describe('execution-runtime tools', () => {
     expect(build.parse(script)).toEqual(script);
     expect(build.summarize(build.parse(script))).toBe('Run npm run lint in repo');
     expect(() => build.parse(write)).toThrow(RuntimeFailure);
+    const dependencies = new DependencyTool(port);
+    expect(dependencies.governedAction()).toBe('workspace.dependencies.install');
+    const install = {
+      kind: 'dependencies.install',
+      path: 'repo',
+      registryUrl: 'https://npm.acme.internal/',
+    };
+    expect(dependencies.parse(install)).toEqual(install);
+    expect(dependencies.summarize(dependencies.parse(install))).toBe(
+      'Install dependencies in repo from https://npm.acme.internal/',
+    );
+    expect(() => dependencies.parse(script)).toThrow(RuntimeFailure);
+    expect(() => build.parse(install)).toThrow(RuntimeFailure);
+    for (const registryUrl of [
+      'https://user:token@npm.acme.internal/',
+      'https://npm.acme.internal/?x=1',
+      'file:///registry',
+    ])
+      expect(() => dependencies.parse({ ...install, registryUrl })).toThrow();
     const proposal = {
       repository: 'acme/storefront',
       baseBranch: 'main',

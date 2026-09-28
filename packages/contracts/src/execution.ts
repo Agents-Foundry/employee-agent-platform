@@ -282,7 +282,12 @@ export type ExecutionOperation =
   | { kind: 'git.checkout'; repositoryUrl: string; ref: string; path: string }
   | { kind: 'git.status'; path: string }
   /** `path` is the workspace-relative project directory (default: workspace root). */
-  | { kind: 'playwright.run'; project: string; baseUrl: string; path?: string };
+  | { kind: 'playwright.run'; project: string; baseUrl: string; path?: string }
+  /**
+   * Install the project's locked npm dependencies (`npm ci`, install scripts disabled) from
+   * one registry (ADR 0017). `path` is the workspace-relative project directory.
+   */
+  | { kind: 'dependencies.install'; path: string; registryUrl: string };
 
 export interface ExecutionRequest {
   id: string;

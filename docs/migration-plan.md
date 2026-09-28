@@ -189,7 +189,8 @@ error handling and documentation. A type, table or route stub alone does not cou
 - No egress allow-list: container grants that need network are refused unless the operator
   accepts unrestricted egress (QA Playwright runs, for now). Resolved by the egress proxy
   ([ADR 0016](adr/0016-egress-proxy.md)).
-- No dependency installation; scripts run offline.
+- No dependency installation; scripts run offline. Resolved by governed installs
+  ([ADR 0017](adr/0017-dependency-installation.md)).
 - Pull requests are GitHub-only, and each change set is limited to 100 files and 1 MiB.
 - Git and file operations run on the host, confined but not network-isolated.
 
@@ -212,10 +213,11 @@ deny into an allow.
 
 ## Next recommended phase
 
-All planned phases (A–G) are delivered, and grant host allow-lists are enforced by an egress
-proxy ([ADR 0016](adr/0016-egress-proxy.md)). The highest-value follow-ups are:
+All planned phases (A–G) are delivered. Since then, grant host allow-lists are enforced by an
+egress proxy ([ADR 0016](adr/0016-egress-proxy.md)), and Frontend Engineer 1.1.0 installs
+locked dependencies from its configured registry
+([ADR 0017](adr/0017-dependency-installation.md)). The highest-value follow-ups are:
 
-- dependency installation through a governed, allow-listed registry mirror;
 - PostgreSQL with row-level security for multi-tenant production, replacing SQLite's
   application-level isolation;
 - more roles as catalog data, with evaluation suites.

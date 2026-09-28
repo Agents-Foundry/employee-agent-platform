@@ -2,6 +2,7 @@ export type GovernedAction =
   | 'repository.read'
   | 'repository.write'
   | 'workspace.command'
+  | 'workspace.dependencies.install'
   | 'jira.read'
   | 'qa.plan'
   | 'qa.execute_playwright'
@@ -25,6 +26,12 @@ const decisions: Record<GovernedAction, PolicyDecision> = {
     outcome: 'ALLOW',
     risk: 'LOW',
     reason: "Writing inside the agent's private workspace changes nothing outside it.",
+  },
+  'workspace.dependencies.install': {
+    outcome: 'ALLOW',
+    risk: 'MEDIUM',
+    reason:
+      'Locked dependencies are installed in the sandbox from the configured registry only, with install scripts disabled.',
   },
   'workspace.command': {
     outcome: 'ALLOW',

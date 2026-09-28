@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
@@ -253,7 +254,7 @@ export function dockerRunArgs(run: ContainerRun): string[] {
 
 /**
  * Sandboxing provider (Phase G). Repository code only ever executes inside a container:
- * `command` and `playwright.run` run under the grant's CPU, memory, process and network limits
+ * `command`, `playwright.run` and `dependencies.install` run under the grant's CPU, memory, process and network limits
  * with no capabilities and a read-only root filesystem. Operations that execute no repository
  * code (git checkout and status, file read and write) run on the host through the local
  * provider's confined, hook-free implementation.
@@ -290,13 +291,22 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     limits: ResourceLimits,
     signal: AbortSignal,
   ): Promise<ProviderOutcome> {
-    if (operation.kind !== 'command' && operation.kind !== 'playwright.run')
+    if (
+      operation.kind !== 'command' &&
+      operation.kind !== 'playwright.run' &&
+      operation.kind !== 'dependencies.install'
+    )
       return this.host.execute(workspace, operation, limits, signal);
     try {
       const network = this.network(limits);
-      return operation.kind === 'command'
-        ? await this.command(workspace, operation, limits, network, signal)
-        : await this.playwright(workspace, operation, limits, network, signal);
+      switch (operation.kind) {
+        case 'command':
+          return await this.command(workspace, operation, limits, network, signal);
+        case 'playwright.run':
+          return await this.playwright(workspace, operation, limits, network, signal);
+        case 'dependencies.install':
+          return await this.install(workspace, operation, limits, network, signal);
+      }
     } catch (error) {
       if (error instanceof OperationFailure)
         return {
@@ -356,6 +366,76 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       },
       egress,
     );
+  }
+
+  /**
+   * `npm ci` from the grant's registry only (ADR 0017): exactly the locked versions, verified
+   * against the lockfile's integrity hashes, with install scripts disabled. Every locked
+   * tarball is fetched through the given registry (`replace-registry-host=always`), so the
+   * egress proxy only has to allow that one host. The npm cache lives in the workspace for
+   * the operation (the root filesystem is read-only) and is removed afterwards.
+   */
+  private async install(
+    workspace: WorkspaceHandle,
+    operation: Extract<ExecutionOperation, { kind: 'dependencies.install' }>,
+    limits: ResourceLimits,
+    network: Egress,
+    signal: AbortSignal,
+  ): Promise<ProviderOutcome> {
+    await inside(workspace.root, operation.path, true);
+    const lockfiles = await Promise.all(
+      ['package-lock.json', 'npm-shrinkwrap.json'].map((name) =>
+        inside(workspace.root, `${operation.path}/${name}`.replace(/^\.\//, ''), true).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    );
+    if (!lockfiles.includes(true))
+      throw new OperationFailure(
+        'LOCKFILE_REQUIRED',
+        'Installing needs a package-lock.json: only exactly locked versions are installed.',
+      );
+    const cache = `.af-npm-cache-${randomUUID()}`;
+    try {
+      const { result, egress } = await this.run(
+        workspace,
+        this.options.image,
+        operation.path,
+        [
+          'npm',
+          'ci',
+          '--ignore-scripts',
+          '--no-audit',
+          '--no-fund',
+          '--no-update-notifier',
+          `--registry=${operation.registryUrl}`,
+          '--replace-registry-host=always',
+          // Retry transient failures, but keep a failed install well inside the grant timeout.
+          '--fetch-retries=2',
+          '--fetch-retry-mintimeout=2000',
+          '--fetch-retry-maxtimeout=10000',
+          `--cache=/workspace/${cache}`,
+        ],
+        {},
+        limits,
+        network,
+        signal,
+      );
+      if (result.exitCode !== 0 || result.timedOut)
+        return withEgress(failedProcess(result, 'INSTALL_FAILED', 'npm ci'), egress);
+      return withEgress(
+        {
+          status: 'SUCCEEDED',
+          exitCode: 0,
+          ...bounded(`npm ci succeeded.\n${result.stdout}`.trim()),
+          artifacts: processLogs(result, 'install.log'),
+        },
+        egress,
+      );
+    } finally {
+      await rm(join(workspace.root, cache), { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   private async playwright(

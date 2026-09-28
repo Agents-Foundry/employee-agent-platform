@@ -88,3 +88,37 @@ export const frontendEngineer: AgentBlueprintVersionDefinition = {
     },
   ],
 };
+
+/**
+ * Frontend Engineer 1.1.0: installs the project's locked dependencies from the registry the
+ * admin configures (`packageRegistryUrl`) before verifying. Without a configured registry,
+ * installs are refused as out of scope.
+ */
+export const frontendEngineerV1_1: AgentBlueprintVersionDefinition = {
+  ...frontendEngineer,
+  version: '1.1.0',
+  skills: frontendEngineer.skills.map((skill) =>
+    skill.id === 'frontend-verification' ? { ...skill, version: '1.1.0' } : skill,
+  ),
+  tools: [
+    ...frontendEngineer.tools.slice(0, 3),
+    { id: 'dependencies', version: '1.0.0' },
+    ...frontendEngineer.tools.slice(3),
+  ],
+  workflows: [{ id: 'implement-ui-change', version: '1.1.0' }],
+  policy: {
+    ...frontendEngineer.policy,
+    actions: [...frontendEngineer.policy.actions, 'workspace.dependencies.install'],
+  },
+  questionnaire: [
+    ...frontendEngineer.questionnaire.slice(0, 3),
+    {
+      id: 'packageRegistryUrl',
+      label: 'npm registry or mirror URL (HTTPS)',
+      type: 'url',
+      required: false,
+      scope: 'AGENT',
+    },
+    ...frontendEngineer.questionnaire.slice(3),
+  ],
+};

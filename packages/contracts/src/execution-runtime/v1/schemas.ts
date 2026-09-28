@@ -101,6 +101,16 @@ export const executionOperationSchema = z.discriminatedUnion('kind', [
       path: workspacePathSchema.optional(),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal('dependencies.install'),
+      path: workspacePathSchema,
+      registryUrl: url(['https:', 'http:']).refine(
+        (value) => !new URL(value).search && !new URL(value).hash,
+        'registryUrl must not have a query or fragment',
+      ),
+    })
+    .strict(),
 ]) satisfies z.ZodType<ExecutionOperation>;
 
 function issues(error: z.ZodError): string[] {
@@ -155,6 +165,7 @@ export const signedExecutionGrantSchema = z
           'file.write',
           'command',
           'playwright.run',
+          'dependencies.install',
         ]),
         operationDigest: digest,
         isolation: z.enum(['sandboxed', 'local']),

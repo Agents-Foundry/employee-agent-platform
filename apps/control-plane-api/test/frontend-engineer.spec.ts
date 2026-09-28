@@ -33,6 +33,7 @@ import {
   BrowserTool,
   BuildTool,
   CodeEditorTool,
+  DependencyTool,
   RepositoryTool,
 } from '../../agent-runtime/src/tools/execution-tools.js';
 import { IssueTrackerTool } from '../../agent-runtime/src/tools/issue-tracker-tool.js';
@@ -116,6 +117,9 @@ class FixtureRepositoryProvider implements ExecutionProvider {
       );
       return done(`Checked out ${operation.ref} into ${operation.path}.`);
     }
+    // Installs need a registry the tests cannot reach; the execution runtime's own tests run
+    // them for real against a local mirror.
+    if (operation.kind === 'dependencies.install') return done('[recorded, not executed] npm ci');
     if (operation.kind === 'command' && this.inner.isolation === 'local')
       return done(`[recorded, not executed] ${operation.command} ${operation.args.join(' ')}`);
     return this.inner.execute(workspace, operation, limits, signal);
@@ -336,6 +340,7 @@ describe.each([
         new BrowserTool(execution),
         new CodeEditorTool(execution),
         new BuildTool(execution),
+        new DependencyTool(execution),
       ]),
       artifacts: new MemoryArtifactStore(),
       checkpoints: new MemoryCheckpointStore(),
@@ -521,6 +526,82 @@ describe.each([
       allowedProjects: [],
       allowedRepositories: ['acme/storefront'],
     });
+  });
+
+  it('installs dependencies only from the registry configured for the agent (1.1.0)', async () => {
+    const provision = (packageRegistryUrl?: string) => {
+      const pending = db.requestProvisioning(
+        employee.id,
+        {
+          blueprintId: 'engineering.frontend-engineer',
+          blueprintVersion: '1.1.0',
+          provider: 'test-provider',
+          model: 'test-model',
+          credentialMode: 'ORGANIZATION_MANAGED',
+          answers: {
+            projectName: 'Storefront',
+            repositoryUrl: 'https://github.com/acme/storefront',
+            ...(packageRegistryUrl ? { packageRegistryUrl } : {}),
+            issueTracker: ['Jira'],
+            sourceControl: ['GitHub'],
+          },
+        },
+        org,
+      );
+      return manifestSubject(
+        db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot').manifest!.payload,
+      ).agentId;
+    };
+    const mirror = 'https://npm.acme.internal/repository/npm/';
+    const install = (registryUrl: string) =>
+      ['dependencies', { kind: 'dependencies.install', path: 'repo', registryUrl }] as [
+        string,
+        object,
+      ];
+    const start = async (id: string) => {
+      await demoRequest(app)
+        .post('/api/execution/v1/runs')
+        .send({ agentId: id, task: { objective: 'Install', inputs: {} } })
+        .expect(202);
+      await host.pollOnce();
+      await host.drain();
+      return toolResults(modelRequests.at(-1)!).map((block) => block.content);
+    };
+
+    scenario = [
+      [
+        'repository',
+        {
+          kind: 'git.checkout',
+          repositoryUrl: 'https://github.com/acme/storefront',
+          ref: 'main',
+          path: 'repo',
+        },
+      ],
+      install('https://npm.acme.internal/repository/npm'),
+      install('https://registry.npmjs.org/'),
+      install('http://npm.acme.internal/repository/npm/'),
+    ];
+    expect(await start(provision(mirror))).toEqual([
+      expect.stringContaining('Checked out main'),
+      '[recorded, not executed] npm ci',
+      'ACTION_DENIED: The target resource is outside the configured scope.',
+      'ACTION_DENIED: The target resource is outside the configured scope.',
+    ]);
+    // The grant opened the network to the configured registry's host and nothing else.
+    const installs = provider.seen.filter(
+      (entry) => entry.operation.kind === 'dependencies.install',
+    );
+    expect(installs.map((entry) => entry.limits.network)).toEqual([
+      { mode: 'ALLOW_LIST', allowedHosts: ['npm.acme.internal'] },
+    ]);
+
+    // Without a configured registry, nothing can be installed.
+    modelRequests.length = 0;
+    scenario = [install(mirror)];
+    expect(await start(provision())).toEqual([
+      'ACTION_DENIED: The target resource is outside the configured scope.',
+    ]);
   });
 
   it('runs in a conversation of the same agent and reports back into it', async () => {

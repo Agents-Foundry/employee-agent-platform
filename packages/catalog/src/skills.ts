@@ -72,6 +72,15 @@ export const skills: SkillDefinition[] = [
     activatesWhen: { workflows: ['implement-ui-change'] },
   },
   {
+    id: 'frontend-verification',
+    version: '1.1.0',
+    title: 'Frontend verification',
+    description:
+      "Install the project's locked dependencies, then run its lint, test and build scripts and fix what they report.",
+    requires: { tools: ['dependencies', 'build', 'artifact'], connectorCapabilities: [] },
+    activatesWhen: { workflows: ['implement-ui-change'] },
+  },
+  {
     id: 'change-proposal',
     version: '1.0.0',
     title: 'Change proposal',
