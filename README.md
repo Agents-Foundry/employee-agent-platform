@@ -118,7 +118,8 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [Agent Manifest v2](docs/agent-manifest-v2.md), [artifacts](docs/artifacts.md),
   [agent catalog](docs/agent-catalog.md)
 - ADRs [0002](docs/adr/0002-separate-agent-runtime-from-control-plane.md) to
-  [0015](docs/adr/0015-frontend-engineer-and-sandboxed-execution.md)
+  [0015](docs/adr/0015-frontend-engineer-and-sandboxed-execution.md),
+  [0016](docs/adr/0016-egress-proxy.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

@@ -1,5 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import http from 'node:http';
 import {
   mkdirSync,
   mkdtempSync,
@@ -30,7 +31,12 @@ import { ExecutionArtifactStore } from '../src/artifact-store.js';
 import { ExecutionRefused, ExecutionService } from '../src/execution-service.js';
 import { GrantVerifier } from '../src/grant-verifier.js';
 import { runProcess } from '../src/process-runner.js';
-import { ContainerExecutionProvider, dockerRunArgs } from '../src/providers/container-provider.js';
+import {
+  ContainerExecutionProvider,
+  defaultEgressProxyDirectory,
+  dockerRunArgs,
+  egressProxyArgs,
+} from '../src/providers/container-provider.js';
 import { LocalExecutionProvider } from '../src/providers/local-provider.js';
 import { createExecutionServer } from '../src/server.js';
 import { StateStore } from '../src/state-store.js';
@@ -428,6 +434,30 @@ describe('container provider', () => {
     }
   });
 
+  it('builds a locked-down egress proxy that runs only the mounted proxy script', () => {
+    const run = {
+      name: 'af-egress-1',
+      image: 'node:22-bookworm-slim',
+      directory: '/opt/af/sandbox',
+      allowedHosts: ['qa.example.com', 'registry.npmjs.org'],
+      user: '1000:1000',
+    };
+    const args = egressProxyArgs(run);
+    const flag = (name: string) => args[args.indexOf(name) + 1];
+    expect(flag('--network')).toBe('bridge');
+    expect(flag('--cap-drop')).toBe('ALL');
+    expect(flag('--security-opt')).toBe('no-new-privileges');
+    expect(flag('--pull')).toBe('never');
+    expect(flag('--memory')).toBe('128m');
+    expect(flag('--mount')).toBe('type=bind,source=/opt/af/sandbox,target=/egress,readonly');
+    expect(args).toContain('--read-only');
+    expect(args).toContain('EGRESS_ALLOWED_HOSTS=qa.example.com,registry.npmjs.org');
+    expect(args.slice(-3)).toEqual(['node:22-bookworm-slim', 'node', '/egress/egress-proxy.mjs']);
+    // A host cannot smuggle a second host (or anything else) into the proxy's allow-list.
+    expect(() => egressProxyArgs({ ...run, allowedHosts: ['qa.example.com,evil.test'] })).toThrow();
+    expect(defaultEgressProxyDirectory()).toMatch(/sandbox$/);
+  });
+
   const image = 'node:22-bookworm-slim';
   const docker = (() => {
     try {
@@ -549,6 +579,97 @@ describe('container provider', () => {
         status: 'DENIED',
         error: { code: 'EGRESS_CONTROL_UNAVAILABLE' },
       });
+    });
+
+    it('lets networked grants reach only their allowed hosts, through the egress proxy', async () => {
+      const qa = http.createServer((request, response) => response.end(`qa saw ${request.url}`));
+      await new Promise<void>((resolve) => qa.listen(0, '127.0.0.1', resolve));
+      const port = (qa.address() as AddressInfo).port;
+      try {
+        service = new ExecutionService({
+          verifier: new GrantVerifier(spki),
+          provider: new ContainerExecutionProvider({
+            image,
+            allowFileRepositories: true,
+            egressProxyDirectory: defaultEgressProxyDirectory()!,
+          }),
+          state,
+          artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
+          workspaceRoot: root,
+        });
+        // Docker Desktop's name for the machine running the containers.
+        const networked = {
+          limits: {
+            ...limits,
+            network: { mode: 'ALLOW_LIST' as const, allowedHosts: ['host.docker.internal'] },
+          },
+        };
+        await sandboxed({ ...checkout, repositoryUrl });
+        const probe = [
+          "const net = require('node:net');",
+          'const report = (label, url) => fetch(url).then(',
+          '  async (reply) => console.log(`${label}:${reply.status}:${(await reply.text()).trim()}`),',
+          '  () => console.log(`${label}:error`),',
+          ');',
+          '(async () => {',
+          `  await report('allowed', 'http://host.docker.internal:${port}/hello');`,
+          "  await report('denied', 'http://example.com/');",
+          "  await report('deniedTls', 'https://example.com/');",
+          '  await new Promise((resolve) => {',
+          "    const socket = net.connect({ host: '1.1.1.1', port: 443, timeout: 3000 });",
+          "    socket.on('connect', () => { console.log('direct:open'); socket.destroy(); resolve(); });",
+          "    socket.on('error', () => { console.log('direct:blocked'); resolve(); });",
+          "    socket.on('timeout', () => { console.log('direct:blocked'); socket.destroy(); resolve(); });",
+          '  });',
+          '})();',
+        ].join('\n');
+        for (const [path, content] of [
+          ['repo/probe.js', probe],
+          ['repo/package.json', JSON.stringify({ scripts: { probe: 'node probe.js' } })],
+        ])
+          await sandboxed({ kind: 'file.write', path: path!, content: content! });
+        const probed = await sandboxed(
+          { kind: 'command', command: 'npm', args: ['run', 'probe'], cwd: 'repo' },
+          networked,
+        );
+        expect(probed.result.status, probed.output).toBe('SUCCEEDED');
+        expect(probed.output).toContain('allowed:200:qa saw /hello');
+        // Node's fetch tunnels plain HTTP too, so a refused tunnel surfaces as a network error.
+        expect(probed.output).toContain('denied:error');
+        expect(probed.output).toContain('deniedTls:error');
+        expect(probed.output).toContain('direct:blocked');
+        expect(probed.output).toContain(
+          'Network access outside the grant was blocked: example.com:80, example.com:443',
+        );
+        const evidence = probed.artifacts.find((artifact) => artifact.name === 'egress.log')!;
+        const key = evidence.storageReference.replace('artifact://execution-local/', '');
+        const log = readFileSync(join(root, 'artifacts', ...key.split('/')), 'utf8');
+        expect(log).toMatch(/"decision":"ALLOW","method":"\w+","host":"host.docker.internal"/);
+        expect(log).toContain(
+          '"decision":"DENY","method":"CONNECT","host":"example.com","port":443',
+        );
+        expect(log).not.toContain('hello');
+
+        // QA's Playwright runs need no unrestricted-egress override any more.
+        const tested = await sandboxed(
+          {
+            kind: 'playwright.run',
+            project: 'smoke',
+            baseUrl: `http://host.docker.internal:${port}`,
+            path: 'repo',
+          },
+          networked,
+        );
+        expect(tested.result.status, tested.output).toBe('SUCCEEDED');
+        expect(tested.output).toContain('3 passed');
+
+        const leftovers = (...filter: string[]) =>
+          execFileSync('docker', filter, { encoding: 'utf8' }).trim();
+        expect(leftovers('ps', '--all', '--quiet', '--filter', 'name=af-egress-')).toBe('');
+        expect(leftovers('network', 'ls', '--quiet', '--filter', 'name=af-net-')).toBe('');
+      } finally {
+        qa.close();
+      }
     });
   });
 });

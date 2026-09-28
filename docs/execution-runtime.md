@@ -50,15 +50,34 @@ development.
 `EXECUTION_PROVIDER=container` selects `ContainerExecutionProvider` (`isolation: sandboxed`,
 [ADR 0015](adr/0015-frontend-engineer-and-sandboxed-execution.md)).
 
-| Where                    | Operations                                              | Enforced                                                                                                                                                                                                                                                                                                    |
-| ------------------------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Container (`docker run`) | `command`, `playwright.run` (all repository code)       | No capabilities, `no-new-privileges`, read-only root filesystem with a private `/tmp`, the grant's CPU, memory and process limits, `--pull never`, the workspace as the only mount, only the variables the provider sets, `--network none` for grants without hosts, and timeouts that remove the container |
-| Host (local provider)    | `git.checkout`, `git.status`, `file.read`, `file.write` | Everything in the local provider table; these run no repository code, but they are not network-isolated                                                                                                                                                                                                     |
+| Where                    | Operations                                              | Enforced                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container (`docker run`) | `command`, `playwright.run` (all repository code)       | No capabilities, `no-new-privileges`, read-only root filesystem with a private `/tmp`, the grant's CPU, memory and process limits, `--pull never`, the workspace as the only mount, only the variables the provider sets, `--network none` for grants without hosts, an egress proxy for grants with hosts, and timeouts that remove the container |
+| Host (local provider)    | `git.checkout`, `git.status`, `file.read`, `file.write` | Everything in the local provider table; these run no repository code, but they are not network-isolated                                                                                                                                                                                                                                            |
 
-The provider cannot restrict egress to an allow-list, so grants that need network (Playwright
-against a QA environment) are refused with `EGRESS_CONTROL_UNAVAILABLE`. The operator can accept
-that by setting `EXECUTION_ALLOW_UNRESTRICTED_EGRESS=true`, which runs them on the default bridge
-network. Executables are allow-listed too (`npm` by default). Images must already be present.
+Executables are allow-listed (`npm` by default). Images must already be present.
+
+### Egress proxy
+
+Grants that need network (Playwright against a QA environment) run behind an egress proxy
+([ADR 0016](adr/0016-egress-proxy.md)):
+
+- The sandbox joins a private `--internal` network created for the operation, so it has no
+  route out.
+- The network's only other member is a locked-down proxy container
+  (`sandbox/egress-proxy.mjs`). It forwards `CONNECT` tunnels and plain HTTP to the grant's
+  exact hostnames and nothing else.
+- The proxy resolves names itself and refuses loopback, link-local (cloud metadata),
+  unspecified and multicast addresses.
+- Clients reach it through `HTTP_PROXY` and `HTTPS_PROXY`. A client that ignores them cannot
+  connect at all.
+- Every decision is stored as an `egress.log` artifact, and blocked hosts are reported to the
+  model.
+- The sandbox, proxy and network are removed after each operation.
+
+With `EXECUTION_EGRESS_PROXY=false`, such grants are refused (`EGRESS_CONTROL_UNAVAILABLE`)
+unless `EXECUTION_ALLOW_UNRESTRICTED_EGRESS=true` runs them on the bridge network with no
+allow-list.
 
 ## Configuration
 
@@ -72,7 +91,10 @@ network. Executables are allow-listed too (`npm` by default). Images must alread
 | `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                   |
 | `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                           |
 | `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`                                                      |
-| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS`   | `false`                   | Run grants that need network on the bridge network (no allow-list)                                       |
+| `EXECUTION_EGRESS_PROXY`                | `true`                    | Container provider: enforce grant host allow-lists with the egress proxy                                 |
+| `EXECUTION_EGRESS_PROXY_IMAGE`          | the sandbox image         | Image that runs the egress proxy; it needs `node`                                                        |
+| `EXECUTION_EGRESS_PROXY_DIR`            | the package's `sandbox/`  | Directory containing `egress-proxy.mjs`                                                                  |
+| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS`   | `false`                   | Without the proxy: run grants that need network on the bridge network (no allow-list)                    |
 | `EXECUTION_RUNTIME_URL` (agent runtime) | unset                     | When set, the agent runtime offers the workspace tools (`repository`, `browser`, `code-editor`, `build`) |
 
 ```bash
@@ -82,8 +104,8 @@ npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.
 
 ## Limitations
 
-- There is no egress allow-list enforcement: the container provider offers no network or
-  unrestricted network, nothing in between.
+- Egress is allow-listed by hostname only: any port on an allowed host is reachable, and TLS
+  is not intercepted. Real Chromium through the proxy is not covered by tests yet.
 - There is no dependency installation. Scripts run offline, so `node_modules` (including
   `@playwright/test`) must come with the checkout or the image.
 - Only public HTTPS repositories work; checkouts are of branches or tags, not commit SHAs.

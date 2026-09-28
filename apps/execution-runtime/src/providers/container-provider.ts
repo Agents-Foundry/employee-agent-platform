@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
 import { runProcess, type ProcessResult } from '../process-runner.js';
 import type {
@@ -26,9 +29,15 @@ export interface ContainerProviderOptions extends LocalProviderOptions {
   /** Executables a `command` operation may start inside the container. Default: npm. */
   commands?: readonly string[];
   /**
-   * Run grants that need network access (an allow-list) on the default bridge network. The
-   * provider cannot restrict egress to the allow-list, so this is off by default and such
-   * grants are refused.
+   * Directory holding `egress-proxy.mjs` (ADR 0016). When set, grants that need network run on
+   * a private internal network whose only route out is an allow-list proxy container.
+   */
+  egressProxyDirectory?: string;
+  /** Image that runs the egress proxy; it needs `node`. Default: `image`. */
+  egressProxyImage?: string;
+  /**
+   * Without an egress proxy: run grants that need network on the default bridge network with
+   * no allow-list. Off by default, so such grants are refused.
    */
   allowUnrestrictedEgress?: boolean;
   dockerExecutable?: string;
@@ -65,8 +74,137 @@ export interface ContainerRun {
   argv: readonly string[];
   env: Readonly<Record<string, string>>;
   limits: ResourceLimits;
-  network: 'none' | 'bridge';
+  /** `none`, `bridge`, or the name of a run's internal network. */
+  network: string;
   user: string;
+}
+
+/** Name the sandbox uses to reach the egress proxy on its internal network. */
+export const EGRESS_PROXY_ALIAS = 'egress-proxy';
+export const EGRESS_PROXY_PORT = 3128;
+const EGRESS_PROXY_URL = `http://${EGRESS_PROXY_ALIAS}:${EGRESS_PROXY_PORT}`;
+/** Variables that point HTTP clients (npm, git, curl, Node fetch, Chromium) at the proxy. */
+export const EGRESS_PROXY_ENV: Readonly<Record<string, string>> = {
+  HTTP_PROXY: EGRESS_PROXY_URL,
+  HTTPS_PROXY: EGRESS_PROXY_URL,
+  http_proxy: EGRESS_PROXY_URL,
+  https_proxy: EGRESS_PROXY_URL,
+  NODE_USE_ENV_PROXY: '1',
+};
+
+export interface EgressProxyRun {
+  name: string;
+  image: string;
+  /** Host directory containing `egress-proxy.mjs`; mounted read-only. */
+  directory: string;
+  allowedHosts: readonly string[];
+  user: string;
+}
+
+/** The directory shipped with this package that holds `egress-proxy.mjs`, if present. */
+export function defaultEgressProxyDirectory(): string | null {
+  // src/providers/ in development, dist/apps/execution-runtime/src/providers/ when built.
+  for (const relative of ['../../sandbox/', '../../../../../sandbox/']) {
+    const directory = fileURLToPath(new URL(relative, import.meta.url)).replace(/[\\/]$/, '');
+    if (existsSync(join(directory, 'egress-proxy.mjs'))) return directory;
+  }
+  return null;
+}
+
+function mountable(path: string): string {
+  if (/[,"\n]/.test(path)) throw new OperationFailure('WORKSPACE_PATH_UNSUPPORTED', '');
+  return path;
+}
+
+/**
+ * The `docker run` for a run's egress proxy: as locked down as the sandbox, on the default
+ * bridge network (it is the only container with a route out), running only the mounted proxy
+ * script with the grant's allowed hosts.
+ */
+export function egressProxyArgs(run: EgressProxyRun): string[] {
+  if (run.allowedHosts.some((host) => !/^[A-Za-z0-9.:[\]-]+$/.test(host)))
+    throw new OperationFailure('EGRESS_HOST_INVALID', 'The grant names an invalid host.');
+  return [
+    'run',
+    '--detach',
+    '--pull',
+    'never',
+    '--name',
+    run.name,
+    '--network',
+    'bridge',
+    '--cpus',
+    '0.500',
+    '--memory',
+    '128m',
+    '--memory-swap',
+    '128m',
+    '--pids-limit',
+    '64',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+    '--read-only',
+    '--user',
+    run.user,
+    '--mount',
+    `type=bind,source=${mountable(run.directory)},target=/egress,readonly`,
+    '--env',
+    `EGRESS_ALLOWED_HOSTS=${run.allowedHosts.join(',')}`,
+    '--env',
+    `EGRESS_PROXY_PORT=${EGRESS_PROXY_PORT}`,
+    run.image,
+    'node',
+    '/egress/egress-proxy.mjs',
+  ];
+}
+
+/** One proxy decision, as the proxy logs it. */
+interface EgressDecision {
+  event: 'egress';
+  decision: 'ALLOW' | 'DENY';
+  method: string;
+  host: string;
+  port: number;
+  reason?: string;
+}
+
+type Egress = 'none' | 'bridge' | { allowedHosts: readonly string[] };
+
+/** Adds the egress log as evidence and tells the model which destinations were blocked. */
+function withEgress(outcome: ProviderOutcome, decisions: EgressDecision[] | null): ProviderOutcome {
+  if (decisions === null) return outcome;
+  const denied = [
+    ...new Set(
+      decisions
+        .filter((entry) => entry.decision === 'DENY')
+        .map((entry) => `${entry.host}:${entry.port}`),
+    ),
+  ];
+  const note = denied.length
+    ? `\nNetwork access outside the grant was blocked: ${denied.join(', ')}`.slice(0, 500)
+    : '';
+  return {
+    ...outcome,
+    output: outcome.output + note,
+    artifacts: [
+      ...outcome.artifacts,
+      ...(decisions.length
+        ? [
+            {
+              name: 'egress.log',
+              type: 'log' as const,
+              mediaType: 'text/plain' as const,
+              content: Buffer.from(
+                decisions.map((entry) => JSON.stringify(entry)).join('\n'),
+                'utf8',
+              ),
+            },
+          ]
+        : []),
+    ],
+  };
 }
 
 /**
@@ -75,8 +213,7 @@ export interface ContainerRun {
  * the only writable mount, and only the environment given here (nothing from the runtime).
  */
 export function dockerRunArgs(run: ContainerRun): string[] {
-  if (/[,"\n]/.test(run.workspaceRoot))
-    throw new OperationFailure('WORKSPACE_PATH_UNSUPPORTED', '');
+  mountable(run.workspaceRoot);
   const cwd = run.cwd === '.' ? '/workspace' : `/workspace/${run.cwd}`;
   return [
     'run',
@@ -121,10 +258,12 @@ export function dockerRunArgs(run: ContainerRun): string[] {
  * code (git checkout and status, file read and write) run on the host through the local
  * provider's confined, hook-free implementation.
  *
- * Network: grants with no hosts run with `--network none`. The provider cannot limit egress to
- * an allow-list, so grants that need network are refused (`EGRESS_CONTROL_UNAVAILABLE`) unless
- * the operator accepts unrestricted egress. Git checkout on the host reaches only the
- * repository the control plane scoped the grant to, but is not network-isolated.
+ * Network: grants with no hosts run with `--network none`. Grants with an allow-list run on a
+ * private `--internal` network created for the operation; its only other member is an egress
+ * proxy container that forwards to the allowed hosts and nothing else (ADR 0016). Without a
+ * proxy such grants are refused (`EGRESS_CONTROL_UNAVAILABLE`) unless the operator accepts
+ * unrestricted egress. Git checkout on the host reaches only the repository the control plane
+ * scoped the grant to, but is not network-isolated.
  */
 export class ContainerExecutionProvider implements ExecutionProvider {
   readonly id = 'container';
@@ -171,8 +310,9 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     }
   }
 
-  private network(limits: ResourceLimits): 'none' | 'bridge' {
+  private network(limits: ResourceLimits): Egress {
     if (limits.network.mode === 'NONE') return 'none';
+    if (this.options.egressProxyDirectory) return { allowedHosts: limits.network.allowedHosts };
     if (this.options.allowUnrestrictedEgress) return 'bridge';
     throw new OperationFailure(
       'EGRESS_CONTROL_UNAVAILABLE',
@@ -185,7 +325,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     workspace: WorkspaceHandle,
     operation: Extract<ExecutionOperation, { kind: 'command' }>,
     limits: ResourceLimits,
-    network: 'none' | 'bridge',
+    network: Egress,
     signal: AbortSignal,
   ): Promise<ProviderOutcome> {
     if (!(this.options.commands ?? ['npm']).includes(operation.command))
@@ -194,7 +334,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         `${operation.command} is not an allowed command.`,
       );
     await inside(workspace.root, operation.cwd, true);
-    const result = await this.run(
+    const { result, egress } = await this.run(
       workspace,
       this.options.image,
       operation.cwd,
@@ -206,20 +346,23 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     );
     const what = [operation.command, ...operation.args].join(' ');
     if (result.exitCode !== 0 || result.timedOut)
-      return failedProcess(result, 'COMMAND_FAILED', what);
-    return {
-      status: 'SUCCEEDED',
-      exitCode: 0,
-      ...bounded(`${what} succeeded.\n${result.stdout}`.trim()),
-      artifacts: processLogs(result, 'command.log'),
-    };
+      return withEgress(failedProcess(result, 'COMMAND_FAILED', what), egress);
+    return withEgress(
+      {
+        status: 'SUCCEEDED',
+        exitCode: 0,
+        ...bounded(`${what} succeeded.\n${result.stdout}`.trim()),
+        artifacts: processLogs(result, 'command.log'),
+      },
+      egress,
+    );
   }
 
   private async playwright(
     workspace: WorkspaceHandle,
     operation: Extract<ExecutionOperation, { kind: 'playwright.run' }>,
     limits: ResourceLimits,
-    network: 'none' | 'bridge',
+    network: Egress,
     signal: AbortSignal,
   ): Promise<ProviderOutcome> {
     const directory = operation.path ?? '.';
@@ -236,7 +379,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         'The project has no installed @playwright/test; dependency installation is not supported yet.',
       );
     }
-    const result = await this.run(
+    const { result, egress } = await this.run(
       workspace,
       this.options.playwrightImage ?? this.options.image,
       directory,
@@ -252,7 +395,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       network,
       signal,
     );
-    return playwrightOutcome(result, operation);
+    return withEgress(playwrightOutcome(result, operation), egress);
   }
 
   private async run(
@@ -262,30 +405,63 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     argv: readonly string[],
     env: Record<string, string>,
     limits: ResourceLimits,
-    network: 'none' | 'bridge',
+    egress: Egress,
     signal: AbortSignal,
-  ): Promise<ProcessResult> {
+  ): Promise<{ result: ProcessResult; egress: EgressDecision[] | null }> {
     const docker = this.options.dockerExecutable ?? 'docker';
-    const name = `af-exec-${randomUUID()}`;
+    const id = randomUUID();
+    const name = `af-exec-${id}`;
+    const proxied = typeof egress === 'object' ? egress : null;
+    const network = proxied ? `af-net-${id}` : (egress as 'none' | 'bridge');
+    const proxy = `af-egress-${id}`;
     const clientEnv: Record<string, string> = {};
     for (const key of DOCKER_CLIENT_ENV) if (process.env[key]) clientEnv[key] = process.env[key]!;
+    const user = this.options.user ?? '1000:1000';
     const args = dockerRunArgs({
       name,
       image,
       workspaceRoot: workspace.root,
       cwd,
       argv,
-      env: { HOME: '/tmp', CI: '1', npm_config_cache: '/tmp/.npm', ...env },
+      env: {
+        HOME: '/tmp',
+        CI: '1',
+        npm_config_cache: '/tmp/.npm',
+        ...(proxied ? EGRESS_PROXY_ENV : {}),
+        ...env,
+      },
       limits,
       network,
-      user: this.options.user ?? '1000:1000',
+      user,
     });
     const options = {
       cwd: workspace.root,
       env: clientEnv,
       maxOutputBytes: this.options.maxOutputBytes ?? 1024 * 1024,
     };
+    const client = (command: string[], timeoutMs = 30_000) =>
+      runProcess(docker, command, { ...options, timeoutMs });
     try {
+      if (proxied) {
+        const created = await client(['network', 'create', '--internal', network]);
+        if (created.exitCode !== 0)
+          throw new OperationFailure(
+            'EGRESS_PROXY_UNAVAILABLE',
+            'The sandbox network could not be created.',
+          );
+        await this.startProxy(
+          client,
+          {
+            name: proxy,
+            image: this.options.egressProxyImage ?? this.options.image,
+            directory: this.options.egressProxyDirectory!,
+            allowedHosts: proxied.allowedHosts,
+            user,
+          },
+          network,
+          signal,
+        );
+      }
       const result = await runProcess(docker, args, {
         ...options,
         timeoutMs: limits.timeoutMs,
@@ -293,10 +469,62 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       });
       if (result.exitCode === 125 && /No such image|pull access denied/i.test(result.stderr))
         throw new OperationFailure('SANDBOX_IMAGE_UNAVAILABLE', `Image ${image} is not present.`);
-      return result;
+      return { result, egress: proxied ? await this.decisions(client, proxy) : null };
     } finally {
       // Killing the docker client does not stop the container; remove it explicitly.
-      await runProcess(docker, ['rm', '--force', name], { ...options, timeoutMs: 30_000 });
+      await client(['rm', '--force', name]);
+      if (proxied) {
+        await client(['rm', '--force', proxy]);
+        await client(['network', 'rm', network]);
+      }
     }
+  }
+
+  /** Starts the proxy on the bridge network, joins it to the sandbox network and waits for it. */
+  private async startProxy(
+    client: (command: string[], timeoutMs?: number) => Promise<ProcessResult>,
+    run: EgressProxyRun,
+    network: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const started = await client(egressProxyArgs(run));
+    if (started.exitCode !== 0)
+      throw /No such image|pull access denied/i.test(started.stderr)
+        ? new OperationFailure('SANDBOX_IMAGE_UNAVAILABLE', `Image ${run.image} is not present.`)
+        : new OperationFailure('EGRESS_PROXY_UNAVAILABLE', 'The egress proxy did not start.');
+    const connected = await client([
+      'network',
+      'connect',
+      '--alias',
+      EGRESS_PROXY_ALIAS,
+      network,
+      run.name,
+    ]);
+    if (connected.exitCode !== 0)
+      throw new OperationFailure('EGRESS_PROXY_UNAVAILABLE', 'The egress proxy is unreachable.');
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && !signal.aborted) {
+      const logs = await client(['logs', run.name]);
+      if (logs.stdout.includes('"event":"ready"')) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new OperationFailure('EGRESS_PROXY_UNAVAILABLE', 'The egress proxy did not start.');
+  }
+
+  /** The proxy's decisions for this operation; unparseable lines are ignored. */
+  private async decisions(
+    client: (command: string[], timeoutMs?: number) => Promise<ProcessResult>,
+    proxy: string,
+  ): Promise<EgressDecision[]> {
+    const logs = await client(['logs', proxy]);
+    const decisions: EgressDecision[] = [];
+    for (const line of logs.stdout.split('\n'))
+      try {
+        const entry = JSON.parse(line) as Partial<EgressDecision>;
+        if (entry.event === 'egress') decisions.push(entry as EgressDecision);
+      } catch {
+        /* Not a decision. */
+      }
+    return decisions.slice(0, 1000);
   }
 }

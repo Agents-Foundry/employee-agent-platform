@@ -2,7 +2,10 @@ import { join } from 'node:path';
 import { ExecutionArtifactStore } from './artifact-store.js';
 import { ExecutionService } from './execution-service.js';
 import { GrantVerifier } from './grant-verifier.js';
-import { ContainerExecutionProvider } from './providers/container-provider.js';
+import {
+  ContainerExecutionProvider,
+  defaultEgressProxyDirectory,
+} from './providers/container-provider.js';
 import type { ExecutionProvider } from './providers/execution-provider.js';
 import { LocalExecutionProvider } from './providers/local-provider.js';
 import { createExecutionServer } from './server.js';
@@ -23,6 +26,19 @@ const hostOptions = {
 const providerId = process.env['EXECUTION_PROVIDER'] ?? 'local';
 if (providerId !== 'local' && providerId !== 'container')
   throw new Error('EXECUTION_PROVIDER_UNKNOWN');
+/** Container provider only: the allow-list egress proxy (ADR 0016), on unless disabled. */
+function egressProxy(): Record<string, string> {
+  if (process.env['EXECUTION_EGRESS_PROXY'] === 'false') return {};
+  const directory =
+    process.env['EXECUTION_EGRESS_PROXY_DIR']?.trim() || defaultEgressProxyDirectory();
+  if (!directory) throw new Error('EXECUTION_EGRESS_PROXY_NOT_FOUND');
+  return {
+    egressProxyDirectory: directory,
+    ...(process.env['EXECUTION_EGRESS_PROXY_IMAGE']
+      ? { egressProxyImage: process.env['EXECUTION_EGRESS_PROXY_IMAGE'] }
+      : {}),
+  };
+}
 const provider: ExecutionProvider =
   providerId === 'container'
     ? new ContainerExecutionProvider({
@@ -31,6 +47,7 @@ const provider: ExecutionProvider =
         ...(process.env['EXECUTION_PLAYWRIGHT_IMAGE']
           ? { playwrightImage: process.env['EXECUTION_PLAYWRIGHT_IMAGE'] }
           : {}),
+        ...egressProxy(),
         allowUnrestrictedEgress: process.env['EXECUTION_ALLOW_UNRESTRICTED_EGRESS'] === 'true',
       })
     : new LocalExecutionProvider(hostOptions);
