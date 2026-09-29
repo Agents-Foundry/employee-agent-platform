@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --coverage",
     "db": "tsx --env-file-if-exists=../../.env src/db/cli.ts",
-    "test:evals": "vitest run test/evaluations.spec.ts"
+    "test:evals": "vitest run test/evaluations.spec.ts test/quality-evaluations.spec.ts",
+    "eval:quality": "vitest run --config vitest.quality.config.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -28,6 +28,7 @@
     "test:runtime": "npm run test --workspace @agents-foundry/agent-runtime",
     "test:execution": "npm run test --workspace @agents-foundry/execution-runtime",
     "test:evals": "npm run test:evals --workspace @agents-foundry/control-plane-api",
+    "eval:quality": "npm run eval:quality --workspace @agents-foundry/control-plane-api",
     "check": "npm run build && npm run test"
   },
   "private": true,
