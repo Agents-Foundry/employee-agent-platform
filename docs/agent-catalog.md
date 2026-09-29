@@ -22,6 +22,8 @@ Implemented, meaning data model, validation, persistence, authorization, API, ad
 - A generic manifest resolver with no role-specific code (ADR 0009).
 - Governance evaluation suites for every role, run by a generic runner through the real
   platform ([ADR 0019](adr/0019-role-evaluation-suites.md)).
+- Model-quality tasks for every role, worked by a real model on request and graded by checks
+  and a grader model, within budgets ([ADR 0020](adr/0020-model-quality-evaluations.md)).
 
 Not implemented yet:
 
@@ -64,6 +66,8 @@ never from catalog data. A catalog can't grant itself permission.
 - A role version names a missing evaluation suite, or another role's suite; a suite is unused.
 - A scenario uses a workflow its version doesn't have, answers unknown questions or omits
   required ones, calls an unknown tool, or expects an unknown action.
+- A quality task does the same, approves an unknown action, or checks an unknown tool or
+  action.
 
 Evaluation suites are validated with the catalog but are not part of bundle digests, so adding
 or improving evaluations never changes a released role version.
@@ -144,5 +148,38 @@ The scenario also names the tools the model must be offered, the final run statu
 control-plane actions that executed (reached an external system). Commands, installs and
 browser runs are recorded, not executed: these are governance evaluations, not model-quality
 evaluations.
+
+### Model-quality tasks
+
+A suite may also hold `qualityTasks` (ADR 0020). A real model works each one unscripted,
+through the same platform and simulated world, then the run is graded:
+
+- **Checks**, deterministic, on successful tool calls, executed actions and the run status.
+  A `required` check is a gate; every built-in task is gated on no denials and a completed
+  run.
+- **Rubric** criteria, scored from 0 to 1 by a grader model that must answer through one
+  validated tool call. The transcript is passed as untrusted data.
+- The weighted score must reach the task's `passThreshold`.
+
+Each task names the approvals the evaluator grants (all others are rejected), simulated
+results for commands and browser runs, and a turn and token budget. Run them with:
+
+```bash
+AF_QUALITY_MODEL=<model> AF_QUALITY_JUDGE_MODEL=<grader model> AF_QUALITY_MAX_TOKENS=2000000 AF_MODEL_API_KEY_ANTHROPIC=<key> npm run eval:quality
+```
+
+Settings can also live in the repository's `.env`. Optional settings:
+
+- `AF_QUALITY_TRIALS`, the number of runs per task (default 1, at most 10);
+- `AF_QUALITY_PRICE_PER_MTOK="<input>,<output>"`, US dollars per million tokens, for a cost
+  estimate;
+- `AF_QUALITY_REPORT_DIR`, where the reports go (default `.data/quality-reports`);
+- `AF_EVALUATION_ROLE` and `AF_QUALITY_TASK`, filters.
+
+The run fails closed without a model, a grader model, a credential or a total token budget,
+and stops calling models once the budget is spent. It writes JSON and Markdown reports and
+fails if a task does not pass. It never runs in `npm run check`; offline tests cover the
+runner with scripted models.
+
 A new governed action still needs a policy-engine decision, and a new capability (a connector
 or an execution operation) needs platform support first, by design.
