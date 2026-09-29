@@ -192,8 +192,11 @@ describe('catalog of record', () => {
       const legacy = (await demoRequest(app).get('/api/blueprints').expect(200)).body;
       // The legacy shape serves the latest version of each blueprint (QA: 1.2.0 since Phase D).
       expect(legacy.map((b: { id: string }) => b.id)).toEqual([
+        'engineering.backend-engineer',
+        'engineering.code-reviewer',
         'engineering.frontend-engineer',
         'engineering.qa-engineer',
+        'engineering.test-automation-engineer',
       ]);
       expect(legacy.find((b: { id: string }) => b.id === qa.id)).toEqual({
         id: 'engineering.qa-engineer',

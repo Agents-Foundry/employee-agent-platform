@@ -64,6 +64,108 @@ export const workflows: WorkflowDefinition[] = [
     ],
   },
   {
+    id: 'implement-api-change',
+    version: '1.0.0',
+    title: 'Implement API change',
+    description:
+      'Implement one backend work item in the workspace, install its locked dependencies, verify it with the project scripts and propose it as a draft pull request.',
+    steps: [
+      { id: 'analyze', title: 'Scope the change', skill: 'change-scoping', action: 'jira.read' },
+      {
+        id: 'implement',
+        title: 'Implement the change',
+        skill: 'backend-implementation',
+        action: 'repository.write',
+      },
+      {
+        id: 'install',
+        title: 'Install locked dependencies',
+        skill: 'backend-verification',
+        action: 'workspace.dependencies.install',
+      },
+      {
+        id: 'verify',
+        title: 'Run lint, type-check and tests',
+        skill: 'backend-verification',
+        action: 'workspace.command',
+      },
+      {
+        id: 'propose',
+        title: 'Open a draft pull request',
+        skill: 'change-proposal',
+        action: 'repository.pull_request.create',
+      },
+    ],
+  },
+  {
+    id: 'review-change',
+    version: '1.0.0',
+    title: 'Review change',
+    description:
+      'Review a proposed change against its work item: read it, run the project checks, and report findings without changing anything.',
+    steps: [
+      { id: 'analyze', title: 'Read the work item', skill: 'change-scoping', action: 'jira.read' },
+      {
+        id: 'inspect',
+        title: 'Check out and read the change',
+        skill: 'code-review',
+        action: 'repository.read',
+      },
+      {
+        id: 'install',
+        title: 'Install locked dependencies',
+        skill: 'code-review',
+        action: 'workspace.dependencies.install',
+      },
+      {
+        id: 'check',
+        title: 'Run lint and tests',
+        skill: 'code-review',
+        action: 'workspace.command',
+      },
+      { id: 'report', title: 'Write the review report', skill: 'review-reporting' },
+    ],
+  },
+  {
+    id: 'automate-regression-tests',
+    version: '1.0.0',
+    title: 'Automate regression tests',
+    description:
+      'Turn a work item into Playwright regression tests, run them against the approved QA environment and propose them as a draft pull request.',
+    steps: [
+      {
+        id: 'analyze',
+        title: 'Read acceptance criteria',
+        skill: 'change-scoping',
+        action: 'jira.read',
+      },
+      {
+        id: 'author',
+        title: 'Write the tests',
+        skill: 'test-authoring',
+        action: 'repository.write',
+      },
+      {
+        id: 'install',
+        title: 'Install locked dependencies',
+        skill: 'test-verification',
+        action: 'workspace.dependencies.install',
+      },
+      {
+        id: 'run',
+        title: 'Run the tests against QA',
+        skill: 'test-verification',
+        action: 'qa.execute_playwright',
+      },
+      {
+        id: 'propose',
+        title: 'Open a draft pull request',
+        skill: 'change-proposal',
+        action: 'repository.pull_request.create',
+      },
+    ],
+  },
+  {
     id: 'validate-story',
     version: '1.0.0',
     title: 'Validate story',

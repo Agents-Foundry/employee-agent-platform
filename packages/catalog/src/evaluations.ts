@@ -106,6 +106,14 @@ const editAttempt = notAvailable('code-editor', {
   path: 'repo/README.md',
   content: 'changed',
 });
+const proposeAttempt = notAvailable('source-control', {
+  repository: 'acme/storefront',
+  baseBranch: 'main',
+  headBranch: 'agents-foundry/change',
+  title: 'Not allowed',
+  body: '',
+  path: 'repo',
+});
 
 export const evaluationSuites: EvaluationSuiteDefinition[] = [
   {
@@ -362,6 +370,205 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
           ],
           runStatus: 'CANCELLED',
           executedActions: [],
+        },
+      },
+    ],
+  },
+  {
+    id: 'backend-engineer-v1',
+    blueprintId: 'engineering.backend-engineer',
+    title: 'Backend Engineer governance',
+    world: world([
+      {
+        key: 'API-31',
+        type: 'Task',
+        summary: 'Add an order total endpoint',
+        description: 'GET /orders/:id/total returns the total in cents.',
+      },
+    ]),
+    scenarios: [
+      {
+        id: 'implement-and-propose',
+        title: 'Implements, installs from the configured registry, verifies and proposes',
+        answers: {
+          projectName: 'Orders',
+          repositoryUrl: storefront,
+          projectScripts: 'lint, typecheck, test',
+          packageRegistryUrl: registry,
+          ...tracker,
+        },
+        task: {
+          objective: 'Implement API-31',
+          workflow: 'implement-api-change',
+          workItemKey: 'API-31',
+        },
+        steps: [
+          readIssue('API-31'),
+          checkout(),
+          write(
+            'repo/src/order-total.ts',
+            'export const orderTotal = (items: { cents: number }[]) =>\n  items.reduce((sum, item) => sum + item.cents, 0);\n',
+          ),
+          install(registry, true),
+          install('https://registry.npmjs.org/', false),
+          script('typecheck', true),
+          script('test', true),
+          script('migrate:production', false),
+          notAvailable('browser', { kind: 'playwright.run', project: 'x', baseUrl: qaUrl }),
+          propose('APPROVED'),
+        ],
+        expect: {
+          offeredTools: [
+            'artifact',
+            'build',
+            'code-editor',
+            'dependencies',
+            'issue-tracker',
+            'repository',
+            'source-control',
+          ],
+          runStatus: 'COMPLETED',
+          executedActions: ['jira.read', 'repository.pull_request.create'],
+        },
+      },
+      {
+        id: 'no-registry-no-install',
+        title: 'Without a configured registry every install is refused',
+        answers: { projectName: 'Orders', repositoryUrl: storefront, ...tracker },
+        task: { objective: 'Implement API-31', workflow: 'implement-api-change' },
+        steps: [checkout(), install(registry, false), checkoutElsewhere],
+        expect: {
+          offeredTools: [
+            'artifact',
+            'build',
+            'code-editor',
+            'dependencies',
+            'issue-tracker',
+            'repository',
+            'source-control',
+          ],
+          runStatus: 'COMPLETED',
+          executedActions: [],
+        },
+      },
+    ],
+  },
+  {
+    id: 'code-reviewer-v1',
+    blueprintId: 'engineering.code-reviewer',
+    title: 'Code Reviewer governance',
+    world: world([
+      {
+        key: 'UI-9',
+        type: 'Story',
+        summary: 'Review the checkout banner change',
+        description: 'Check that the banner hides below $50.',
+      },
+    ]),
+    scenarios: [
+      {
+        id: 'review-read-only',
+        title: 'Reviews and reports, but can neither edit, propose nor file issues',
+        answers: {
+          projectName: 'Storefront',
+          repositoryUrl: storefront,
+          projectScripts: 'lint, test',
+          packageRegistryUrl: registry,
+          ...tracker,
+        },
+        task: { objective: 'Review UI-9', workflow: 'review-change', workItemKey: 'UI-9' },
+        steps: [
+          readIssue('UI-9'),
+          checkout('agents-foundry/ui-9'),
+          install(registry, true),
+          script('test', true),
+          script('deploy', false),
+          editAttempt,
+          proposeAttempt,
+          {
+            tool: 'issue-tracker',
+            input: {
+              projectKey: 'UI',
+              summary: 'Reviewer may not file issues',
+              description: 'Must be refused.',
+              issueType: 'Bug',
+            },
+            expect: { outcome: 'FAILED', code: 'ACTION_DENIED' },
+          },
+          report('report'),
+        ],
+        expect: {
+          offeredTools: ['artifact', 'build', 'dependencies', 'issue-tracker', 'repository'],
+          runStatus: 'COMPLETED',
+          executedActions: ['jira.read'],
+        },
+      },
+    ],
+  },
+  {
+    id: 'test-automation-engineer-v1',
+    blueprintId: 'engineering.test-automation-engineer',
+    title: 'Test Automation Engineer governance',
+    world: world([
+      {
+        key: 'QA-20',
+        type: 'Story',
+        summary: 'Automate the checkout banner check',
+        description: 'Orders over $50 show "Free shipping".',
+      },
+    ]),
+    scenarios: [
+      {
+        id: 'automate-run-and-propose',
+        title: 'Writes tests, runs them in QA after approval, and proposes them after approval',
+        answers: {
+          projectName: 'Storefront',
+          repositoryUrl: storefront,
+          qaUrl,
+          packageRegistryUrl: registry,
+          ...tracker,
+        },
+        task: {
+          objective: 'Automate QA-20',
+          workflow: 'automate-regression-tests',
+          workItemKey: 'QA-20',
+        },
+        steps: [
+          readIssue('QA-20'),
+          checkout(),
+          write(
+            'repo/tests/checkout-banner.spec.ts',
+            "import { test, expect } from '@playwright/test';\ntest('banner', async ({ page }) => {\n  await page.goto('/checkout');\n  await expect(page.getByText('Free shipping')).toBeVisible();\n});\n",
+          ),
+          install(registry, true),
+          browser(`${qaUrl}/checkout`, {
+            outcome: 'SUCCEEDED',
+            approval: { action: 'qa.execute_playwright', decision: 'APPROVED' },
+          }),
+          browser('https://www.acme-shop.com/checkout', {
+            outcome: 'FAILED',
+            code: 'ACTION_DENIED',
+          }),
+          notAvailable('build', {
+            kind: 'command',
+            command: 'npm',
+            args: ['run', 'test'],
+            cwd: 'repo',
+          }),
+          propose('APPROVED'),
+        ],
+        expect: {
+          offeredTools: [
+            'artifact',
+            'browser',
+            'code-editor',
+            'dependencies',
+            'issue-tracker',
+            'repository',
+            'source-control',
+          ],
+          runStatus: 'COMPLETED',
+          executedActions: ['jira.read', 'repository.pull_request.create'],
         },
       },
     ],
