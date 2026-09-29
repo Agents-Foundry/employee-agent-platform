@@ -76,5 +76,13 @@ export function configureRuntimeRoutes(
     const runtime = await authenticate(request);
     response.json(await transport.issueGrant(runtime, json(request)));
   });
+  router.post(relative(runtimeTransportPaths.modelReserve), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.reserveModelTokens(runtime, json(request)));
+  });
+  router.post(relative(runtimeTransportPaths.modelSettle), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.settleModelTokens(runtime, json(request)));
+  });
   app.use(RUNTIME_BASE, router);
 }

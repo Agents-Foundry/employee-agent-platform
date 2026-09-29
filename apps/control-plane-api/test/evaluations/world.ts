@@ -237,6 +237,8 @@ export interface EvaluationEnvironmentOptions {
   model: { provider: ModelProvider; model: string; credentials: CredentialBroker };
   kernel?: NativeKernelOptions;
   executionResults?: readonly EvaluationExecutionResult[];
+  /** The organization's model spending limits (ADR 0021); none when absent. */
+  modelBudget?: { monthlyTokenLimit: number | null; runTokenLimit: number | null };
 }
 
 export interface EvaluationEnvironment {
@@ -252,6 +254,10 @@ export interface EvaluationEnvironment {
     rounds: number,
   ): Promise<void>;
   runStatus(runId: string): Promise<string>;
+  /** The status and its reason, for example the error code of a failed run. */
+  runOutcome(runId: string): Promise<{ status: string; statusReason: string | null }>;
+  /** Model token reservations of the organization, oldest first (ADR 0021). */
+  modelUsage(): Promise<Record<string, unknown>[]>;
   /** Control-plane actions that reached an external system and succeeded, in order. */
   executedActions(): Promise<string[]>;
 }
@@ -302,6 +308,19 @@ export async function withEvaluationEnvironment<T>(
       (await db.decideProvisioning(pending.id, ORGANIZATION, ADMIN.id, 'APPROVED', 'Evaluation'))
         .manifest!.payload,
     ).agentId;
+    if (options.modelBudget)
+      await rawSql(db)
+        .prepare(
+          `INSERT INTO organization_model_budgets (organization_id,monthly_token_limit,run_token_limit,updated_by,updated_at)
+           VALUES (?,?,?,?,?)`,
+        )
+        .run(
+          ORGANIZATION,
+          options.modelBudget.monthlyTokenLimit,
+          options.modelBudget.runTokenLimit,
+          ADMIN.id,
+          new Date().toISOString(),
+        );
     // Connections for every connector provider the answers select.
     const authorize = db.structure.authorize;
     db.structure.authorize = async () => undefined; // The seeded demo admin has no membership.
@@ -409,6 +428,18 @@ export async function withEvaluationEnvironment<T>(
       },
       async runStatus(runId) {
         return (await db.execution.getRun(ADMIN, runId)).run.status;
+      },
+      async runOutcome(runId) {
+        const { run } = await db.execution.getRun(ADMIN, runId);
+        return { status: run.status, statusReason: run.statusReason };
+      },
+      async modelUsage() {
+        return rawSql(db)
+          .prepare(
+            `SELECT status, reserved_tokens, max_output_tokens, input_tokens, output_tokens, provider, model
+             FROM model_usage_reservations ORDER BY seq`,
+          )
+          .all();
       },
       async executedActions() {
         return (

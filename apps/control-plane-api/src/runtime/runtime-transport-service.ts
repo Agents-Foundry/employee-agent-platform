@@ -5,7 +5,10 @@ import type {
   RuntimeActionRequest,
   RuntimeClaimResponse,
   RuntimeCommand,
+  RuntimeCorrelation,
   RuntimeEventAck,
+  RuntimeModelReservation,
+  RuntimeModelSettlement,
   SignedExecutionGrant,
 } from '@agents-foundry/contracts';
 import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
@@ -14,11 +17,14 @@ import {
   parseRuntimeActionExecuteRequest,
   parseRuntimeActionRequest,
   parseRuntimeEvent,
+  parseRuntimeModelReservationRequest,
+  parseRuntimeModelSettlementRequest,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import type { ActionGateway } from '../actions/action-gateway.js';
 import type { Audit } from '../actions/action-policy-service.js';
 import { constraintKind, type PgStore, type Row } from '../db/pg-store.js';
 import { ExecutionError, type ExecutionService } from '../execution/execution-service.js';
+import type { ModelSpendingService } from '../spending/model-spending-service.js';
 import { servesOrganization, type RuntimeIdentity } from './runtime-identity.js';
 
 /** A claimed run that never started can be reclaimed by another runtime after this. */
@@ -29,6 +35,7 @@ export const COMMAND_REDELIVERY_MS = 60_000;
 export interface RuntimeTransportDependencies {
   gateway: ActionGateway;
   audit: Audit;
+  spending: ModelSpendingService;
 }
 
 /**
@@ -228,11 +235,55 @@ export class RuntimeTransportService {
     });
   }
 
-  /** Lease, correlation, run and step checks shared by action requests and executions. */
-  private async runningStep(
+  /**
+   * Reserve tokens for one model call against the organization's spending limits (ADR 0021).
+   * Only a running run whose lease this runtime holds may reserve.
+   */
+  async reserveModelTokens(
     runtime: RuntimeIdentity,
-    correlation: RuntimeActionRequest['correlation'],
-  ): Promise<{ run: Row; lease: Row }> {
+    body: unknown,
+  ): Promise<RuntimeModelReservation> {
+    const request = parseRuntimeModelReservationRequest(body);
+    const organizationId = await this.leaseOrganization(runtime, request.correlation.runId);
+    try {
+      return await this.db.tenant(organizationId, async () => {
+        const run = await this.runningRun(runtime, request.correlation);
+        return this.deps.spending.reserve(run, runtime.id, request);
+      });
+    } catch (error) {
+      // The reservation id is taken by another organization's reservation.
+      if (
+        constraintKind(error) === 'unique' &&
+        (error as { constraint?: string }).constraint === 'model_usage_reservations_pkey'
+      )
+        throw new ExecutionError(409, 'MODEL_RESERVATION_CONFLICT');
+      throw error;
+    }
+  }
+
+  /**
+   * Record a model call's reported usage. Allowed after the run ended, so a call that finished
+   * as its run was cancelled is still counted.
+   */
+  async settleModelTokens(
+    runtime: RuntimeIdentity,
+    body: unknown,
+  ): Promise<RuntimeModelSettlement> {
+    const request = parseRuntimeModelSettlementRequest(body);
+    const organizationId = await this.leaseOrganization(runtime, request.correlation.runId);
+    return this.db.tenant(organizationId, async () => {
+      await this.ownedLease(runtime, request.correlation.runId);
+      if (request.correlation.organizationId !== organizationId)
+        throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
+      return this.deps.spending.settle(organizationId, runtime.id, request);
+    });
+  }
+
+  /** Lease, correlation and status checks for a run the runtime is working on. */
+  private async runningRun(
+    runtime: RuntimeIdentity,
+    correlation: RuntimeCorrelation,
+  ): Promise<Row> {
     const lease = await this.ownedLease(runtime, correlation.runId);
     const organizationId = String(lease['organization_id']);
     if (lease['state'] !== 'ACTIVE') throw new ExecutionError(409, 'RUN_TERMINAL');
@@ -249,6 +300,17 @@ export class RuntimeTransportService {
     )
       throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
     if (run['status'] !== 'RUNNING') throw new ExecutionError(409, 'RUN_NOT_RUNNING');
+    return run;
+  }
+
+  /** Lease, correlation, run and step checks shared by action requests and executions. */
+  private async runningStep(
+    runtime: RuntimeIdentity,
+    correlation: RuntimeActionRequest['correlation'],
+  ): Promise<{ run: Row; lease: Row }> {
+    const run = await this.runningRun(runtime, correlation);
+    const lease = await this.ownedLease(runtime, correlation.runId);
+    const organizationId = String(lease['organization_id']);
     const step = await this.db.get<{ status: string }>(
       'SELECT status FROM agent_run_steps WHERE id=? AND run_id=? AND organization_id=?',
       correlation.stepId,
