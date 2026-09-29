@@ -40,6 +40,7 @@ import { ConnectorService } from './actions/connector-service.js';
 import { FileSecretStore, type SecretResolver } from './actions/secrets.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { InstallationService } from './catalog/installation-service.js';
+import { ModelSpendingService } from './spending/model-spending-service.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
 import { builtInCatalog } from '../../../packages/catalog/src/index.js';
 import { buildManifestPayload, type ManifestIssue } from './agents/manifest-v2.js';
@@ -114,6 +115,7 @@ export class ControlPlaneDatabase {
   readonly qaGenericRuntimeEnabled: boolean;
   readonly runtimeIdentities: RuntimeIdentityRegistry;
   readonly runtimeTransport: RuntimeTransportService;
+  readonly modelSpending: ModelSpendingService;
   readonly connectors: ConnectorService;
   readonly actionPolicies: ActionPolicyService;
   readonly actions: ActionGateway;
@@ -206,9 +208,11 @@ export class ControlPlaneDatabase {
       signGrant: (payload) => this.signer.signExecutionGrant(payload),
       ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
     });
+    this.modelSpending = new ModelSpendingService(db, this.structure, audit);
     this.runtimeTransport = new RuntimeTransportService(db, this.execution, {
       gateway: this.actions,
       audit,
+      spending: this.modelSpending,
     });
   }
 

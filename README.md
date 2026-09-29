@@ -128,7 +128,8 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [0017](docs/adr/0017-dependency-installation.md),
   [0018](docs/adr/0018-postgresql-row-level-security.md),
   [0019](docs/adr/0019-role-evaluation-suites.md),
-  [0020](docs/adr/0020-model-quality-evaluations.md)
+  [0020](docs/adr/0020-model-quality-evaluations.md),
+  [0021](docs/adr/0021-model-spending-limits.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { CONNECT_TIMEOUT_MS } from './pg-store.js';
 import { baselineSql } from './migrations/0001-baseline.js';
+import { modelSpendingSql } from './migrations/0002-model-spending.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
   { version: 1, name: 'baseline', sql: baselineSql },
+  { version: 2, name: 'model-spending', sql: modelSpendingSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

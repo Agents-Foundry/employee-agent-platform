@@ -265,6 +265,28 @@ See [ADR 0020](adr/0020-model-quality-evaluations.md).
 - Commands, installs and browser runs are simulated.
 - Budgets are per evaluation run, not per organization.
 
+## Organization model spending limits — delivered
+
+See [ADR 0021](adr/0021-model-spending-limits.md).
+
+- Migration 0002 adds `organization_model_budgets` and `model_usage_reservations`, with
+  row-level security. Usage rows allow one settlement and are never deleted.
+- Organizations set an optional monthly and per-run token limit. Admins manage them in the
+  console and through `/api/organization/model-budget`, and read usage by agent and model
+  from `/api/organization/model-usage`.
+- The runtime host reserves every model call with the control plane
+  (`POST /runtime/v1/models/reserve`) and settles the reported usage
+  (`POST /runtime/v1/models/settle`). Reservations are decided under a per-organization
+  lock, and unsettled reservations count in full.
+- Denied or unverifiable reservations make no model call and fail the run.
+
+### Limitations
+
+- Limits are in tokens, across all models alike; no prices or per-model limits.
+- Input tokens are estimated before the call, so one call can overshoot by its estimate
+  error, which errs high.
+- A limit takes effect at a run's next model turn, not mid-call.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -292,9 +314,11 @@ the proxy, and Playwright grants allow 256 processes, because Chromium crashes u
 control plane now runs on PostgreSQL with row-level security
 ([ADR 0018](adr/0018-postgresql-row-level-security.md)), and roles ship with governance
 evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)) and model-quality
-tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). The highest-value follow-ups are:
+tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). Organizations limit model token
+use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)). The highest-value
+follow-ups are:
 
-- per-organization model spending limits in the control plane;
+- per-model prices, so limits can be set in currency, and alerts before a limit is reached;
 - a scheduled live quality run that tracks scores per model over time;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do

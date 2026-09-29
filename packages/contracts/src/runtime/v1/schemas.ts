@@ -33,6 +33,9 @@ import type {
   RuntimeActionExecution,
   RuntimeActionRequest,
   RuntimeClaimResponse,
+  RuntimeModelReservation,
+  RuntimeModelReservationRequest,
+  RuntimeModelSettlementRequest,
 } from './transport.js';
 
 /** Upper bound for one serialized event or command. */
@@ -47,6 +50,7 @@ export class RuntimeProtocolError extends Error {
       | 'RUNTIME_EVENT_TYPE_FORBIDDEN'
       | 'RUNTIME_COMMAND_INVALID'
       | 'RUNTIME_ACTION_INVALID'
+      | 'RUNTIME_MODEL_USAGE_INVALID'
       | 'RUNTIME_RESPONSE_INVALID'
       | 'MANIFEST_INVALID',
     readonly issues: readonly string[] = [],
@@ -522,5 +526,74 @@ export function parseRuntimeActionExecution(input: unknown): RuntimeActionExecut
   const parsed = executionSchema.safeParse(input);
   if (!parsed.success)
     throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+// Model spending (ADR 0021). Token counts are bounded so arithmetic stays exact.
+const tokens = z.number().int().min(0).max(10_000_000);
+const modelName = z.string().regex(/^[a-zA-Z0-9._:/-]{1,160}$/);
+const reservationRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    reservationId: uuid,
+    correlation: correlationSchema,
+    provider: z.string().regex(/^[a-zA-Z0-9._-]{1,80}$/),
+    model: modelName,
+    estimatedInputTokens: tokens,
+    maxOutputTokens: tokens.min(1),
+  })
+  .strict();
+
+/** Parse a runtime's model token reservation request. */
+export function parseRuntimeModelReservationRequest(
+  input: unknown,
+): RuntimeModelReservationRequest {
+  if ((input as { protocol?: unknown } | null)?.protocol !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = reservationRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_MODEL_USAGE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const reservationSchema = z.discriminatedUnion('decision', [
+  z
+    .object({ reservationId: uuid, decision: z.literal('ALLOWED'), maxOutputTokens: tokens.min(1) })
+    .strict(),
+  z
+    .object({
+      reservationId: uuid,
+      decision: z.literal('DENIED'),
+      code: z.literal('MODEL_BUDGET_EXCEEDED'),
+      reason: z.string().max(500),
+    })
+    .strict(),
+]);
+
+/** Runtime-side validation of a reservation decision; anything malformed means no call. */
+export function parseRuntimeModelReservation(input: unknown): RuntimeModelReservation {
+  const parsed = reservationSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const settlementRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    reservationId: uuid,
+    correlation: correlationSchema,
+    inputTokens: tokens,
+    outputTokens: tokens,
+  })
+  .strict();
+
+/** Parse a runtime's report of a model call's actual usage. */
+export function parseRuntimeModelSettlementRequest(input: unknown): RuntimeModelSettlementRequest {
+  if ((input as { protocol?: unknown } | null)?.protocol !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = settlementRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_MODEL_USAGE_INVALID', issues(parsed.error));
   return parsed.data;
 }

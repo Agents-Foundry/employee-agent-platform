@@ -22,6 +22,8 @@ export const runtimeTransportPaths = {
   actions: '/runtime/v1/actions',
   execute: '/runtime/v1/actions/execute',
   grant: '/runtime/v1/actions/grant',
+  modelReserve: '/runtime/v1/models/reserve',
+  modelSettle: '/runtime/v1/models/settle',
 } as const;
 
 /**
@@ -113,6 +115,51 @@ export type RuntimeActionDecision =
       /** The run is already paused; it resumes only through a `run.resume` command. */
       approvalId: string;
     };
+
+/**
+ * Before every model call the runtime host reserves tokens against the organization's model
+ * spending limits (ADR 0021). Without an allowed reservation it makes no call.
+ */
+export interface RuntimeModelReservationRequest {
+  protocol: RuntimeProtocolVersion;
+  /** Idempotency key: a retried request returns the original decision. */
+  reservationId: string;
+  correlation: RuntimeCorrelation;
+  provider: string;
+  model: string;
+  /** Estimated from the prompt's size; the settlement records the provider's count. */
+  estimatedInputTokens: number;
+  /** The most output the call asks for; the reservation may lower it. */
+  maxOutputTokens: number;
+}
+
+export type RuntimeModelReservation =
+  | {
+      reservationId: string;
+      decision: 'ALLOWED';
+      /** The call must not ask for more output than this. */
+      maxOutputTokens: number;
+    }
+  | {
+      reservationId: string;
+      decision: 'DENIED';
+      code: 'MODEL_BUDGET_EXCEEDED';
+      reason: string;
+    };
+
+/** After the call: the provider-reported usage (zero if the call failed before any). */
+export interface RuntimeModelSettlementRequest {
+  protocol: RuntimeProtocolVersion;
+  reservationId: string;
+  correlation: RuntimeCorrelation;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface RuntimeModelSettlement {
+  reservationId: string;
+  status: 'SETTLED';
+}
 
 /** `POST /runtime/v1/events` acknowledgement. */
 export interface RuntimeEventAck {

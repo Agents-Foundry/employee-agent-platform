@@ -52,6 +52,10 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
    - Each tool call is a `TOOL` step: `tool.requested`, `tool.started`, `tool.completed`, plus
      `artifact.created` when an artifact is registered.
    - Tool I/O leaves the runtime only as SHA-256 digests.
+   - Before each model call the host reserves tokens against the organization's model
+     spending limits (`POST /runtime/v1/models/reserve`, ADR 0021). It asks the provider for
+     no more output than was granted, then settles the reported usage. A denial fails the run
+     with `MODEL_BUDGET_EXCEEDED` without calling the provider.
 4. A tool that performs a governed action calls `POST /runtime/v1/actions` first:
    - `DENIED`: the tool does not run, and the model receives the denial.
    - `APPROVAL_REQUIRED`: the control plane has already paused the run. The runtime writes a
@@ -64,6 +68,8 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
 
 - **Fail closed:**
   - unknown provider → `MODEL_PROVIDER_UNAVAILABLE`;
+  - spending limit reached → `MODEL_BUDGET_EXCEEDED`, or cannot be checked →
+    `MODEL_BUDGET_UNAVAILABLE`, with no model call;
   - missing credential or `EMPLOYEE_BYOK` → `MODEL_CREDENTIAL_UNAVAILABLE`;
   - tool not granted → `TOOL_NOT_AVAILABLE`;
   - invalid tool input → `TOOL_INPUT_INVALID`;
