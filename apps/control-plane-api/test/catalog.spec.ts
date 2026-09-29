@@ -10,6 +10,7 @@ import type {
   AgentBlueprintVersionDefinition,
   CatalogDefinitions,
   OrganizationAgentInstallation,
+  QualityTask,
 } from '@agents-foundry/contracts';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { createApp } from '../src/app.js';
@@ -127,6 +128,45 @@ describe('catalog validation', () => {
     ).toMatch('evaluation suite orphan-suite: no blueprint uses it');
   });
 
+  it('validates model-quality tasks like scenarios, and their checks and approvals', () => {
+    const suite = (change: (task: QualityTask) => void) => {
+      const catalog = clone();
+      change(
+        catalog.evaluationSuites.find((item) => item.id === 'qa-engineer-v1')!.qualityTasks![0]!,
+      );
+      return problems(catalog);
+    };
+    expect(suite((t) => (t.task.workflow = 'implement-ui-change'))).toMatch(
+      'quality qa-engineer-v1/validate-and-file-defect on 1.2.0: workflow implement-ui-change',
+    );
+    expect(suite((t) => delete t.answers['qaUrl'])).toMatch('missing required answer qaUrl');
+    expect(suite((t) => (t.blueprintVersions = ['9.9.9']))).toMatch(
+      'version 9.9.9 does not use this suite',
+    );
+    expect(suite((t) => (t.task.workItemKey = 'QA-999'))).toMatch('work item QA-999');
+    expect(suite((t) => t.approve.push('bank.transfer'))).toMatch(
+      'unknown approved action bank.transfer',
+    );
+    expect(
+      suite((t) => t.checks.push({ id: 'shell', kind: 'tool-called', tool: 'shell', weight: 1 })),
+    ).toMatch('check shell names unknown tool shell');
+    expect(
+      suite((t) =>
+        t.checks.push({ id: 'pay', kind: 'action-executed', action: 'bank.transfer', weight: 1 }),
+      ),
+    ).toMatch('check pay names unknown action bank.transfer');
+    // Schema: ids unique across checks and criteria, positive weights, bounded budgets.
+    expect(suite((t) => (t.rubric[0]!.id = t.checks[0]!.id))).toMatch(
+      'Check and criterion ids must be unique',
+    );
+    expect(suite((t) => (t.checks[0]!.weight = 0))).toMatch('qualityTasks');
+    expect(suite((t) => (t.budget.maxTurns = 500))).toMatch('budget.maxTurns');
+    expect(suite((t) => (t.passThreshold = 1.5))).toMatch('passThreshold');
+    expect(
+      suite((t) => Object.assign(t.checks[0]!, { kind: 'shell', command: 'rm -rf /' })),
+    ).toMatch('qualityTasks');
+  });
+
   it('orders versions numerically with pre-releases first', () => {
     expect(['1.10.0', '1.2.0', '1.2.0-rc.1', '0.9.9'].sort(compareVersions)).toEqual([
       '0.9.9',
@@ -155,6 +195,7 @@ describe('catalog of record', () => {
         .map((suite) => ({
           ...suite,
           scenarios: suite.scenarios.filter((scenario) => !scenario.blueprintVersions),
+          qualityTasks: suite.qualityTasks?.filter((task) => !task.blueprintVersions),
         }));
       const db = await ControlPlaneDatabase.open({ store: await connect(), signer, catalog: next });
       {

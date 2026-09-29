@@ -77,6 +77,82 @@ const question = z
   );
 
 const issueKey = z.string().regex(/^[A-Z][A-Z0-9]{1,9}-[1-9]\d{0,8}$/);
+const relativePath = z.string().regex(/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/);
+const answers = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
+const evaluationTask = z
+  .object({
+    objective: text(500),
+    workflow: slug,
+    workItemKey: issueKey.optional(),
+    inputs: z.record(z.string(), z.string().max(2000)).optional(),
+  })
+  .strict();
+const blueprintVersions = z.array(semver).min(1).max(20).refine(unique).optional();
+const weight = z.number().positive().max(100);
+const needles = z.array(text(200)).min(1).max(20).optional();
+const check = <T extends z.ZodRawShape>(shape: T) =>
+  z.object({ id: slug, weight, required: z.boolean().optional(), ...shape }).strict();
+
+const qualityTaskSchema = z
+  .object({
+    id: slug,
+    title: text(200),
+    blueprintVersions,
+    answers,
+    task: evaluationTask,
+    approve: z.array(action).max(20).refine(unique),
+    executionResults: z
+      .array(
+        z
+          .object({
+            operation: z.enum(['command', 'dependencies.install', 'playwright.run']),
+            match: text(300),
+            status: z.enum(['SUCCEEDED', 'FAILED']),
+            output: z.string().max(20_000),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
+    budget: z
+      .object({
+        maxTurns: z.number().int().min(1).max(50),
+        maxInputTokens: z.number().int().min(1000).max(5_000_000),
+        maxOutputTokens: z.number().int().min(100).max(500_000),
+      })
+      .strict(),
+    checks: z
+      .array(
+        z.discriminatedUnion('kind', [
+          check({ kind: z.enum(['tool-called', 'tool-not-called']), tool: slug }),
+          check({ kind: z.enum(['action-executed', 'action-not-executed']), action }),
+          check({ kind: z.literal('no-denials') }),
+          check({
+            kind: z.literal('run-status'),
+            status: z.enum(['COMPLETED', 'CANCELLED', 'FAILED']),
+          }),
+          check({
+            kind: z.literal('artifact'),
+            type: z.enum(['report', 'test_report']),
+            contains: needles,
+          }),
+          check({
+            kind: z.literal('file-written'),
+            pathIncludes: z.string().regex(/^[A-Za-z0-9._/-]{1,200}$/),
+            contains: needles,
+          }),
+        ]),
+      )
+      .max(30),
+    rubric: z.array(z.object({ id: slug, description: text(500), weight }).strict()).max(20),
+    passThreshold: z.number().min(0).max(1),
+  })
+  .strict()
+  .refine((task) => task.checks.length + task.rubric.length > 0, 'A task needs a check.')
+  .refine(
+    (task) => unique([...task.checks.map((c) => c.id), ...task.rubric.map((c) => c.id)]),
+    'Check and criterion ids must be unique.',
+  );
 
 export const evaluationSuiteSchema = z
   .object({
@@ -105,10 +181,7 @@ export const evaluationSuiteSchema = z
           .array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/))
           .max(20)
           .refine(unique),
-        repositoryFiles: z.record(
-          z.string().regex(/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/),
-          z.string().max(20_000),
-        ),
+        repositoryFiles: z.record(relativePath, z.string().max(20_000)),
       })
       .strict(),
     scenarios: z
@@ -117,16 +190,9 @@ export const evaluationSuiteSchema = z
           .object({
             id: slug,
             title: text(200),
-            blueprintVersions: z.array(semver).min(1).max(20).refine(unique).optional(),
-            answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
-            task: z
-              .object({
-                objective: text(500),
-                workflow: slug,
-                workItemKey: issueKey.optional(),
-                inputs: z.record(z.string(), z.string().max(2000)).optional(),
-              })
-              .strict(),
+            blueprintVersions,
+            answers,
+            task: evaluationTask,
             steps: z
               .array(
                 z
@@ -169,6 +235,11 @@ export const evaluationSuiteSchema = z
       .min(1)
       .max(50)
       .refine((items) => unique(items.map((item) => item.id)), 'Scenario ids must be unique.'),
+    qualityTasks: z
+      .array(qualityTaskSchema)
+      .max(50)
+      .refine((items) => unique(items.map((item) => item.id)), 'Quality task ids must be unique.')
+      .optional(),
   })
   .strict() satisfies z.ZodType<EvaluationSuiteDefinition>;
 
