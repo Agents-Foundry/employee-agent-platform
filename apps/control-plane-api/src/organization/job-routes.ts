@@ -15,18 +15,20 @@ export function configureJobRoutes(
     }
     next();
   });
-  router.get('/:kind', (req, res) =>
-    res.json(service.list(res.locals['actor'], req.params['kind'], req.query)),
+  router.get('/:kind', async (req, res) =>
+    res.json(await service.list(res.locals['actor'], req.params['kind'], req.query)),
   );
-  router.post('/:kind', (req, res) =>
-    res.status(201).json(service.save(res.locals['actor'], req.params['kind'], req.body)),
+  router.post('/:kind', async (req, res) =>
+    res.status(201).json(await service.save(res.locals['actor'], req.params['kind'], req.body)),
   );
-  router.put('/:kind/:id', (req, res) =>
-    res.json(service.save(res.locals['actor'], req.params['kind'], req.body, req.params['id'])),
+  router.put('/:kind/:id', async (req, res) =>
+    res.json(
+      await service.save(res.locals['actor'], req.params['kind'], req.body, req.params['id']),
+    ),
   );
-  router.post('/:kind/:id/archive', (req, res) => {
+  router.post('/:kind/:id/archive', async (req, res) => {
     const { version } = z.object({ version: z.number().int().positive() }).strict().parse(req.body);
-    service.archive(res.locals['actor'], req.params['kind'], req.params['id'], version);
+    await service.archive(res.locals['actor'], req.params['kind'], req.params['id'], version);
     res.status(204).end();
   });
   app.use('/api/organization/jobs', router);

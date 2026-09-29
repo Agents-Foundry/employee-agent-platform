@@ -11,7 +11,22 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    # Control-plane tests clone a database per test on this server (ADR 0018).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:ci-only-password@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

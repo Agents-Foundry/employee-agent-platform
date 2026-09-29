@@ -27,7 +27,7 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 
 - Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
 - Native system-browser Google sign-in (pending)
-- Managed PostgreSQL migration and row-level organization isolation
+- PostgreSQL with row-level organization isolation (implemented, [ADR 0018](adr/0018-postgresql-row-level-security.md))
 - Vault-backed BYOK and organization-key bindings
 - Admin CRUD for departments, teams, roles, employees, and agents
 

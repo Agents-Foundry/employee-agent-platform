@@ -10,6 +10,8 @@ import {
   runtimeAuthHeaders,
   runtimeSigningInput,
 } from '../../../packages/contracts/src/runtime/v1/transport.js';
+import { testDatabase } from './support/database.js';
+import { rawSql, type RawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employeeId = 'employee_qa_demo';
@@ -45,8 +47,8 @@ function keyPair() {
 const primary = keyPair();
 const other = keyPair();
 
-function raw(db: ControlPlaneDatabase): DatabaseSync {
-  return (db as unknown as { db: DatabaseSync }).db;
+function raw(db: ControlPlaneDatabase): RawSql {
+  return rawSql(db);
 }
 
 interface SignOptions {
@@ -101,8 +103,8 @@ describe('runtime transport', () => {
   let manifest: AnySignedAgentManifest;
   let agentId: string;
 
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', true, {
+  beforeEach(async () => {
+    db = await testDatabase({
       manifestV2Issuance: true,
       genericRuntime: true,
       runtimeIdentities: [
@@ -126,8 +128,9 @@ describe('runtime transport', () => {
         },
       ],
     });
-    const pending = db.requestProvisioning(employeeId, provisioning, org);
-    manifest = db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot').manifest!;
+    const pending = await db.requestProvisioning(employeeId, provisioning, org);
+    manifest = (await db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot'))
+      .manifest!;
     agentId = manifestSubject(manifest.payload).agentId;
     app = createApp(db);
   });
@@ -234,14 +237,14 @@ describe('runtime transport', () => {
   });
 
   it('gates employee run creation behind the flag, ownership and the manifest', async () => {
-    const disabled = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
+    const disabled = await testDatabase({ manifestV2Issuance: true });
     try {
       await demoRequest(createApp(disabled))
         .post('/api/execution/v1/runs')
         .send({ agentId: 'agent_qa_engineer', task: { objective: 'x', inputs: {} } })
         .expect(404, { error: 'GENERIC_RUNTIME_DISABLED' });
     } finally {
-      disabled.close();
+      await disabled.close();
     }
     await demoRequest(app)
       .post('/api/execution/v1/runs')
@@ -257,16 +260,11 @@ describe('runtime transport', () => {
       .post('/api/execution/v1/runs')
       .send({ agentId: 'agent_qa_engineer', task: { objective: 'x', inputs: {} } })
       .expect(404, { error: 'MANIFEST_NOT_FOUND' });
-    const v1 = new ControlPlaneDatabase(':memory:', true, { genericRuntime: true });
+    const v1 = await testDatabase({ genericRuntime: true });
     try {
-      const pending = v1.requestProvisioning(employeeId, provisioning, org);
-      const signed = v1.decideProvisioning(
-        pending.id,
-        org,
-        'admin_demo',
-        'APPROVED',
-        'x',
-      ).manifest!;
+      const pending = await v1.requestProvisioning(employeeId, provisioning, org);
+      const signed = (await v1.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'x'))
+        .manifest!;
       await demoRequest(createApp(v1))
         .post('/api/execution/v1/runs')
         .send({
@@ -275,7 +273,7 @@ describe('runtime transport', () => {
         })
         .expect(409, { error: 'RUNTIME_MANIFEST_V2_REQUIRED' });
     } finally {
-      v1.close();
+      await v1.close();
     }
     const run = await startRun();
     expect(run).toMatchObject({ status: 'QUEUED', runtimeProfile: 'standard-agent' });
@@ -334,8 +332,8 @@ describe('runtime transport', () => {
       true,
     );
     expect(
-      db.execution.getRun({ id: employeeId, role: 'EMPLOYEE', organizationId: org }, run.id).run
-        .status,
+      (await db.execution.getRun({ id: employeeId, role: 'EMPLOYEE', organizationId: org }, run.id))
+        .run.status,
     ).toBe('RUNNING');
   });
 
@@ -388,7 +386,7 @@ describe('runtime transport', () => {
     ).body;
     expect(governed).toMatchObject({ decision: 'APPROVAL_REQUIRED', risk: 'MEDIUM' });
     const employee = { id: employeeId, role: 'EMPLOYEE' as const, organizationId: org };
-    const paused = db.execution.getRun(employee, run.id);
+    const paused = await db.execution.getRun(employee, run.id);
     expect(paused.run).toMatchObject({
       status: 'WAITING_FOR_APPROVAL',
       statusReason: 'APPROVAL_REQUIRED',
@@ -446,7 +444,7 @@ describe('runtime transport', () => {
       '/runtime/v1/events',
       event('run.resumed', { approvalId: governed.approvalId }),
     ).expect(201);
-    const resumed = db.execution.getRun(employee, run.id);
+    const resumed = await db.execution.getRun(employee, run.id);
     expect(resumed.run.status).toBe('RUNNING');
     expect(resumed.steps.find((step) => step.id === stepId)?.status).toBe('RUNNING');
     await runtimePost(app, '/runtime/v1/events', event('step.completed', {}, stepId)).expect(201);
@@ -455,14 +453,17 @@ describe('runtime transport', () => {
       '/runtime/v1/events',
       event('run.completed', { summary: 'Done', artifactIds: [] }),
     ).expect(201);
-    const lease = raw(db).prepare('SELECT state FROM agent_run_leases WHERE run_id=?').get(run.id);
+    const lease = await raw(db)
+      .prepare('SELECT state FROM agent_run_leases WHERE run_id=?')
+      .get(run.id);
     expect(lease).toEqual({ state: 'CLOSED' });
-    const audit = raw(db)
-      .prepare(
-        "SELECT event_type FROM audit_events WHERE resource_id=? AND event_type LIKE 'runtime.%' ORDER BY rowid",
-      )
-      .all(run.id)
-      .map((row) => row['event_type']);
+    const audit = (
+      await raw(db)
+        .prepare(
+          "SELECT event_type FROM audit_events WHERE resource_id=? AND event_type LIKE 'runtime.%' ORDER BY seq",
+        )
+        .all(run.id)
+    ).map((row) => row['event_type']);
     expect(audit).toEqual([
       'runtime.run.claimed',
       'runtime.action.allowed',
@@ -514,34 +515,34 @@ describe('runtime transport', () => {
 
   it('cancels a queued run whose manifest no longer verifies instead of submitting it', async () => {
     const run = await startRun();
-    const body = raw(db).prepare('SELECT body FROM agent_manifests WHERE agent_id=?').get(agentId)![
-      'body'
-    ];
+    const body = (await raw(db)
+      .prepare('SELECT body FROM agent_manifests WHERE agent_id=?')
+      .get(agentId))!['body'];
     const tampered = JSON.parse(String(body));
     tampered.payload.tools.push('shell');
-    raw(db)
+    await raw(db)
       .prepare('UPDATE agent_manifests SET body=? WHERE agent_id=?')
       .run(JSON.stringify(tampered), agentId);
     await runtimePost(app, '/runtime/v1/commands/claim').expect(204);
-    const detail = db.execution.getRun(
+    const detail = await db.execution.getRun(
       { id: employeeId, role: 'EMPLOYEE', organizationId: org },
       run.id,
     );
     expect(detail.run).toMatchObject({ status: 'CANCELLED', statusReason: 'MANIFEST_INVALID' });
   });
 
-  it('rejects runtime identity configuration that is not an Ed25519 public key', () => {
-    expect(
-      () =>
-        new ControlPlaneDatabase(':memory:', true, {
+  it('rejects runtime identity configuration that is not an Ed25519 public key', async () => {
+    await expect(
+      (async () =>
+        await testDatabase({
           runtimeIdentities: [
             { id: 'bad', publicKeySpki: 'AAAA', organizations: [org], runtimeProfiles: ['x'] },
           ],
-        }),
-    ).toThrow('RUNTIME_IDENTITY_CONFIG_INVALID');
-    expect(
-      () =>
-        new ControlPlaneDatabase(':memory:', true, {
+        }))(),
+    ).rejects.toThrow('RUNTIME_IDENTITY_CONFIG_INVALID');
+    await expect(
+      (async () =>
+        await testDatabase({
           runtimeIdentities: [
             {
               id: 'bad',
@@ -550,7 +551,7 @@ describe('runtime transport', () => {
               runtimeProfiles: ['x'],
             },
           ],
-        }),
-    ).toThrow('RUNTIME_IDENTITY_CONFIG_INVALID');
+        }))(),
+    ).rejects.toThrow('RUNTIME_IDENTITY_CONFIG_INVALID');
   });
 });

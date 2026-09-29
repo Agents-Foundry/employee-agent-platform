@@ -95,9 +95,9 @@ export function createApp(
 
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-  app.use((request, response, next) => {
+  app.use(async (request, response, next) => {
     const host = request.hostname.toLowerCase().replace(/\.$/, '');
-    const tenantId = database.tenancy.resolveVerifiedDomain(host);
+    const tenantId = await database.tenancy.resolveVerifiedDomain(host);
     if (tenantId) response.locals['tenantOrganizationId'] = tenantId;
     else if (!canonicalHosts.has(host)) {
       response.status(421).json({ error: 'UNRECOGNIZED_HOST' });
@@ -110,19 +110,26 @@ export function createApp(
       const origin = request.header('origin');
       if (!origin || allowedOrigins.includes(origin))
         return callback(null, { credentials: true, origin: true });
-      try {
-        const parsed = new URL(origin);
-        if (
-          parsed.protocol === 'https:' &&
-          !parsed.port &&
-          parsed.hostname === request.hostname.toLowerCase().replace(/\.$/, '') &&
-          Boolean(database.tenancy.resolveVerifiedDomain(parsed.hostname))
-        )
-          return callback(null, { credentials: true, origin: true });
-      } catch {
-        /* Invalid origins are rejected. */
-      }
-      return callback(new Error('ORIGIN_FORBIDDEN'));
+      const verifiedTenantOrigin = async () => {
+        try {
+          const parsed = new URL(origin);
+          return (
+            parsed.protocol === 'https:' &&
+            !parsed.port &&
+            parsed.hostname === request.hostname.toLowerCase().replace(/\.$/, '') &&
+            Boolean(await database.tenancy.resolveVerifiedDomain(parsed.hostname))
+          );
+        } catch {
+          return false; // Invalid origins are rejected.
+        }
+      };
+      verifiedTenantOrigin().then(
+        (allowed) =>
+          allowed
+            ? callback(null, { credentials: true, origin: true })
+            : callback(new Error('ORIGIN_FORBIDDEN')),
+        (error: Error) => callback(error),
+      );
     }),
   );
   // Signed runtime transport: its own body parser, limits and authentication (ADR 0011).
@@ -137,7 +144,7 @@ export function createApp(
     }),
   );
 
-  app.get('/api/health', (_request, response) => {
+  app.get('/api/health', async (_request, response) => {
     response.json({
       status: 'ok',
       service: 'control-plane-api',
@@ -150,7 +157,9 @@ export function createApp(
     response.setHeader('Cache-Control', 'no-store');
     next();
   });
-  app.get('/api/auth/session', (_request, response) => response.json(response.locals['actor']));
+  app.get('/api/auth/session', async (_request, response) =>
+    response.json(response.locals['actor']),
+  );
   configureOrganizationRoutes(app, database, auth);
   configureStructureRoutes(app, database.structure, auth);
   configureJobRoutes(app, database.jobs, auth);
@@ -165,20 +174,20 @@ export function createApp(
   configureCatalogRoutes(app, database.catalog, database.installations, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
 
-  app.get('/api/bootstrap', (_request, response) => {
-    response.json(database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
+  app.get('/api/bootstrap', async (_request, response) => {
+    response.json(await database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));
   });
 
-  app.get('/api/blueprints', (_request, response) =>
+  app.get('/api/blueprints', async (_request, response) =>
     response.json(database.catalog.legacyBlueprints()),
   );
-  app.get('/api/organization/agents', (_request, response) => {
+  app.get('/api/organization/agents', async (_request, response) => {
     const actor = response.locals['actor'];
     if (auth.mode !== 'password' || actor.role !== 'ADMIN')
       return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
-    return response.json(database.listAgentAssignments(actor.organizationId));
+    return response.json(await database.listAgentAssignments(actor.organizationId));
   });
-  app.post('/api/organization/agents', (request, response) => {
+  app.post('/api/organization/agents', async (request, response) => {
     const actor = response.locals['actor'];
     if (auth.mode !== 'password' || actor.role !== 'ADMIN')
       return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
@@ -197,35 +206,35 @@ export function createApp(
       .strict()
       .parse(request.body);
     try {
-      return response.status(201).json(database.createAssignedAgents(actor, input));
+      return response.status(201).json(await database.createAssignedAgents(actor, input));
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT')
         return response.status(409).json({ error: 'IDEMPOTENCY_CONFLICT' });
       throw error;
     }
   });
-  app.get('/api/manifest-key', (_request, response) =>
+  app.get('/api/manifest-key', async (_request, response) =>
     response.json(database.signer.verificationKey),
   );
-  app.get('/api/provisioning', (_request, response) => {
+  app.get('/api/provisioning', async (_request, response) => {
     const actor = response.locals['actor'];
     response.json(
-      database.listProvisioning(
+      await database.listProvisioning(
         actor.organizationId,
         actor.role === 'EMPLOYEE' ? actor.id : undefined,
       ),
     );
   });
-  app.post('/api/provisioning', (request, response) => {
+  app.post('/api/provisioning', async (request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'EMPLOYEE')
       return response.status(403).json({ error: 'EMPLOYEE_ROLE_REQUIRED' });
     const input = provisioningSchema.parse(request.body);
     return response
       .status(201)
-      .json(database.requestProvisioning(actor.id, input, actor.organizationId));
+      .json(await database.requestProvisioning(actor.id, input, actor.organizationId));
   });
-  app.post('/api/provisioning/:id/decision', (request, response) => {
+  app.post('/api/provisioning/:id/decision', async (request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
     const input = z
@@ -236,7 +245,7 @@ export function createApp(
       .strict()
       .parse(request.body);
     return response.json(
-      database.decideProvisioning(
+      await database.decideProvisioning(
         String(request.params['id']),
         actor.organizationId,
         actor.id,
@@ -245,30 +254,30 @@ export function createApp(
       ),
     );
   });
-  app.get('/api/agents/:id/manifest', (request, response) => {
+  app.get('/api/agents/:id/manifest', async (request, response) => {
     const actor = response.locals['actor'];
     response.json(
-      database.getManifest(
+      await database.getManifest(
         String(request.params['id']),
         actor.organizationId,
         actor.role === 'EMPLOYEE' ? actor.id : undefined,
       ),
     );
   });
-  app.get('/api/lifecycle-events', (_request, response) => {
+  app.get('/api/lifecycle-events', async (_request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'ADMIN') return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
-    return response.json(database.listLifecycleEvents(actor.organizationId));
+    return response.json(await database.listLifecycleEvents(actor.organizationId));
   });
 
-  app.get('/api/conversations', (request, response) => {
+  app.get('/api/conversations', async (request, response) => {
     const actor = response.locals['actor'];
     if (request.query['employeeId'] && request.query['employeeId'] !== actor.id)
       return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
-    return response.json(database.listConversations(actor.id, actor.organizationId));
+    return response.json(await database.listConversations(actor.id, actor.organizationId));
   });
 
-  app.post('/api/conversations', (request, response) => {
+  app.post('/api/conversations', async (request, response) => {
     const input = createConversationSchema.parse(request.body);
     const actor = response.locals['actor'];
     if (actor.role !== 'EMPLOYEE' || input.employeeId !== actor.id)
@@ -276,7 +285,7 @@ export function createApp(
     return response
       .status(201)
       .json(
-        database.createConversation(
+        await database.createConversation(
           actor.id,
           input.agentId,
           input.title,
@@ -286,14 +295,14 @@ export function createApp(
       );
   });
 
-  app.get('/api/conversations/:id', (request, response) => {
+  app.get('/api/conversations/:id', async (request, response) => {
     const actor = response.locals['actor'];
     response.json(
-      database.getConversation(String(request.params['id']), actor.organizationId, actor.id),
+      await database.getConversation(String(request.params['id']), actor.organizationId, actor.id),
     );
   });
 
-  app.post('/api/conversations/:id/messages', (request, response) => {
+  app.post('/api/conversations/:id/messages', async (request, response) => {
     const input = addMessageSchema.parse(request.body);
     const actor = response.locals['actor'];
     if (actor.role !== 'EMPLOYEE' || input.author !== 'EMPLOYEE')
@@ -301,7 +310,7 @@ export function createApp(
     return response
       .status(201)
       .json(
-        database.addMessage(
+        await database.addMessage(
           String(request.params['id']),
           'EMPLOYEE',
           input.content,
@@ -311,14 +320,14 @@ export function createApp(
       );
   });
 
-  app.post('/api/qa/runs', (request, response) => {
+  app.post('/api/qa/runs', async (request, response) => {
     const input: QaRunRequest = qaRunSchema.parse(request.body);
     const actor = response.locals['actor'];
     if (actor.role !== 'EMPLOYEE' || input.employeeId !== actor.id)
       return response.status(403).json({ error: 'ACTOR_FORBIDDEN' });
-    database.getConversation(input.conversationId, actor.organizationId, actor.id);
+    await database.getConversation(input.conversationId, actor.organizationId, actor.id);
     if (database.qaGenericRuntimeEnabled) {
-      const generic = database.createGenericQaRun(
+      const generic = await database.createGenericQaRun(
         input,
         actor.organizationId,
         auth.mode === 'demo',
@@ -338,7 +347,7 @@ export function createApp(
       'Draft defects for human review; never publish automatically',
     ];
     const { instructions: _unused, ...legacyInput } = input;
-    const legacy = database.createQaRun(
+    const legacy = await database.createQaRun(
       {
         ...legacyInput,
         plan,
@@ -348,7 +357,7 @@ export function createApp(
       auth.mode === 'demo',
     );
     const result: QaRunResponse = { mode: 'LEGACY_STATIC_PLAN', ...legacy };
-    database.addMessage(
+    await database.addMessage(
       input.conversationId,
       'AGENT',
       `I prepared a six-step QA plan for ${input.storyKey}. Browser execution is paused for admin approval (${result.approval.id}).`,
@@ -358,24 +367,24 @@ export function createApp(
     return response.status(202).json(result);
   });
 
-  app.get('/api/approvals', (_request, response) => {
+  app.get('/api/approvals', async (_request, response) => {
     const actor = response.locals['actor'];
     response.json(
-      database.listApprovals(
+      await database.listApprovals(
         actor.organizationId,
         actor.role === 'EMPLOYEE' ? actor.id : undefined,
       ),
     );
   });
 
-  app.post('/api/approvals/:id/decision', (request, response) => {
+  app.post('/api/approvals/:id/decision', async (request, response) => {
     const actor = response.locals['actor'];
     if (actor.role !== 'ADMIN') {
       return response.status(403).json({ error: 'ADMIN_ROLE_REQUIRED' });
     }
     const { decision } = approvalDecisionSchema.parse(request.body);
     return response.json(
-      database.decideApproval(
+      await database.decideApproval(
         String(request.params['id']),
         decision,
         actor.id,

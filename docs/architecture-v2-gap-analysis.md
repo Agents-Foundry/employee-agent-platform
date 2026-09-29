@@ -227,7 +227,7 @@ brief) and must not contribute code to the commercial core.
 | Contract churn before the runtime exists                         | Versioned protocol; parser tests; changes require a new version          |
 | Manifest v2 shape wrong for later roles                          | Issued only behind a flag until the Frontend Engineer role validates it  |
 | `database.ts` keeps growing                                      | New logic lives in `execution/` and `agents/` modules                    |
-| SQLite single-writer limits for event volume                     | Accepted for development; PostgreSQL move is a separate planned change   |
+| SQLite single-writer limits for event volume                     | Resolved: PostgreSQL with row-level security (ADR 0018)                  |
 | Over-claiming capability                                         | Docs state explicitly that no runtime, tool, or connector executes yet   |
 
 ## 16. Rollback strategy

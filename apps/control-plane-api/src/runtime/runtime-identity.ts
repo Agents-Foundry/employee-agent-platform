@@ -110,12 +110,12 @@ export interface SignedRuntimeRequest {
  * Authenticate one signed runtime request. Every failure is the same 401 so callers learn
  * nothing about which check failed. `consumeNonce` must return false for a replayed nonce.
  */
-export function authenticateRuntimeRequest(
+export async function authenticateRuntimeRequest(
   registry: RuntimeIdentityRegistry,
   request: SignedRuntimeRequest,
-  consumeNonce: (runtimeId: string, nonce: string, expiresAt: number) => boolean,
+  consumeNonce: (runtimeId: string, nonce: string, expiresAt: number) => Promise<boolean>,
   nowMs = Date.now(),
-): RuntimeIdentity {
+): Promise<RuntimeIdentity> {
   const unauthenticated = () => new ExecutionError(401, 'RUNTIME_UNAUTHENTICATED');
   const runtimeId = request.header(runtimeAuthHeaders.runtimeId);
   const timestamp = request.header(runtimeAuthHeaders.timestamp);
@@ -148,7 +148,7 @@ export function authenticateRuntimeRequest(
   }
   if (!valid) throw unauthenticated();
   // Only a verified request may consume a nonce, so forged traffic cannot burn real nonces.
-  if (!consumeNonce(identity.id, nonce, issuedAt + RUNTIME_REQUEST_MAX_SKEW_MS))
+  if (!(await consumeNonce(identity.id, nonce, issuedAt + RUNTIME_REQUEST_MAX_SKEW_MS)))
     throw unauthenticated();
   return identity;
 }

@@ -17,6 +17,9 @@ import {
 } from '../src/auth.js';
 import type { IdentityEntry } from '../src/identity-directory.js';
 import { syncIdentityDirectory } from '../src/identity-directory.js';
+import { testDatabase, testStore } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
+import { ManifestSigner } from '../src/manifest-signing.js';
 
 const config: GoogleConfig = {
   mode: 'google',
@@ -77,9 +80,9 @@ describe('Google Workspace sessions and tenant authorization', () => {
       ],
     });
   });
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    db.syncIdentities(GOOGLE_ISSUER, directory);
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false });
+    await db.syncIdentities(GOOGLE_ISSUER, directory);
   });
   afterEach(() => db.close());
 
@@ -106,15 +109,15 @@ describe('Google Workspace sessions and tenant authorization', () => {
         async () => new Response(JSON.stringify({ id_token: await idToken() }), { status: 200 }),
       ) as typeof fetch,
     );
-  function session(subject: string, expiresAt = Date.now() + 60000) {
+  async function session(subject: string, expiresAt = Date.now() + 60000) {
     const value = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(value), GOOGLE_ISSUER, subject, expiresAt);
+    await db.createSession(hashToken(value), GOOGLE_ISSUER, subject, expiresAt);
     return `af_session=${value}`;
   }
-  function assignedAgent(employeeId: string, org: string, admin: string) {
-    const pending = db.requestProvisioning(employeeId, provisioning, org);
+  async function assignedAgent(employeeId: string, org: string, admin: string) {
+    const pending = await db.requestProvisioning(employeeId, provisioning, org);
     return manifestSubject(
-      db.decideProvisioning(pending.id, org, admin, 'APPROVED', 'Pilot').manifest!.payload,
+      (await db.decideProvisioning(pending.id, org, admin, 'APPROVED', 'Pilot')).manifest!.payload,
     ).agentId;
   }
 
@@ -212,7 +215,7 @@ describe('Google Workspace sessions and tenant authorization', () => {
       .expect(403);
     await browser.get('/api/auth/session').expect(401);
     const binding = randomBytes(32).toString('base64url');
-    db.createLogin(
+    await db.createLogin(
       hashToken(binding),
       { state: 'old', nonce: 'nonce', verifier: 'verifier', destination: config.employeeUrl },
       1,
@@ -235,7 +238,7 @@ describe('Google Workspace sessions and tenant authorization', () => {
       '/api/manifest-key',
     ])
       await request(app).get(path).set('x-actor-role', 'ADMIN').expect(401);
-    const cookie = session('google-a');
+    const cookie = await session('google-a');
     await request(app)
       .post('/api/provisioning')
       .set('Cookie', cookie)
@@ -274,12 +277,12 @@ describe('Google Workspace sessions and tenant authorization', () => {
 
   it('isolates conversations, agents, approvals, provisioning, and audit across organizations and peers', async () => {
     const app = createApp(db, config);
-    const agentA = assignedAgent('employee-a', 'org-a', 'admin-a');
-    const agentB = assignedAgent('employee-b', 'org-b', 'admin-b');
-    const a = session('google-a'),
-      peer = session('google-peer'),
-      b = session('google-b'),
-      adminB = session('google-admin-b');
+    const agentA = await assignedAgent('employee-a', 'org-a', 'admin-a');
+    const agentB = await assignedAgent('employee-b', 'org-b', 'admin-b');
+    const a = await session('google-a'),
+      peer = await session('google-peer'),
+      b = await session('google-b'),
+      adminB = await session('google-admin-b');
     const conversation = await request(app)
       .post('/api/conversations')
       .set('Cookie', a)
@@ -339,23 +342,26 @@ describe('Google Workspace sessions and tenant authorization', () => {
 
   it('expires sessions and applies membership removal or role changes on the next request', async () => {
     const app = createApp(db, config);
-    const cookie = session('google-admin-a');
+    const cookie = await session('google-admin-a');
     await request(app).get('/api/lifecycle-events').set('Cookie', cookie).expect(200);
-    db.syncIdentities(
+    await db.syncIdentities(
       GOOGLE_ISSUER,
       directory.map((entry) =>
         entry.subject === 'google-admin-a' ? { ...entry, role: 'EMPLOYEE' } : entry,
       ),
     );
     await request(app).get('/api/lifecycle-events').set('Cookie', cookie).expect(403);
-    db.syncIdentities(
+    await db.syncIdentities(
       GOOGLE_ISSUER,
       directory.filter((entry) => entry.subject !== 'google-admin-a'),
     );
     await request(app).get('/api/auth/session').set('Cookie', cookie).expect(401);
-    db.syncIdentities(GOOGLE_ISSUER, directory);
+    await db.syncIdentities(GOOGLE_ISSUER, directory);
     await request(app).get('/api/auth/session').set('Cookie', cookie).expect(401);
-    await request(app).get('/api/auth/session').set('Cookie', session('google-a', 1)).expect(401);
+    await request(app)
+      .get('/api/auth/session')
+      .set('Cookie', await session('google-a', 1))
+      .expect(401);
   });
 
   it('fails startup on missing configuration and production demo authentication', () => {
@@ -397,49 +403,52 @@ describe('Google Workspace sessions and tenant authorization', () => {
     expect(() => loadAuthConfig({ ...environment, GOOGLE_CLIENT_SECRET: '' })).toThrow();
   });
 
-  it('validates the operator directory and preserves membership on invalid reassignment', () => {
+  it('validates the operator directory and preserves membership on invalid reassignment', async () => {
     const folder = mkdtempSync(join(tmpdir(), 'agents-foundry-directory-'));
     const path = join(folder, 'members.json');
     try {
       writeFileSync(path, JSON.stringify(directory));
-      syncIdentityDirectory(db, GOOGLE_ISSUER, path);
-      expect(db.findIdentity(GOOGLE_ISSUER, 'google-a')?.organizationId).toBe('org-a');
+      await syncIdentityDirectory(db, GOOGLE_ISSUER, path);
+      expect((await db.findIdentity(GOOGLE_ISSUER, 'google-a'))?.organizationId).toBe('org-a');
       writeFileSync(path, JSON.stringify([directory[0], directory[0]]));
-      expect(() => syncIdentityDirectory(db, GOOGLE_ISSUER, path)).toThrow('DUPLICATE_IDENTITY');
+      await expect(syncIdentityDirectory(db, GOOGLE_ISSUER, path)).rejects.toThrow(
+        'DUPLICATE_IDENTITY',
+      );
       writeFileSync(path, JSON.stringify([{ ...directory[0], role: 'OWNER' }]));
-      expect(() => syncIdentityDirectory(db, GOOGLE_ISSUER, path)).toThrow();
+      await expect(syncIdentityDirectory(db, GOOGLE_ISSUER, path)).rejects.toThrow();
       writeFileSync(
         path,
         JSON.stringify([{ ...directory[0], organization: directory[3].organization }]),
       );
-      expect(() => syncIdentityDirectory(db, GOOGLE_ISSUER, path)).toThrow(
+      await expect(syncIdentityDirectory(db, GOOGLE_ISSUER, path)).rejects.toThrow(
         'IDENTITY_REASSIGNMENT_FORBIDDEN',
       );
-      expect(db.findIdentity(GOOGLE_ISSUER, 'google-a')?.organizationId).toBe('org-a');
+      expect((await db.findIdentity(GOOGLE_ISSUER, 'google-a'))?.organizationId).toBe('org-a');
       writeFileSync(path, '[]');
-      syncIdentityDirectory(db, GOOGLE_ISSUER, path);
-      expect(db.findIdentity(GOOGLE_ISSUER, 'google-a')).toBeUndefined();
+      await syncIdentityDirectory(db, GOOGLE_ISSUER, path);
+      expect(await db.findIdentity(GOOGLE_ISSUER, 'google-a')).toBeUndefined();
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
   });
 
-  it('persists only hashed sessions and continues authentication after an API restart', () => {
-    const folder = mkdtempSync(join(tmpdir(), 'agents-foundry-session-'));
-    const path = join(folder, 'sessions.db');
-    let database: ControlPlaneDatabase | undefined;
+  it('persists only hashed sessions and continues authentication after an API restart', async () => {
+    const { store, connect, drop } = await testStore();
+    const signer = new ManifestSigner();
     const value = randomBytes(32).toString('base64url');
     try {
-      database = new ControlPlaneDatabase(path, false);
-      database.syncIdentities(GOOGLE_ISSUER, directory);
-      database.createSession(hashToken(value), GOOGLE_ISSUER, 'google-a', Date.now() + 60000);
-      database.close();
-      database = new ControlPlaneDatabase(path, false);
-      expect(database.findSession(hashToken(value))?.id).toBe('employee-a');
-      expect(database.findSession(value)).toBeUndefined();
+      let database = await ControlPlaneDatabase.open({ store, signer });
+      await database.syncIdentities(GOOGLE_ISSUER, directory);
+      await database.createSession(hashToken(value), GOOGLE_ISSUER, 'google-a', Date.now() + 60000);
+      await database.close();
+      database = await ControlPlaneDatabase.open({ store: await connect(), signer });
+      expect((await database.findSession(hashToken(value)))?.id).toBe('employee-a');
+      expect(await database.findSession(value)).toBeUndefined();
+      expect(
+        await rawSql(database).prepare('SELECT 1 FROM auth_sessions WHERE hash=?').get(value),
+      ).toBeUndefined();
     } finally {
-      database?.close();
-      rmSync(folder, { recursive: true, force: true });
+      await drop();
     }
   });
 });

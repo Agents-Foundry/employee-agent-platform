@@ -6,6 +6,7 @@ import { createApp } from '../src/app.js';
 import { hashToken, type PasswordConfig } from '../src/auth.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { hashPassword } from '../src/passwords.js';
+import { testDatabase } from './support/database.js';
 
 const config: PasswordConfig = {
   mode: 'password',
@@ -27,17 +28,17 @@ describe('verified account linking and tenant switching', () => {
   afterEach(() => db?.close());
 
   it('requires the invited account, consumes the private link once and switches scoped sessions', async () => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    const alpha = db.createCustomer(
+    db = await testDatabase({ seedDemo: false });
+    const alpha = await db.createCustomer(
       { name: 'Alpha', slug: 'alpha' },
       { displayName: 'Alex', email: 'alex@company.example', team: 'Admin' },
     );
-    const beta = db.createCustomer(
+    const beta = await db.createCustomer(
       { name: 'Beta', slug: 'beta' },
       { displayName: 'Blair', email: 'blair@company.example', team: 'Admin' },
     );
-    expect(db.acceptInvitation(hashToken(alpha.token), hash)).toBe(true);
-    expect(db.acceptInvitation(hashToken(beta.token), hash)).toBe(true);
+    expect(await db.acceptInvitation(hashToken(alpha.token), hash)).toBe(true);
+    expect(await db.acceptInvitation(hashToken(beta.token), hash)).toBe(true);
     const app = createApp(db, config);
     const signIn = (email: string) =>
       request(app)
@@ -56,9 +57,11 @@ describe('verified account linking and tenant switching', () => {
     const token = new URL(invitation.body.activationUrl).hash.replace('#link=', '');
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(
-      db.tenancy.listMemberships(
-        { id: beta.employeeId, organizationId: beta.organizationId, role: 'ADMIN' },
-        { search: 'alex' },
+      (
+        await db.tenancy.listMemberships(
+          { id: beta.employeeId, organizationId: beta.organizationId, role: 'ADMIN' },
+          { search: 'alex' },
+        )
       ).items[0].membershipStatus,
     ).toBe('pending');
     await request(app)
@@ -94,7 +97,7 @@ describe('verified account linking and tenant switching', () => {
       organizationId: beta.organizationId,
       role: 'ADMIN' as const,
     };
-    const domain = db.tenancy.registerDomain(betaActor, {
+    const domain = await db.tenancy.registerDomain(betaActor, {
       domain: 'portal.beta.example.org',
       domainType: 'custom_domain',
     });
@@ -148,7 +151,7 @@ describe('verified account linking and tenant switching', () => {
         testingTechnologies: ['Playwright'],
       },
     };
-    expect(db.createAssignedAgents(betaActor, assignmentInput)).toHaveLength(1);
+    expect(await db.createAssignedAgents(betaActor, assignmentInput)).toHaveLength(1);
     const employeeLogin = await request(app)
       .post('/api/auth/password')
       .set('Origin', origin)
@@ -175,11 +178,13 @@ describe('verified account linking and tenant switching', () => {
     await request(app).get('/api/auth/session').set('Cookie', linkedCookie).expect(401);
     const switchedCookie = sessionCookie(switched);
     await request(app).get('/api/organization/profile').set('Cookie', switchedCookie).expect(200);
-    const betaMembership = db.tenancy.listMemberships(
-      { id: beta.employeeId, organizationId: beta.organizationId, role: 'ADMIN' },
-      { search: 'alex' },
+    const betaMembership = (
+      await db.tenancy.listMemberships(
+        { id: beta.employeeId, organizationId: beta.organizationId, role: 'ADMIN' },
+        { search: 'alex' },
+      )
     ).items[0];
-    db.tenancy.setMembershipStatus(
+    await db.tenancy.setMembershipStatus(
       { id: beta.employeeId, organizationId: beta.organizationId, role: 'ADMIN' },
       betaMembership.id,
       { status: 'suspended', version: betaMembership.version },
@@ -193,51 +198,55 @@ describe('verified account linking and tenant switching', () => {
       .expect(403);
   });
 
-  it('lets an operator invite an existing account as a second organization administrator', () => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    const first = db.createCustomer(
+  it('lets an operator invite an existing account as a second organization administrator', async () => {
+    db = await testDatabase({ seedDemo: false });
+    const first = await db.createCustomer(
       { name: 'First', slug: 'first' },
       { displayName: 'Owner', email: 'owner@example.org', team: 'Admin' },
     );
-    db.acceptInvitation(hashToken(first.token), hash);
-    const second = db.createCustomer(
+    await db.acceptInvitation(hashToken(first.token), hash);
+    const second = await db.createCustomer(
       { name: 'Second', slug: 'second' },
       { displayName: 'Owner', email: 'owner@example.org', team: 'Admin' },
     );
     expect(second.purpose).toBe('link');
-    expect(db.findPasswordAccount('owner@example.org')?.organizationId).toBe(first.organizationId);
-    const firstUser = db.listAccountMemberships({
+    expect((await db.findPasswordAccount('owner@example.org'))?.organizationId).toBe(
+      first.organizationId,
+    );
+    const firstUser = await db.listAccountMemberships({
       id: first.employeeId,
       organizationId: first.organizationId,
       role: 'ADMIN',
     });
     expect(firstUser).toHaveLength(1);
-    const userId = db.accountSessionUser('missing');
+    const userId = await db.accountSessionUser('missing');
     expect(userId).toBeUndefined();
-    const firstMembership = db.tenancy.listMemberships(
-      { id: first.employeeId, organizationId: first.organizationId, role: 'ADMIN' },
-      {},
+    const firstMembership = (
+      await db.tenancy.listMemberships(
+        { id: first.employeeId, organizationId: first.organizationId, role: 'ADMIN' },
+        {},
+      )
     ).items[0];
-    const linked = db.acceptAccountLink(hashToken(second.token), firstMembership.userId);
+    const linked = await db.acceptAccountLink(hashToken(second.token), firstMembership.userId);
     expect(linked).toEqual({
       id: second.employeeId,
       organizationId: second.organizationId,
       role: 'ADMIN',
     });
-    expect(db.tenancy.profile(linked!).name).toBe('Second');
+    expect((await db.tenancy.profile(linked!)).name).toBe('Second');
   });
 
   it('does not link an account that has not completed its first activation', async () => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    db.createCustomer(
+    db = await testDatabase({ seedDemo: false });
+    await db.createCustomer(
       { name: 'Pending', slug: 'pending' },
       { displayName: 'Pat', email: 'pat@example.org', team: 'Admin' },
     );
-    const active = db.createCustomer(
+    const active = await db.createCustomer(
       { name: 'Active', slug: 'active' },
       { displayName: 'Owner', email: 'owner@example.org', team: 'Admin' },
     );
-    db.acceptInvitation(hashToken(active.token), hash);
+    await db.acceptInvitation(hashToken(active.token), hash);
     const app = createApp(db, config);
     const cookie = sessionCookie(
       await request(app)
@@ -253,9 +262,11 @@ describe('verified account linking and tenant switching', () => {
       .send({ displayName: 'Pat', email: 'pat@example.org', team: 'Team' })
       .expect(409, { error: 'ACCOUNT_NOT_ACTIVE' });
     expect(
-      db.tenancy.listMemberships(
-        { id: active.employeeId, organizationId: active.organizationId, role: 'ADMIN' },
-        {},
+      (
+        await db.tenancy.listMemberships(
+          { id: active.employeeId, organizationId: active.organizationId, role: 'ADMIN' },
+          {},
+        )
       ).total,
     ).toBe(1);
   });

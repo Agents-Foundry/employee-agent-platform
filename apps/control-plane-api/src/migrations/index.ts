@@ -11,6 +11,17 @@ import { runtimeTransportSql } from './008-runtime-transport.js';
 import { actionGatewaySql } from './009-action-gateway.js';
 import { executionGrantsSql } from './010-execution-grants.js';
 import { sourceControlSql } from './011-source-control.js';
+import { legacyBaseSql } from './000-legacy-base.js';
+
+/**
+ * Brings a SQLite control-plane database (any release) to SQLite schema 011. Used only to
+ * import existing SQLite data into PostgreSQL (ADR 0018); the control plane runs on PostgreSQL.
+ */
+export function migrateSqlite(db: DatabaseSync): void {
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(legacyBaseSql);
+  migrateOrganization(db);
+}
 
 export function migrateOrganization(
   db: DatabaseSync,

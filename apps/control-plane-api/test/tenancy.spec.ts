@@ -11,6 +11,8 @@ import { createApp } from '../src/app.js';
 import { hashToken, type PasswordConfig } from '../src/auth.js';
 import { LOCAL_ISSUER } from '../src/onboarding-types.js';
 import { migrateOrganization } from '../src/migrations/index.js';
+import { testDatabase } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const config: PasswordConfig = {
   mode: 'password',
@@ -36,33 +38,33 @@ const person = (email: string) => ({
   employeeNumber: 'E-42',
   employmentType: 'employee',
 });
-const positionContext = (db: ControlPlaneDatabase, actor: Actor) => {
-  const unit = db.structure.save(actor, {
+const positionContext = async (db: ControlPlaneDatabase, actor: Actor) => {
+  const unit = await db.structure.save(actor, {
     name: 'Engineering',
     code: 'ENG',
     unitType: 'department',
     parentId: null,
     description: '',
   });
-  const family = db.jobs.save(actor, 'families', {
+  const family = await db.jobs.save(actor, 'families', {
     name: 'Engineering',
     code: 'ENG',
     description: '',
   });
-  const discipline = db.jobs.save(actor, 'disciplines', {
+  const discipline = await db.jobs.save(actor, 'disciplines', {
     name: 'Quality',
     code: 'QUALITY',
     description: '',
     jobFamilyId: family.id,
   });
-  const role = db.jobs.save(actor, 'roles', {
+  const role = await db.jobs.save(actor, 'roles', {
     name: 'QA Engineer',
     code: 'QA',
     description: '',
     jobFamilyId: family.id,
     disciplineId: discipline.id,
   });
-  const level = db.jobs.save(actor, 'levels', {
+  const level = await db.jobs.save(actor, 'levels', {
     name: 'Senior',
     code: 'L3',
     rank: 3,
@@ -80,130 +82,137 @@ const positionContext = (db: ControlPlaneDatabase, actor: Actor) => {
 };
 describe('tenant profile, account separation, membership and positions', () => {
   let db: ControlPlaneDatabase, admin: Actor, peer: Actor;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false);
-    const create = (slug: string): Actor => {
-      const invitation = db.createCustomer(
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false });
+    const create = async (slug: string): Promise<Actor> => {
+      const invitation = await db.createCustomer(
         { name: slug, slug },
         { displayName: 'Admin', email: `admin@${slug}.example`, team: 'Administration' },
       );
-      db.acceptInvitation(hashToken(invitation.token), 'test-hash');
+      await db.acceptInvitation(hashToken(invitation.token), 'test-hash');
       return {
         id: invitation.employeeId,
         organizationId: invitation.organizationId,
         role: 'ADMIN',
       };
     };
-    admin = create('alpha');
-    peer = create('beta');
+    admin = await create('alpha');
+    peer = await create('beta');
   });
   afterEach(() => db.close());
-  it('computes tenant-scoped setup progress from live records and reverses stale completion', () => {
-    const first = db.tenancy.setupProgress(admin);
+  it('computes tenant-scoped setup progress from live records and reverses stale completion', async () => {
+    const first = await db.tenancy.setupProgress(admin);
     expect(first).toMatchObject({ completedRequired: 0, totalRequired: 6 });
     expect(first.steps.find((step) => step.id === 'domain')).toMatchObject({
       required: false,
       complete: false,
     });
-    db.tenancy.updateProfile(admin, profile(db.tenancy.profile(admin)));
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(1);
-    const position = positionContext(db, admin);
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(3);
-    const personRecord = db.tenancy.createEmployee(admin, person('setup@alpha.example'));
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(4);
-    const assigned = db.tenancy.assignPosition(admin, personRecord.id, {
+    await db.tenancy.updateProfile(admin, profile(await db.tenancy.profile(admin)));
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(1);
+    const position = await positionContext(db, admin);
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(3);
+    const personRecord = await db.tenancy.createEmployee(admin, person('setup@alpha.example'));
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(4);
+    const assigned = await db.tenancy.assignPosition(admin, personRecord.id, {
       positionId: position.id,
       version: 1,
     });
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(5);
-    const invitation = db.inviteExistingEmployee(admin, personRecord.id);
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(5);
-    db.acceptInvitation(hashToken(invitation.token), 'test-hash');
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(6);
-    expect(db.tenancy.setupProgress(peer).completedRequired).toBe(0);
-    db.tenancy.updateEmployee(admin, personRecord.id, {
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(5);
+    const invitation = await db.inviteExistingEmployee(admin, personRecord.id);
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(5);
+    await db.acceptInvitation(hashToken(invitation.token), 'test-hash');
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(6);
+    expect((await db.tenancy.setupProgress(peer)).completedRequired).toBe(0);
+    await db.tenancy.updateEmployee(admin, personRecord.id, {
       ...person('setup@alpha.example'),
       version: assigned.version,
       employmentStatus: 'inactive',
     });
-    expect(db.tenancy.setupProgress(admin).completedRequired).toBe(3);
-    expect(() =>
+    expect((await db.tenancy.setupProgress(admin)).completedRequired).toBe(3);
+    await expect(
       db.tenancy.setupProgress({
         id: personRecord.id,
         organizationId: admin.organizationId,
         role: 'EMPLOYEE',
       }),
-    ).toThrow('ORGANIZATION_ADMIN_REQUIRED');
+    ).rejects.toThrow('ORGANIZATION_ADMIN_REQUIRED');
   });
-  it('separates user, employee and membership and gates existing sessions on status', () => {
-    const member = db.tenancy.listMemberships(admin, {}).items[0];
+  it('separates user, employee and membership and gates existing sessions on status', async () => {
+    const member = (await db.tenancy.listMemberships(admin, {})).items[0];
     expect(member.userId).not.toBe(member.employeeId);
     expect(member.securityRole).toBe('ADMIN');
-    const invite = db.inviteEmployee(admin, {
+    const invite = await db.inviteEmployee(admin, {
       displayName: 'Worker',
       email: 'worker@alpha.example',
       team: 'QA',
     });
-    expect(db.tenancy.listMemberships(admin, {}).total).toBe(2);
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
-    db.acceptInvitation(hashToken(invite.token), 'test-hash');
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)?.role).toBe('EMPLOYEE');
+    expect((await db.tenancy.listMemberships(admin, {})).total).toBe(2);
+    expect(await db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
+    await db.acceptInvitation(hashToken(invite.token), 'test-hash');
+    expect((await db.findIdentity(LOCAL_ISSUER, invite.employeeId))?.role).toBe('EMPLOYEE');
     const workerToken = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(workerToken), LOCAL_ISSUER, invite.employeeId, Date.now() + 60000);
-    expect(db.findSession(hashToken(workerToken))).toBeDefined();
-    const worker = db.tenancy.listMemberships(admin, { search: 'worker' }).items[0];
-    db.tenancy.setMembershipStatus(admin, worker.id, {
+    await db.createSession(
+      hashToken(workerToken),
+      LOCAL_ISSUER,
+      invite.employeeId,
+      Date.now() + 60000,
+    );
+    expect(await db.findSession(hashToken(workerToken))).toBeDefined();
+    const worker = (await db.tenancy.listMemberships(admin, { search: 'worker' })).items[0];
+    await db.tenancy.setMembershipStatus(admin, worker.id, {
       status: 'suspended',
       version: worker.version,
     });
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
-    expect(db.findSession(hashToken(workerToken))).toBeUndefined();
-    const suspended = db.tenancy.listMemberships(admin, { search: 'worker' }).items[0];
-    db.tenancy.setMembershipStatus(admin, worker.id, {
+    expect(await db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
+    expect(await db.findSession(hashToken(workerToken))).toBeUndefined();
+    const suspended = (await db.tenancy.listMemberships(admin, { search: 'worker' })).items[0];
+    await db.tenancy.setMembershipStatus(admin, worker.id, {
       status: 'active',
       version: suspended.version,
     });
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeDefined();
-    expect(db.findSession(hashToken(workerToken))).toBeUndefined();
-    db.disableMember(admin, invite.employeeId);
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
-    const disabled = db.tenancy.listMemberships(admin, { search: 'worker' }).items[0];
-    db.tenancy.setMembershipStatus(admin, disabled.id, {
+    expect(await db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeDefined();
+    expect(await db.findSession(hashToken(workerToken))).toBeUndefined();
+    await db.disableMember(admin, invite.employeeId);
+    expect(await db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeUndefined();
+    const disabled = (await db.tenancy.listMemberships(admin, { search: 'worker' })).items[0];
+    await db.tenancy.setMembershipStatus(admin, disabled.id, {
       status: 'active',
       version: disabled.version,
     });
-    expect(db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeDefined();
-    expect(() =>
+    expect(await db.findIdentity(LOCAL_ISSUER, invite.employeeId)).toBeDefined();
+    await expect(
       db.tenancy.setMembershipStatus(admin, member.id, {
         status: 'suspended',
         version: member.version,
       }),
-    ).toThrow('SELF_ROLE_CHANGE_FORBIDDEN');
+    ).rejects.toThrow('SELF_ROLE_CHANGE_FORBIDDEN');
     expect(
-      db.tenancy
-        .listMemberships(peer, {})
-        .items.some((item) => item.employeeId === invite.employeeId),
+      (await db.tenancy.listMemberships(peer, {})).items.some(
+        (item) => item.employeeId === invite.employeeId,
+      ),
     ).toBe(false);
   });
   it('persists organization profile and verifies DNS ownership before domain routing', async () => {
-    const before = db.tenancy.profile(admin);
+    const before = await db.tenancy.profile(admin);
     expect(before.name).toBe('alpha');
-    const updated = db.tenancy.updateProfile(
+    const updated = await db.tenancy.updateProfile(
       admin,
       profile({ ...before, name: 'Acme', code: 'ACME' }),
     );
     expect(updated.version).toBe(before.version + 1);
-    expect(() => db.tenancy.updateProfile(admin, profile(before))).toThrow(
+    await expect(db.tenancy.updateProfile(admin, profile(before))).rejects.toThrow(
       'PROFILE_VERSION_CONFLICT',
     );
-    expect(db.tenancy.profile(peer).name).toBe('beta');
-    const domain = db.tenancy.registerDomain(admin, {
+    expect((await db.tenancy.profile(peer)).name).toBe('beta');
+    const domain = await db.tenancy.registerDomain(admin, {
       domain: 'Agents.Acme.example.com',
       domainType: 'custom_domain',
     });
     expect(domain.domain).toBe('agents.acme.example.com');
-    expect(db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull();
-    expect(() => db.tenancy.setPrimaryDomain(admin, domain.id)).toThrow('DOMAIN_UNVERIFIED');
+    expect(await db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull();
+    await expect(db.tenancy.setPrimaryDomain(admin, domain.id)).rejects.toThrow(
+      'DOMAIN_UNVERIFIED',
+    );
     await expect(
       db.tenancy.verifyDomain(admin, domain.id, async () => [['incorrect']]),
     ).rejects.toThrow('DOMAIN_PROOF_NOT_FOUND');
@@ -213,16 +222,16 @@ describe('tenant profile, account separation, membership and positions', () => {
     });
     expect(verified.verificationStatus).toBe('verified');
     expect(verified.verificationToken).toBeNull();
-    db.tenancy.setPrimaryDomain(admin, domain.id);
-    expect(db.tenancy.resolveVerifiedDomain(domain.domain)).toBe(admin.organizationId);
-    expect(() =>
+    await db.tenancy.setPrimaryDomain(admin, domain.id);
+    expect(await db.tenancy.resolveVerifiedDomain(domain.domain)).toBe(admin.organizationId);
+    await expect(
       db.tenancy.registerDomain(peer, { domain: domain.domain, domainType: 'custom_domain' }),
-    ).toThrow('TENANT_RECORD_CONFLICT');
+    ).rejects.toThrow('TENANT_RECORD_CONFLICT');
     const app = createApp(db, config),
       adminToken = randomBytes(32).toString('base64url'),
       peerToken = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(adminToken), LOCAL_ISSUER, admin.id, Date.now() + 60000);
-    db.createSession(hashToken(peerToken), LOCAL_ISSUER, peer.id, Date.now() + 60000);
+    await db.createSession(hashToken(adminToken), LOCAL_ISSUER, admin.id, Date.now() + 60000);
+    await db.createSession(hashToken(peerToken), LOCAL_ISSUER, peer.id, Date.now() + 60000);
     await request(app)
       .get('/api/auth/session')
       .set('Host', domain.domain)
@@ -246,20 +255,22 @@ describe('tenant profile, account separation, membership and positions', () => {
       .set('Origin', `https://${domain.domain}`)
       .set('Cookie', `af_session=${peerToken}`);
     expect(foreignOrigin.headers['access-control-allow-origin']).toBeUndefined();
-    const sql = (db as unknown as { db: DatabaseSync }).db;
-    sql.prepare("UPDATE organizations SET status='suspended' WHERE id=?").run(admin.organizationId);
-    expect(db.findIdentity(LOCAL_ISSUER, admin.id)).toBeUndefined();
-    expect(db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull();
+    const sql = rawSql(db);
+    await sql
+      .prepare("UPDATE organizations SET status='suspended' WHERE id=?")
+      .run(admin.organizationId);
+    expect(await db.findIdentity(LOCAL_ISSUER, admin.id)).toBeUndefined();
+    expect(await db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull();
   });
-  it('creates employees without login, assigns a tenant position, retains history and invites separately', () => {
-    const position = positionContext(db, admin);
-    const personRecord = db.tenancy.createEmployee(admin, person('ada@alpha.example'));
+  it('creates employees without login, assigns a tenant position, retains history and invites separately', async () => {
+    const position = await positionContext(db, admin);
+    const personRecord = await db.tenancy.createEmployee(admin, person('ada@alpha.example'));
     expect(personRecord.userId).toBeNull();
-    expect(db.findIdentity(LOCAL_ISSUER, personRecord.id)).toBeUndefined();
-    expect(() =>
+    expect(await db.findIdentity(LOCAL_ISSUER, personRecord.id)).toBeUndefined();
+    await expect(
       db.tenancy.assignPosition(peer, personRecord.id, { positionId: position.id, version: 1 }),
-    ).toThrow('EMPLOYEE_NOT_FOUND');
-    const assigned = db.tenancy.assignPosition(admin, personRecord.id, {
+    ).rejects.toThrow('EMPLOYEE_NOT_FOUND');
+    const assigned = await db.tenancy.assignPosition(admin, personRecord.id, {
       positionId: position.id,
       version: 1,
     });
@@ -267,47 +278,52 @@ describe('tenant profile, account separation, membership and positions', () => {
     expect(assigned.unitName).toBe('Engineering');
     expect(assigned.roleName).toBe('QA Engineer');
     expect(assigned.levelName).toBe('Senior');
-    expect(() =>
+    await expect(
       db.tenancy.assignPosition(admin, admin.id, { positionId: position.id, version: 1 }),
-    ).toThrow('POSITION_OCCUPIED');
-    const invitation = db.inviteExistingEmployee(admin, personRecord.id);
-    expect(db.tenancy.listMemberships(admin, { search: 'ada' }).items[0].membershipStatus).toBe(
-      'pending',
-    );
-    db.acceptInvitation(hashToken(invitation.token), 'test-hash');
-    expect(db.findIdentity(LOCAL_ISSUER, personRecord.id)?.role).toBe('EMPLOYEE');
+    ).rejects.toThrow('POSITION_OCCUPIED');
+    const invitation = await db.inviteExistingEmployee(admin, personRecord.id);
+    expect(
+      (await db.tenancy.listMemberships(admin, { search: 'ada' })).items[0].membershipStatus,
+    ).toBe('pending');
+    await db.acceptInvitation(hashToken(invitation.token), 'test-hash');
+    expect((await db.findIdentity(LOCAL_ISSUER, personRecord.id))?.role).toBe('EMPLOYEE');
     const personToken = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(personToken), LOCAL_ISSUER, personRecord.id, Date.now() + 60000);
-    const ended = db.tenancy.updateEmployee(admin, personRecord.id, {
+    await db.createSession(
+      hashToken(personToken),
+      LOCAL_ISSUER,
+      personRecord.id,
+      Date.now() + 60000,
+    );
+    const ended = await db.tenancy.updateEmployee(admin, personRecord.id, {
       ...person('ada@alpha.example'),
       version: assigned.version,
       employmentStatus: 'inactive',
     });
     expect(ended.positionId).toBeNull();
-    expect(db.findIdentity(LOCAL_ISSUER, personRecord.id)).toBeUndefined();
-    expect(db.findSession(hashToken(personToken))).toBeUndefined();
-    expect(() =>
+    expect(await db.findIdentity(LOCAL_ISSUER, personRecord.id)).toBeUndefined();
+    expect(await db.findSession(hashToken(personToken))).toBeUndefined();
+    await expect(
       db.tenancy.assignPosition(admin, personRecord.id, {
         positionId: position.id,
         version: ended.version,
       }),
-    ).toThrow('EMPLOYEE_INACTIVE');
-    const sql = (db as unknown as { db: DatabaseSync }).db;
+    ).rejects.toThrow('EMPLOYEE_INACTIVE');
+    const sql = rawSql(db);
     expect(
-      sql
+      (await sql
         .prepare(
           'SELECT count(*) AS n FROM employee_position_assignments WHERE organization_id=? AND employee_id=? AND ended_at IS NOT NULL',
         )
-        .get(admin.organizationId, personRecord.id)!['n'],
+        .get(admin.organizationId, personRecord.id))!['n'],
     ).toBe(1);
-    expect(db.tenancy.listMemberships(admin, { search: 'ada' }).items[0].membershipStatus).toBe(
-      'suspended',
-    );
+    expect(
+      (await db.tenancy.listMemberships(admin, { search: 'ada' })).items[0].membershipStatus,
+    ).toBe('suspended');
   });
   it('blocks unauthorized HTTP mutation and scopes profile, employees and memberships to the session tenant', async () => {
     const app = createApp(db, config),
       token = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(token), LOCAL_ISSUER, admin.id, Date.now() + 60000);
+    await db.createSession(hashToken(token), LOCAL_ISSUER, admin.id, Date.now() + 60000);
     const cookie = `af_session=${token}`;
     await request(app).get('/api/organization/profile').expect(401);
     await request(app).get('/api/organization/setup-progress').expect(401);
@@ -352,7 +368,7 @@ describe('tenant profile, account separation, membership and positions', () => {
       .expect(200);
     expect(listing.body.total).toBe(1);
     const peerToken = randomBytes(32).toString('base64url');
-    db.createSession(hashToken(peerToken), LOCAL_ISSUER, peer.id, Date.now() + 60000);
+    await db.createSession(hashToken(peerToken), LOCAL_ISSUER, peer.id, Date.now() + 60000);
     const other = await request(app)
       .get('/api/organization/employees')
       .set('Cookie', `af_session=${peerToken}`)

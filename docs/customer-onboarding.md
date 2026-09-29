@@ -4,7 +4,7 @@ Implemented so far: database-managed organizations, first-admin activation, empl
 
 ## Deployment mode
 
-Set `AUTH_MODE=password`, `ADMIN_APP_URL`, `EMPLOYEE_APP_URL`, and `DATABASE_PATH` in the private root `.env`. Google credentials and `IDENTITY_DIRECTORY_PATH` are not used in this mode. Existing Google pilot data is preserved, but Google identities cannot log in while password-only mode is selected. Use a separate database for a fresh customer pilot rather than switching an established customer's identity provider.
+Set `AUTH_MODE=password`, `ADMIN_APP_URL`, `EMPLOYEE_APP_URL` and the PostgreSQL connection URLs (`DATABASE_URL`, `DATABASE_PLATFORM_URL`, and `DATABASE_MIGRATION_URL` for migrations; see [ADR 0018](adr/0018-postgresql-row-level-security.md)) in the private root `.env`. Google credentials and `IDENTITY_DIRECTORY_PATH` are not used in this mode. Existing Google pilot data is preserved, but Google identities cannot log in while password-only mode is selected. Use a separate database for a fresh customer pilot rather than switching an established customer's identity provider.
 
 Use HTTPS in production, with both apps and the API on the same hostname. The API must be reverse-proxied under `/api`. Development permits localhost HTTP. Password sessions retain the existing eight-hour expiry, HttpOnly cookie, origin checks, role checks, and tenant scoping.
 
@@ -44,7 +44,7 @@ Audit events record organization creation, invitations, activation, and disable 
 - Broader agent templates, assignment lifecycle and configuration versioning; [admin-created QA agents and employee assignments](admin-agent-assignments.md) are implemented, alongside the existing employee request/admin approval flow.
 - Purchase webhook integration, idempotent provisioning, subscription and seat limits.
 - Per-organization optional Google SSO and explicit identity linking; the legacy Google pilot still uses one configured domain.
-- Production database/RLS, shared rate limiting, secret vaults, and operational hardening.
+- Shared rate limiting, secret vaults, and operational hardening. (PostgreSQL with row-level security is implemented: [ADR 0018](adr/0018-postgresql-row-level-security.md).)
 
 Do not describe the current implementation as fully automated post-purchase onboarding. Links still require manual secure delivery and identity verification.
 

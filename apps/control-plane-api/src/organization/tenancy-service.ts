@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Resolver } from 'node:dns/promises';
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { domainToASCII } from 'node:url';
 import { z } from 'zod';
 import type { Actor } from '@agents-foundry/contracts';
@@ -14,7 +13,12 @@ import type {
 } from '../../../../packages/contracts/src/tenancy.js';
 import type { Page } from '../../../../packages/contracts/src/organization.js';
 import { LOCAL_ISSUER } from '../onboarding-types.js';
-import { OrganizationDomainError, OrganizationStructureService } from './structure-service.js';
+import { constraintKind, type PgStore, type SqlParam } from '../db/pg-store.js';
+import {
+  OrganizationDomainError,
+  OrganizationStructureService,
+  contains,
+} from './structure-service.js';
 
 const id = z.string().uuid();
 const text = (max: number) => z.string().trim().max(max);
@@ -73,15 +77,16 @@ const domainInput = z
     domainType: z.enum(['custom_domain', 'platform_subdomain']),
   })
   .strict();
-const profileColumns = `id,name,legal_name AS legalName,code,slug,website,industry,country,timezone,locale,status,version,updated_at AS updatedAt`;
-const domainColumns = `id,organization_id AS organizationId,domain,domain_type AS domainType,is_primary AS isPrimary,verification_status AS verificationStatus,verification_token AS verificationToken,verified_at AS verifiedAt,version`;
-const employeeColumns = `e.id,e.organization_id AS organizationId,e.user_id AS userId,e.display_name AS displayName,e.email,e.employee_number AS employeeNumber,e.employment_type AS employmentType,e.employment_status AS employmentStatus,e.version,
- a.position_id AS positionId,p.name AS positionTitle,u.name AS unitName,r.name AS roleName,l.name AS levelName`;
+const profileColumns = `id,name,legal_name AS "legalName",code,slug,website,industry,country,timezone,locale,status,version,updated_at AS "updatedAt"`;
+const domainColumns = `id,organization_id AS "organizationId",domain,domain_type AS "domainType",is_primary AS "isPrimary",verification_status AS "verificationStatus",verification_token AS "verificationToken",verified_at AS "verifiedAt",version`;
+const employeeColumns = `e.id,e.organization_id AS "organizationId",e.user_id AS "userId",e.display_name AS "displayName",e.email,e.employee_number AS "employeeNumber",e.employment_type AS "employmentType",e.employment_status AS "employmentStatus",e.version,
+ a.position_id AS "positionId",p.name AS "positionTitle",u.name AS "unitName",r.name AS "roleName",l.name AS "levelName"`;
 const employeeJoins = `LEFT JOIN employee_position_assignments a ON a.organization_id=e.organization_id AND a.employee_id=e.id AND a.ended_at IS NULL
  LEFT JOIN positions p ON p.id=a.position_id AND p.organization_id=e.organization_id
  LEFT JOIN organizational_units u ON u.id=p.organizational_unit_id AND u.organization_id=e.organization_id
  LEFT JOIN roles r ON r.id=p.role_id AND r.organization_id=e.organization_id
  LEFT JOIN job_levels l ON l.id=p.job_level_id AND l.organization_id=e.organization_id`;
+const membershipColumns = `m.id,m.user_id AS "userId",m.employee_id AS "employeeId",e.display_name AS "displayName",u.email,m.security_role AS "securityRole",m.membership_status AS "membershipStatus",m.version`;
 
 function hostname(value: string): string {
   const normalized = domainToASCII(value.trim().toLowerCase().replace(/\.$/, ''));
@@ -100,151 +105,155 @@ function hostname(value: string): string {
 
 export class TenancyService {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: PgStore,
     private readonly security: OrganizationStructureService,
   ) {}
-  private transaction<T>(actor: Actor, work: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
+  private asAdmin<T>(actor: Actor, work: () => Promise<T>): Promise<T> {
+    return this.db.tenant(actor.organizationId, async () => {
+      await this.security.authorize(actor);
+      return work();
+    });
+  }
+  private async transaction<T>(actor: Actor, work: () => Promise<T>): Promise<T> {
     try {
-      this.security.authorize(actor);
-      const result = work();
-      this.db.exec('COMMIT');
-      return result;
+      return await this.asAdmin(actor, work);
     } catch (error) {
-      this.db.exec('ROLLBACK');
       if (error instanceof OrganizationDomainError) throw error;
-      if (
-        error instanceof Error &&
-        /UNIQUE constraint failed|CHECK constraint failed/.test(error.message)
-      )
+      const kind = constraintKind(error);
+      if (kind === 'unique' || kind === 'check')
         throw new OrganizationDomainError(409, 'TENANT_RECORD_CONFLICT');
       throw error;
     }
   }
-  private audit(
+  private async audit(
     actor: Actor,
     action: string,
     type: string,
     resourceId: string,
     before: unknown,
     after: unknown,
-  ): void {
-    this.db
-      .prepare('INSERT INTO organization_change_events VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(
-        randomUUID(),
-        actor.organizationId,
-        actor.id,
-        action,
-        type,
-        resourceId,
-        before === null ? null : JSON.stringify(before),
-        after === null ? null : JSON.stringify(after),
-        randomUUID(),
-        new Date().toISOString(),
-      );
+  ): Promise<void> {
+    await this.db.run(
+      `INSERT INTO organization_change_events (id,organization_id,actor_id,action,resource_type,resource_id,before_json,after_json,request_id,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      randomUUID(),
+      actor.organizationId,
+      actor.id,
+      action,
+      type,
+      resourceId,
+      before === null ? null : JSON.stringify(before),
+      after === null ? null : JSON.stringify(after),
+      randomUUID(),
+      new Date().toISOString(),
+    );
   }
-  private revokeSessions(employeeId: string): void {
-    this.db
-      .prepare(
-        'DELETE FROM auth_sessions WHERE EXISTS (SELECT 1 FROM employees e WHERE e.id=? AND e.user_id=auth_sessions.user_id AND e.organization_id=auth_sessions.organization_id)',
-      )
-      .run(employeeId);
+  /** Sessions of this employee's account in this organization; RLS limits it to the tenant. */
+  private async revokeSessions(employeeId: string): Promise<void> {
+    await this.db.run(
+      'DELETE FROM auth_sessions WHERE EXISTS (SELECT 1 FROM employees e WHERE e.id=? AND e.user_id=auth_sessions.user_id AND e.organization_id=auth_sessions.organization_id)',
+      employeeId,
+    );
   }
-  profile(actor: Actor): OrganizationProfile {
-    this.security.authorize(actor);
-    return this.db
-      .prepare(`SELECT ${profileColumns} FROM organizations WHERE id=?`)
-      .get(actor.organizationId) as unknown as OrganizationProfile;
+  profile(actor: Actor): Promise<OrganizationProfile> {
+    return this.asAdmin(
+      actor,
+      async () =>
+        (await this.db.get(
+          `SELECT ${profileColumns} FROM organizations WHERE id=?`,
+          actor.organizationId,
+        )) as unknown as OrganizationProfile,
+    );
   }
-  setupProgress(actor: Actor): SetupProgress {
-    this.security.authorize(actor);
-    const organizationId = actor.organizationId;
-    const exists = (sql: string, ...values: SQLInputValue[]): boolean =>
-      Boolean(this.db.prepare(`SELECT 1 FROM ${sql} LIMIT 1`).get(...values));
-    const profile = this.profile(actor);
-    const steps: SetupStep[] = [
-      { id: 'profile', required: true, complete: Boolean(profile.legalName && profile.country) },
-      {
-        id: 'structure',
-        required: true,
-        complete: exists(
-          "organizational_units WHERE organization_id=? AND status='active'",
-          organizationId,
-        ),
-      },
-      {
-        id: 'positions',
-        required: true,
-        complete: exists("positions WHERE organization_id=? AND status='active'", organizationId),
-      },
-      {
-        id: 'people',
-        required: true,
-        complete: exists(
-          "employees WHERE organization_id=? AND id<>? AND employment_status='active'",
-          organizationId,
-          actor.id,
-        ),
-      },
-      {
-        id: 'assignments',
-        required: true,
-        complete: exists(
-          "employee_position_assignments a JOIN employees e ON e.id=a.employee_id AND e.organization_id=a.organization_id WHERE a.organization_id=? AND a.ended_at IS NULL AND e.id<>? AND e.employment_status='active'",
-          organizationId,
-          actor.id,
-        ),
-      },
-      {
-        id: 'employee_access',
-        required: true,
-        complete: exists(
-          "organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.security_role='EMPLOYEE' AND m.membership_status='active' AND e.employment_status='active' AND u.status='active'",
-          organizationId,
-        ),
-      },
-      {
-        id: 'domain',
-        required: false,
-        complete: exists(
-          "organization_domains WHERE organization_id=? AND verification_status='verified'",
-          organizationId,
-        ),
-      },
-    ];
-    return {
-      completedRequired: steps.filter((step) => step.required && step.complete).length,
-      totalRequired: steps.filter((step) => step.required).length,
-      steps,
-    };
+  setupProgress(actor: Actor): Promise<SetupProgress> {
+    return this.asAdmin(actor, async () => {
+      const organizationId = actor.organizationId;
+      const exists = async (sql: string, ...values: SqlParam[]): Promise<boolean> =>
+        Boolean(await this.db.get(`SELECT 1 FROM ${sql} LIMIT 1`, ...values));
+      const profile = await this.profile(actor);
+      const steps: SetupStep[] = [
+        { id: 'profile', required: true, complete: Boolean(profile.legalName && profile.country) },
+        {
+          id: 'structure',
+          required: true,
+          complete: await exists(
+            "organizational_units WHERE organization_id=? AND status='active'",
+            organizationId,
+          ),
+        },
+        {
+          id: 'positions',
+          required: true,
+          complete: await exists(
+            "positions WHERE organization_id=? AND status='active'",
+            organizationId,
+          ),
+        },
+        {
+          id: 'people',
+          required: true,
+          complete: await exists(
+            "employees WHERE organization_id=? AND id<>? AND employment_status='active'",
+            organizationId,
+            actor.id,
+          ),
+        },
+        {
+          id: 'assignments',
+          required: true,
+          complete: await exists(
+            "employee_position_assignments a JOIN employees e ON e.id=a.employee_id AND e.organization_id=a.organization_id WHERE a.organization_id=? AND a.ended_at IS NULL AND e.id<>? AND e.employment_status='active'",
+            organizationId,
+            actor.id,
+          ),
+        },
+        {
+          id: 'employee_access',
+          required: true,
+          complete: await exists(
+            "organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.security_role='EMPLOYEE' AND m.membership_status='active' AND e.employment_status='active' AND u.status='active'",
+            organizationId,
+          ),
+        },
+        {
+          id: 'domain',
+          required: false,
+          complete: await exists(
+            "organization_domains WHERE organization_id=? AND verification_status='verified'",
+            organizationId,
+          ),
+        },
+      ];
+      return {
+        completedRequired: steps.filter((step) => step.required && step.complete).length,
+        totalRequired: steps.filter((step) => step.required).length,
+        steps,
+      };
+    });
   }
-  updateProfile(actor: Actor, raw: unknown): OrganizationProfile {
+  async updateProfile(actor: Actor, raw: unknown): Promise<OrganizationProfile> {
     const input = profileInput.parse(raw);
-    return this.transaction(actor, () => {
-      const before = this.profile(actor);
+    return this.transaction(actor, async () => {
+      const before = await this.profile(actor);
       if (before.version !== input.version)
         throw new OrganizationDomainError(409, 'PROFILE_VERSION_CONFLICT');
-      this.db
-        .prepare(
-          `UPDATE organizations SET name=?,legal_name=?,code=?,slug=?,website=?,industry=?,country=?,timezone=?,locale=?,version=version+1,updated_at=?,updated_by=? WHERE id=?`,
-        )
-        .run(
-          input.name,
-          input.legalName,
-          input.code,
-          input.slug,
-          input.website,
-          input.industry,
-          input.country,
-          input.timezone,
-          input.locale,
-          new Date().toISOString(),
-          actor.id,
-          actor.organizationId,
-        );
-      const after = this.profile(actor);
-      this.audit(
+      await this.db.run(
+        `UPDATE organizations SET name=?,legal_name=?,code=?,slug=?,website=?,industry=?,country=?,timezone=?,locale=?,version=version+1,updated_at=?,updated_by=? WHERE id=?`,
+        input.name,
+        input.legalName,
+        input.code,
+        input.slug,
+        input.website,
+        input.industry,
+        input.country,
+        input.timezone,
+        input.locale,
+        new Date().toISOString(),
+        actor.id,
+        actor.organizationId,
+      );
+      const after = await this.profile(actor);
+      await this.audit(
         actor,
         'ORGANIZATION_PROFILE_UPDATED',
         'organization',
@@ -255,34 +264,40 @@ export class TenancyService {
       return after;
     });
   }
-  listDomains(actor: Actor): TenantDomain[] {
-    this.security.authorize(actor);
-    return (
-      this.db
-        .prepare(
+  listDomains(actor: Actor): Promise<TenantDomain[]> {
+    return this.asAdmin(actor, async () =>
+      (
+        (await this.db.all(
           `SELECT ${domainColumns} FROM organization_domains WHERE organization_id=? ORDER BY is_primary DESC,domain`,
-        )
-        .all(actor.organizationId) as unknown as TenantDomain[]
-    ).map((row) => ({
-      ...row,
-      isPrimary: Boolean(row.isPrimary),
-      verificationToken: row.verificationStatus === 'pending' ? row.verificationToken : null,
-    }));
+          actor.organizationId,
+        )) as unknown as TenantDomain[]
+      ).map((row) => ({
+        ...row,
+        isPrimary: Boolean(row.isPrimary),
+        verificationToken: row.verificationStatus === 'pending' ? row.verificationToken : null,
+      })),
+    );
   }
-  registerDomain(actor: Actor, raw: unknown): TenantDomain {
+  async registerDomain(actor: Actor, raw: unknown): Promise<TenantDomain> {
     const input = domainInput.parse(raw),
       domain = hostname(input.domain);
-    return this.transaction(actor, () => {
+    return this.transaction(actor, async () => {
       const domainId = randomUUID(),
         token = `af-verify=${randomBytes(24).toString('base64url')}`,
         time = new Date().toISOString();
-      this.db
-        .prepare(
-          `INSERT INTO organization_domains(id,organization_id,domain,domain_type,verification_token,created_at,updated_at,created_by) VALUES (?,?,?,?,?,?,?,?)`,
-        )
-        .run(domainId, actor.organizationId, domain, input.domainType, token, time, time, actor.id);
-      const result = this.listDomains(actor).find((item) => item.id === domainId)!;
-      this.audit(actor, 'DOMAIN_REGISTERED', 'organization_domain', domainId, null, {
+      await this.db.run(
+        `INSERT INTO organization_domains(id,organization_id,domain,domain_type,verification_token,created_at,updated_at,created_by) VALUES (?,?,?,?,?,?,?,?)`,
+        domainId,
+        actor.organizationId,
+        domain,
+        input.domainType,
+        token,
+        time,
+        time,
+        actor.id,
+      );
+      const result = (await this.listDomains(actor)).find((item) => item.id === domainId)!;
+      await this.audit(actor, 'DOMAIN_REGISTERED', 'organization_domain', domainId, null, {
         domain,
         domainType: input.domainType,
       });
@@ -296,15 +311,17 @@ export class TenancyService {
       new Resolver({ timeout: 3000, tries: 1 }).resolveTxt(name),
   ): Promise<TenantDomain> {
     id.parse(domainId);
-    this.security.authorize(actor);
-    const current = this.db
-      .prepare(
+    const current = await this.asAdmin(actor, () =>
+      this.db.get(
         'SELECT domain,verification_token,verification_status,version FROM organization_domains WHERE organization_id=? AND id=?',
-      )
-      .get(actor.organizationId, domainId);
+        actor.organizationId,
+        domainId,
+      ),
+    );
     if (!current) throw new OrganizationDomainError(404, 'DOMAIN_NOT_FOUND');
     if (current['verification_status'] !== 'pending')
       throw new OrganizationDomainError(409, 'DOMAIN_STATE_CONFLICT');
+    // DNS is looked up outside any transaction.
     let records: string[][];
     try {
       records = await lookup(`_agents-foundry-verification.${current['domain']}`);
@@ -313,12 +330,12 @@ export class TenancyService {
     }
     if (!records.some((parts) => parts.join('') === current['verification_token']))
       throw new OrganizationDomainError(409, 'DOMAIN_PROOF_NOT_FOUND');
-    return this.transaction(actor, () => {
-      const fresh = this.db
-        .prepare(
-          'SELECT version,verification_token,verification_status FROM organization_domains WHERE organization_id=? AND id=?',
-        )
-        .get(actor.organizationId, domainId);
+    return this.transaction(actor, async () => {
+      const fresh = await this.db.get(
+        'SELECT version,verification_token,verification_status FROM organization_domains WHERE organization_id=? AND id=?',
+        actor.organizationId,
+        domainId,
+      );
       if (
         !fresh ||
         fresh['version'] !== current['version'] ||
@@ -327,12 +344,14 @@ export class TenancyService {
       )
         throw new OrganizationDomainError(409, 'DOMAIN_STATE_CONFLICT');
       const time = new Date().toISOString();
-      this.db
-        .prepare(
-          "UPDATE organization_domains SET verification_status='verified',verification_token='',verified_at=?,updated_at=?,version=version+1 WHERE organization_id=? AND id=?",
-        )
-        .run(time, time, actor.organizationId, domainId);
-      this.audit(
+      await this.db.run(
+        "UPDATE organization_domains SET verification_status='verified',verification_token='',verified_at=?,updated_at=?,version=version+1 WHERE organization_id=? AND id=?",
+        time,
+        time,
+        actor.organizationId,
+        domainId,
+      );
+      await this.audit(
         actor,
         'DOMAIN_VERIFIED',
         'organization_domain',
@@ -340,117 +359,109 @@ export class TenancyService {
         { domain: current['domain'] },
         { verifiedAt: time },
       );
-      return this.listDomains(actor).find((item) => item.id === domainId)!;
+      return (await this.listDomains(actor)).find((item) => item.id === domainId)!;
     });
   }
-  setPrimaryDomain(actor: Actor, domainId: string): TenantDomain {
+  async setPrimaryDomain(actor: Actor, domainId: string): Promise<TenantDomain> {
     id.parse(domainId);
-    return this.transaction(actor, () => {
-      const current = this.db
-        .prepare(
-          'SELECT domain,verification_status FROM organization_domains WHERE organization_id=? AND id=?',
-        )
-        .get(actor.organizationId, domainId);
+    return this.transaction(actor, async () => {
+      const current = await this.db.get(
+        'SELECT domain,verification_status FROM organization_domains WHERE organization_id=? AND id=?',
+        actor.organizationId,
+        domainId,
+      );
       if (!current) throw new OrganizationDomainError(404, 'DOMAIN_NOT_FOUND');
       if (current['verification_status'] !== 'verified')
         throw new OrganizationDomainError(409, 'DOMAIN_UNVERIFIED');
-      this.db
-        .prepare(
-          'UPDATE organization_domains SET is_primary=0,version=version+1 WHERE organization_id=? AND is_primary=1',
-        )
-        .run(actor.organizationId);
-      this.db
-        .prepare(
-          'UPDATE organization_domains SET is_primary=1,version=version+1,updated_at=? WHERE organization_id=? AND id=?',
-        )
-        .run(new Date().toISOString(), actor.organizationId, domainId);
-      this.audit(actor, 'DOMAIN_PRIMARY_CHANGED', 'organization_domain', domainId, null, {
+      await this.db.run(
+        'UPDATE organization_domains SET is_primary=0,version=version+1 WHERE organization_id=? AND is_primary=1',
+        actor.organizationId,
+      );
+      await this.db.run(
+        'UPDATE organization_domains SET is_primary=1,version=version+1,updated_at=? WHERE organization_id=? AND id=?',
+        new Date().toISOString(),
+        actor.organizationId,
+        domainId,
+      );
+      await this.audit(actor, 'DOMAIN_PRIMARY_CHANGED', 'organization_domain', domainId, null, {
         domain: current['domain'],
       });
-      return this.listDomains(actor).find((item) => item.id === domainId)!;
+      return (await this.listDomains(actor)).find((item) => item.id === domainId)!;
     });
   }
-  resolveVerifiedDomain(host: string): string | null {
+  /** Which organization a verified host belongs to: cross-tenant by nature (platform scope). */
+  async resolveVerifiedDomain(host: string): Promise<string | null> {
     let domain: string;
     try {
       domain = hostname(host);
     } catch {
       return null;
     }
-    const row = this.db
-      .prepare(
-        "SELECT d.organization_id FROM organization_domains d JOIN organizations o ON o.id=d.organization_id AND o.status='active' WHERE d.domain=? COLLATE NOCASE AND d.verification_status='verified'",
-      )
-      .get(domain);
+    const row = await this.db.platform(() =>
+      this.db.get(
+        "SELECT d.organization_id FROM organization_domains d JOIN organizations o ON o.id=d.organization_id AND o.status='active' WHERE lower(d.domain)=lower(?) AND d.verification_status='verified'",
+        domain,
+      ),
+    );
     return row ? String(row['organization_id']) : null;
   }
-  listEmployees(actor: Actor, raw: unknown): Page<EmploymentRecord> {
-    this.security.authorize(actor);
-    const input = pageInput.parse(raw),
-      where = [
-        'e.organization_id=?',
-        "(instr(lower(e.display_name),lower(?))>0 OR instr(lower(e.email),lower(?))>0 OR instr(lower(coalesce(e.employee_number,'')),lower(?))>0)",
-      ];
-    const values: SQLInputValue[] = [
-      actor.organizationId,
-      input.search,
-      input.search,
-      input.search,
-    ];
-    if (input.status !== 'all') {
-      where.push('e.employment_status=?');
-      values.push(input.status);
-    }
-    const clause = where.join(' AND '),
-      total = Number(
-        this.db.prepare(`SELECT count(*) AS n FROM employees e WHERE ${clause}`).get(...values)![
-          'n'
-        ],
-      );
-    const items = this.db
-      .prepare(
+  listEmployees(actor: Actor, raw: unknown): Promise<Page<EmploymentRecord>> {
+    return this.asAdmin(actor, async () => {
+      const input = pageInput.parse(raw),
+        where = [
+          'e.organization_id=?',
+          `(${contains('e.display_name')} OR ${contains('e.email')} OR ${contains("coalesce(e.employee_number,'')")})`,
+        ];
+      const values: SqlParam[] = [actor.organizationId, input.search, input.search, input.search];
+      if (input.status !== 'all') {
+        where.push('e.employment_status=?');
+        values.push(input.status);
+      }
+      const clause = where.join(' AND '),
+        total = Number(
+          (await this.db.get(`SELECT count(*) AS n FROM employees e WHERE ${clause}`, ...values))![
+            'n'
+          ],
+        );
+      const items = (await this.db.all(
         `SELECT ${employeeColumns} FROM employees e ${employeeJoins} WHERE ${clause} ORDER BY e.display_name,e.id LIMIT ? OFFSET ?`,
-      )
-      .all(
         ...values,
         input.pageSize,
         (input.page - 1) * input.pageSize,
-      ) as unknown as EmploymentRecord[];
-    return { items, total, page: input.page, pageSize: input.pageSize };
+      )) as unknown as EmploymentRecord[];
+      return { items, total, page: input.page, pageSize: input.pageSize };
+    });
   }
-  private employee(actor: Actor, employeeId: string): EmploymentRecord {
-    const row = this.db
-      .prepare(
-        `SELECT ${employeeColumns} FROM employees e ${employeeJoins} WHERE e.organization_id=? AND e.id=?`,
-      )
-      .get(actor.organizationId, employeeId);
+  private async employee(actor: Actor, employeeId: string): Promise<EmploymentRecord> {
+    const row = await this.db.get(
+      `SELECT ${employeeColumns} FROM employees e ${employeeJoins} WHERE e.organization_id=? AND e.id=?`,
+      actor.organizationId,
+      employeeId,
+    );
     if (!row) throw new OrganizationDomainError(404, 'EMPLOYEE_NOT_FOUND');
     return row as unknown as EmploymentRecord;
   }
-  createEmployee(actor: Actor, raw: unknown): EmploymentRecord {
+  async createEmployee(actor: Actor, raw: unknown): Promise<EmploymentRecord> {
     const input = employeeInput.parse(raw);
-    return this.transaction(actor, () => {
+    return this.transaction(actor, async () => {
       const employeeId = randomUUID();
-      this.db
-        .prepare(
-          'INSERT INTO employees(id,organization_id,display_name,email,role,team,employee_number,employment_type) VALUES (?,?,?,?,?,?,?,?)',
-        )
-        .run(
-          employeeId,
-          actor.organizationId,
-          input.displayName,
-          input.email,
-          'EMPLOYEE',
-          'Unassigned',
-          input.employeeNumber,
-          input.employmentType,
-        );
-      const result = this.employee(actor, employeeId);
-      this.audit(actor, 'EMPLOYEE_CREATED', 'employee', employeeId, null, result);
+      await this.db.run(
+        'INSERT INTO employees(id,organization_id,display_name,email,role,team,employee_number,employment_type) VALUES (?,?,?,?,?,?,?,?)',
+        employeeId,
+        actor.organizationId,
+        input.displayName,
+        input.email,
+        'EMPLOYEE',
+        'Unassigned',
+        input.employeeNumber,
+        input.employmentType,
+      );
+      const result = await this.employee(actor, employeeId);
+      await this.audit(actor, 'EMPLOYEE_CREATED', 'employee', employeeId, null, result);
       return result;
     });
   }
-  updateEmployee(actor: Actor, employeeId: string, raw: unknown): EmploymentRecord {
+  async updateEmployee(actor: Actor, employeeId: string, raw: unknown): Promise<EmploymentRecord> {
     id.parse(employeeId);
     const input = employeeInput
       .extend({
@@ -458,128 +469,140 @@ export class TenancyService {
         employmentStatus: z.enum(['active', 'inactive']),
       })
       .parse(raw);
-    return this.transaction(actor, () => {
-      const before = this.employee(actor, employeeId);
+    return this.transaction(actor, async () => {
+      const before = await this.employee(actor, employeeId);
       if (before.version !== input.version)
         throw new OrganizationDomainError(409, 'EMPLOYEE_VERSION_CONFLICT');
       if (employeeId === actor.id && input.employmentStatus === 'inactive')
         throw new OrganizationDomainError(403, 'SELF_DEACTIVATION_FORBIDDEN');
-      this.db
-        .prepare(
-          'UPDATE employees SET display_name=?,email=?,employee_number=?,employment_type=?,employment_status=?,version=version+1 WHERE organization_id=? AND id=?',
-        )
-        .run(
-          input.displayName,
-          input.email,
-          input.employeeNumber,
-          input.employmentType,
-          input.employmentStatus,
+      await this.db.run(
+        'UPDATE employees SET display_name=?,email=?,employee_number=?,employment_type=?,employment_status=?,version=version+1 WHERE organization_id=? AND id=?',
+        input.displayName,
+        input.email,
+        input.employeeNumber,
+        input.employmentType,
+        input.employmentStatus,
+        actor.organizationId,
+        employeeId,
+      );
+      if (input.employmentStatus === 'inactive') {
+        await this.revokeSessions(employeeId);
+        await this.db.run(
+          'UPDATE employee_position_assignments SET ended_at=? WHERE organization_id=? AND employee_id=? AND ended_at IS NULL',
+          new Date().toISOString(),
           actor.organizationId,
           employeeId,
         );
-      if (input.employmentStatus === 'inactive') {
-        this.revokeSessions(employeeId);
-        this.db
-          .prepare(
-            'UPDATE employee_position_assignments SET ended_at=? WHERE organization_id=? AND employee_id=? AND ended_at IS NULL',
-          )
-          .run(new Date().toISOString(), actor.organizationId, employeeId);
-        this.db
-          .prepare(
-            "UPDATE organization_memberships SET membership_status='suspended',version=version+1,updated_at=? WHERE organization_id=? AND employee_id=? AND membership_status='active'",
-          )
-          .run(new Date().toISOString(), actor.organizationId, employeeId);
+        await this.db.run(
+          "UPDATE organization_memberships SET membership_status='suspended',version=version+1,updated_at=? WHERE organization_id=? AND employee_id=? AND membership_status='active'",
+          new Date().toISOString(),
+          actor.organizationId,
+          employeeId,
+        );
       }
-      const result = this.employee(actor, employeeId);
-      this.audit(actor, 'EMPLOYEE_UPDATED', 'employee', employeeId, before, result);
+      const result = await this.employee(actor, employeeId);
+      await this.audit(actor, 'EMPLOYEE_UPDATED', 'employee', employeeId, before, result);
       return result;
     });
   }
-  assignPosition(actor: Actor, employeeId: string, raw: unknown): EmploymentRecord {
+  async assignPosition(actor: Actor, employeeId: string, raw: unknown): Promise<EmploymentRecord> {
     id.parse(employeeId);
     const input = z
       .object({ positionId: id.nullable(), version: z.number().int().positive() })
       .strict()
       .parse(raw);
-    return this.transaction(actor, () => {
-      const before = this.employee(actor, employeeId);
+    return this.transaction(actor, async () => {
+      const before = await this.employee(actor, employeeId);
       if (before.version !== input.version)
         throw new OrganizationDomainError(409, 'EMPLOYEE_VERSION_CONFLICT');
       if (before.employmentStatus !== 'active')
         throw new OrganizationDomainError(409, 'EMPLOYEE_INACTIVE');
       if (input.positionId) {
-        const position = this.db
-          .prepare("SELECT id FROM positions WHERE organization_id=? AND id=? AND status='active'")
-          .get(actor.organizationId, input.positionId);
+        const position = await this.db.get(
+          "SELECT id FROM positions WHERE organization_id=? AND id=? AND status='active'",
+          actor.organizationId,
+          input.positionId,
+        );
         if (!position) throw new OrganizationDomainError(404, 'POSITION_NOT_FOUND');
         if (before.positionId === input.positionId) return before;
-        const occupied = this.db
-          .prepare(
-            'SELECT employee_id FROM employee_position_assignments WHERE organization_id=? AND position_id=? AND ended_at IS NULL',
-          )
-          .get(actor.organizationId, input.positionId);
+        const occupied = await this.db.get(
+          'SELECT employee_id FROM employee_position_assignments WHERE organization_id=? AND position_id=? AND ended_at IS NULL',
+          actor.organizationId,
+          input.positionId,
+        );
         if (occupied) throw new OrganizationDomainError(409, 'POSITION_OCCUPIED');
       }
       const time = new Date().toISOString();
-      this.db
-        .prepare(
-          'UPDATE employee_position_assignments SET ended_at=? WHERE organization_id=? AND employee_id=? AND ended_at IS NULL',
-        )
-        .run(time, actor.organizationId, employeeId);
+      await this.db.run(
+        'UPDATE employee_position_assignments SET ended_at=? WHERE organization_id=? AND employee_id=? AND ended_at IS NULL',
+        time,
+        actor.organizationId,
+        employeeId,
+      );
       if (input.positionId)
-        this.db
-          .prepare('INSERT INTO employee_position_assignments VALUES (?,?,?,?,?,NULL,?)')
-          .run(randomUUID(), actor.organizationId, employeeId, input.positionId, time, actor.id);
-      this.db
-        .prepare('UPDATE employees SET version=version+1 WHERE organization_id=? AND id=?')
-        .run(actor.organizationId, employeeId);
-      const after = this.employee(actor, employeeId);
-      this.audit(actor, 'EMPLOYEE_POSITION_CHANGED', 'employee', employeeId, before, after);
+        await this.db.run(
+          'INSERT INTO employee_position_assignments (id,organization_id,employee_id,position_id,started_at,ended_at,created_by) VALUES (?,?,?,?,?,NULL,?)',
+          randomUUID(),
+          actor.organizationId,
+          employeeId,
+          input.positionId,
+          time,
+          actor.id,
+        );
+      await this.db.run(
+        'UPDATE employees SET version=version+1 WHERE organization_id=? AND id=?',
+        actor.organizationId,
+        employeeId,
+      );
+      const after = await this.employee(actor, employeeId);
+      await this.audit(actor, 'EMPLOYEE_POSITION_CHANGED', 'employee', employeeId, before, after);
       return after;
     });
   }
-  listMemberships(actor: Actor, raw: unknown): Page<OrganizationMembership> {
-    this.security.authorize(actor);
-    const input = pageInput.pick({ page: true, pageSize: true, search: true }).parse(raw),
-      where =
-        'm.organization_id=? AND (instr(lower(e.display_name),lower(?))>0 OR instr(lower(u.email),lower(?))>0)';
-    const total = Number(
-      this.db
-        .prepare(
+  listMemberships(actor: Actor, raw: unknown): Promise<Page<OrganizationMembership>> {
+    return this.asAdmin(actor, async () => {
+      const input = pageInput.pick({ page: true, pageSize: true, search: true }).parse(raw),
+        where = `m.organization_id=? AND (${contains('e.display_name')} OR ${contains('u.email')})`;
+      const total = Number(
+        (await this.db.get(
           `SELECT count(*) AS n FROM organization_memberships m JOIN employees e ON e.id=m.employee_id JOIN users u ON u.id=m.user_id WHERE ${where}`,
-        )
-        .get(actor.organizationId, input.search, input.search)!['n'],
-    );
-    const items = this.db
-      .prepare(
-        `SELECT m.id,m.user_id AS userId,m.employee_id AS employeeId,e.display_name AS displayName,u.email,m.security_role AS securityRole,m.membership_status AS membershipStatus,m.version FROM organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id JOIN users u ON u.id=m.user_id WHERE ${where} ORDER BY e.display_name,m.id LIMIT ? OFFSET ?`,
-      )
-      .all(
+          actor.organizationId,
+          input.search,
+          input.search,
+        ))!['n'],
+      );
+      const items = (await this.db.all(
+        `SELECT ${membershipColumns} FROM organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id JOIN users u ON u.id=m.user_id WHERE ${where} ORDER BY e.display_name,m.id LIMIT ? OFFSET ?`,
         actor.organizationId,
         input.search,
         input.search,
         input.pageSize,
         (input.page - 1) * input.pageSize,
-      ) as unknown as OrganizationMembership[];
-    return { items, total, page: input.page, pageSize: input.pageSize };
+      )) as unknown as OrganizationMembership[];
+      return { items, total, page: input.page, pageSize: input.pageSize };
+    });
   }
-  setMembershipStatus(actor: Actor, membershipId: string, raw: unknown): OrganizationMembership {
+  async setMembershipStatus(
+    actor: Actor,
+    membershipId: string,
+    raw: unknown,
+  ): Promise<OrganizationMembership> {
     id.parse(membershipId);
     const input = z
       .object({ status: z.enum(['active', 'suspended']), version: z.number().int().positive() })
       .strict()
       .parse(raw);
-    return this.transaction(actor, () => {
-      const row = this.db
-        .prepare(
-          `SELECT m.id,m.employee_id,m.membership_status,m.version,e.employment_status,u.status AS user_status,
+    return this.transaction(actor, async () => {
+      const row = await this.db.get(
+        `SELECT m.id,m.employee_id,m.membership_status,m.version,e.employment_status,u.status AS user_status,
         EXISTS(SELECT 1 FROM account_password_credentials c WHERE c.user_id=m.user_id) AS has_password,
         EXISTS(SELECT 1 FROM identities i WHERE i.employee_id=e.id AND i.user_id=m.user_id AND i.enabled=1) AS enabled
         FROM organization_memberships m JOIN employees e ON e.id=m.employee_id AND e.organization_id=m.organization_id
         JOIN users u ON u.id=m.user_id
         WHERE m.organization_id=? AND m.id=?`,
-        )
-        .get(actor.organizationId, membershipId);
+        actor.organizationId,
+        membershipId,
+      );
       if (!row) throw new OrganizationDomainError(404, 'MEMBERSHIP_NOT_FOUND');
       if (row['version'] !== input.version)
         throw new OrganizationDomainError(409, 'MEMBERSHIP_VERSION_CONFLICT');
@@ -589,30 +612,34 @@ export class TenancyService {
         input.status === 'active' &&
         (row['employment_status'] !== 'active' ||
           row['user_status'] !== 'active' ||
-          row['has_password'] !== 1)
+          row['has_password'] !== true)
       )
         throw new OrganizationDomainError(409, 'MEMBERSHIP_NOT_READY');
-      if (input.status === 'active' && row['enabled'] !== 1)
-        this.db
-          .prepare('UPDATE identities SET enabled=1 WHERE issuer=? AND employee_id=?')
-          .run(LOCAL_ISSUER, row['employee_id']);
-      if (input.status === 'suspended') this.revokeSessions(String(row['employee_id']));
-      this.db
-        .prepare(
-          'UPDATE organization_memberships SET membership_status=?,version=version+1,updated_at=? WHERE organization_id=? AND id=?',
-        )
-        .run(input.status, new Date().toISOString(), actor.organizationId, membershipId);
-      const after = this.db
-        .prepare(
-          `SELECT m.id,m.user_id AS userId,m.employee_id AS employeeId,e.display_name AS displayName,u.email,m.security_role AS securityRole,m.membership_status AS membershipStatus,m.version FROM organization_memberships m JOIN employees e ON e.id=m.employee_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.id=?`,
-        )
-        .get(actor.organizationId, membershipId) as unknown as OrganizationMembership;
-      this.audit(
+      if (input.status === 'active' && row['enabled'] !== true)
+        await this.db.run(
+          'UPDATE identities SET enabled=1 WHERE issuer=? AND employee_id=?',
+          LOCAL_ISSUER,
+          String(row['employee_id']),
+        );
+      if (input.status === 'suspended') await this.revokeSessions(String(row['employee_id']));
+      await this.db.run(
+        'UPDATE organization_memberships SET membership_status=?,version=version+1,updated_at=? WHERE organization_id=? AND id=?',
+        input.status,
+        new Date().toISOString(),
+        actor.organizationId,
+        membershipId,
+      );
+      const after = (await this.db.get(
+        `SELECT ${membershipColumns} FROM organization_memberships m JOIN employees e ON e.id=m.employee_id JOIN users u ON u.id=m.user_id WHERE m.organization_id=? AND m.id=?`,
+        actor.organizationId,
+        membershipId,
+      )) as unknown as OrganizationMembership;
+      await this.audit(
         actor,
         input.status === 'active' ? 'MEMBERSHIP_REACTIVATED' : 'MEMBERSHIP_SUSPENDED',
         'organization_membership',
         membershipId,
-        row,
+        { ...row, has_password: row['has_password'] ? 1 : 0, enabled: row['enabled'] ? 1 : 0 },
         after,
       );
       return after;

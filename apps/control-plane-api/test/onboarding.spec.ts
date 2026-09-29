@@ -5,6 +5,7 @@ import { loadAuthConfig, hashToken, type PasswordConfig } from '../src/auth.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { activationUrl } from '../src/organization-routes.js';
 import { hashPassword } from '../src/passwords.js';
+import { testDatabase } from './support/database.js';
 
 const config: PasswordConfig = {
   mode: 'password',
@@ -15,12 +16,12 @@ const config: PasswordConfig = {
 const password = 'a unique long onboarding passphrase';
 describe('customer onboarding and organization membership', () => {
   let db: ControlPlaneDatabase;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false);
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false });
   });
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
-    db.close();
+    await db.close();
   });
   const customer = (slug: string) =>
     db.createCustomer(
@@ -69,7 +70,7 @@ describe('customer onboarding and organization membership', () => {
   });
 
   it('activates the assigned first admin once without automatic login or public signup', async () => {
-    const invitation = customer('first');
+    const invitation = await customer('first');
     const app = createApp(db, config);
     await login(app, 'admin@first.example').expect(401);
     const activated = await activate(app, invitation.token).expect(204);
@@ -87,8 +88,8 @@ describe('customer onboarding and organization membership', () => {
   });
 
   it('isolates two organizations, rejects role injection, and immediately revokes disabled users', async () => {
-    const a = customer('alpha'),
-      b = customer('beta');
+    const a = await customer('alpha'),
+      b = await customer('beta');
     const app = createApp(db, config);
     await activate(app, a.token).expect(204);
     await activate(app, b.token).expect(204);
@@ -139,13 +140,13 @@ describe('customer onboarding and organization membership', () => {
       .expect(204);
     await request(app).get('/api/auth/session').set('Cookie', employeeCookie).expect(401);
     await login(app, input.email).expect(401);
-    const audit = JSON.stringify(db.listLifecycleEvents(a.organizationId));
+    const audit = JSON.stringify(await db.listLifecycleEvents(a.organizationId));
     expect(audit).toContain('employee.disabled');
     expect(audit).not.toContain(token);
   }, 15000);
 
   it('rejects missing origins, short passwords, expired links and revoked pending invitations', async () => {
-    const a = customer('expiry');
+    const a = await customer('expiry');
     const app = createApp(db, config);
     await request(app).post('/api/auth/activate').send({ token: a.token, password }).expect(403);
     await request(app)
@@ -156,28 +157,28 @@ describe('customer onboarding and organization membership', () => {
     const hash = await hashPassword(password);
     const currentTime = Date.now();
     vi.spyOn(Date, 'now').mockReturnValue(currentTime + 49 * 3600000);
-    expect(db.acceptInvitation(hashToken(a.token), hash)).toBe(false);
+    expect(await db.acceptInvitation(hashToken(a.token), hash)).toBe(false);
     vi.restoreAllMocks();
-    expect(db.acceptInvitation(hashToken(a.token), hash)).toBe(true);
+    expect(await db.acceptInvitation(hashToken(a.token), hash)).toBe(true);
     const actor = { id: a.employeeId, organizationId: a.organizationId, role: 'ADMIN' as const };
-    const pending = db.inviteEmployee(actor, {
+    const pending = await db.inviteEmployee(actor, {
       displayName: 'Pending',
       email: 'pending@expiry.example',
       team: 'QA',
     });
-    db.disableMember(actor, pending.employeeId);
-    expect(db.acceptInvitation(hashToken(pending.token), hash)).toBe(false);
+    await db.disableMember(actor, pending.employeeId);
+    expect(await db.acceptInvitation(hashToken(pending.token), hash)).toBe(false);
   });
 
   it('rolls back duplicate customer creation and prevents parallel activation replay', async () => {
-    const a = customer('unique');
-    expect(() =>
+    const a = await customer('unique');
+    await expect(
       db.createCustomer(
         { name: 'Other', slug: 'other' },
         { email: 'ADMIN@UNIQUE.EXAMPLE', displayName: 'Collision', team: 'Admin' },
       ),
-    ).toThrow('ACCOUNT_NOT_ACTIVE');
-    expect(() => customer('other')).not.toThrow();
+    ).rejects.toThrow('ACCOUNT_NOT_ACTIVE');
+    await expect(customer('other')).resolves.not.toThrow();
     const app = createApp(db, config);
     const results = await Promise.all([activate(app, a.token), activate(app, a.token)]);
     expect(results.map((result) => result.status).sort()).toEqual([204, 400]);

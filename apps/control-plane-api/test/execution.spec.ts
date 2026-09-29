@@ -5,9 +5,12 @@ import type { Actor, AgentEvent, AnySignedAgentManifest } from '@agents-foundry/
 import { demoRequest as request, createDemoApp as createApp } from './helpers.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { migrateOrganization } from '../src/migrations/index.js';
+import { legacyBaseSql } from '../src/migrations/000-legacy-base.js';
 import { verifyManifest } from '../../employee-desktop/src/app/verify-manifest.js';
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { parseRuntimeCommand } from '../../../packages/contracts/src/runtime/v1/schemas.js';
+import { testDatabase } from './support/database.js';
+import { rawSql, type RawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employee: Actor = { id: 'employee_qa_demo', role: 'EMPLOYEE', organizationId: org };
@@ -33,13 +36,13 @@ const provisioning = {
   },
 };
 
-function raw(db: ControlPlaneDatabase): DatabaseSync {
-  return (db as unknown as { db: DatabaseSync }).db;
+function raw(db: ControlPlaneDatabase): RawSql {
+  return rawSql(db);
 }
 
-function errorOf(work: () => unknown): string | undefined {
+async function errorOf(work: () => unknown): Promise<string | undefined> {
   try {
-    work();
+    await work();
     return undefined;
   } catch (error) {
     return (error as Error).message;
@@ -73,8 +76,8 @@ async function startQaRun(
 
 describe('generic execution records for the legacy QA flow', () => {
   let db: ControlPlaneDatabase;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:');
+  beforeEach(async () => {
+    db = await testDatabase();
   });
   afterEach(() => db.close());
 
@@ -145,15 +148,15 @@ describe('generic execution records for the legacy QA flow', () => {
       .set(adminHeaders)
       .send({ decision: 'APPROVED' })
       .expect(200);
-    const detail = db.execution.getRun(employee, body.agentRun.id);
+    const detail = await db.execution.getRun(employee, body.agentRun.id);
     expect(detail.run).toMatchObject({ status: 'QUEUED', statusReason: 'APPROVAL_GRANTED' });
     expect(detail.steps[1]?.status).toBe('PENDING');
     expect(detail.approvals[0]?.status).toBe('APPROVED');
-    const types = db.execution
-      .listEvents(employee, body.agentRun.id, 0, 100)
-      .items.map((e) => e.type);
+    const types = (await db.execution.listEvents(employee, body.agentRun.id, 0, 100)).items.map(
+      (e) => e.type,
+    );
     expect(types.at(-1)).toBe('approval.approved');
-    const legacy = raw(db).prepare('SELECT status FROM qa_runs WHERE id=?').get(body.run.id);
+    const legacy = await raw(db).prepare('SELECT status FROM qa_runs WHERE id=?').get(body.run.id);
     expect(legacy?.['status']).toBe('READY');
     // Repeated decisions stay rejected and do not append history.
     await request(app)
@@ -161,7 +164,9 @@ describe('generic execution records for the legacy QA flow', () => {
       .set(adminHeaders)
       .send({ decision: 'REJECTED' })
       .expect(409);
-    expect(db.execution.listEvents(employee, body.agentRun.id, 0, 100).items).toHaveLength(6);
+    expect((await db.execution.listEvents(employee, body.agentRun.id, 0, 100)).items).toHaveLength(
+      6,
+    );
   });
 
   it('cancels the run on rejection and reuses the idle thread for the next request', async () => {
@@ -172,14 +177,13 @@ describe('generic execution records for the legacy QA flow', () => {
       .set(adminHeaders)
       .send({ decision: 'REJECTED' })
       .expect(200);
-    const rejected = db.execution.getRun(employee, first.body.agentRun.id);
+    const rejected = await db.execution.getRun(employee, first.body.agentRun.id);
     expect(rejected.run).toMatchObject({ status: 'CANCELLED', statusReason: 'APPROVAL_REJECTED' });
     expect(rejected.run.completedAt).not.toBeNull();
     expect(rejected.steps[1]?.status).toBe('CANCELLED');
     expect(
-      db.execution
-        .listEvents(employee, first.body.agentRun.id, 0, 100)
-        .items.slice(-2)
+      (await db.execution.listEvents(employee, first.body.agentRun.id, 0, 100)).items
+        .slice(-2)
         .map((e) => e.type),
     ).toEqual(['approval.rejected', 'run.cancelled']);
     const second = await startQaRun(app, undefined, first.conversationId);
@@ -200,16 +204,18 @@ describe('generic execution records for the legacy QA flow', () => {
     const foreign: Actor = { id: employee.id, role: 'EMPLOYEE', organizationId: 'other-org' };
     const colleague: Actor = { id: 'someone-else', role: 'EMPLOYEE', organizationId: org };
     for (const actor of [foreign, colleague, { ...admin, organizationId: 'other-org' }]) {
-      expect(errorOf(() => db.execution.getRun(actor, body.agentRun.id))).toBe('RUN_NOT_FOUND');
-      expect(errorOf(() => db.execution.listEvents(actor, body.agentRun.id, 0, 10))).toBe(
+      expect(await errorOf(() => db.execution.getRun(actor, body.agentRun.id))).toBe(
         'RUN_NOT_FOUND',
       );
-      expect(errorOf(() => db.execution.getThread(actor, body.agentRun.threadId))).toBe(
+      expect(await errorOf(() => db.execution.listEvents(actor, body.agentRun.id, 0, 10))).toBe(
+        'RUN_NOT_FOUND',
+      );
+      expect(await errorOf(() => db.execution.getThread(actor, body.agentRun.threadId))).toBe(
         'THREAD_NOT_FOUND',
       );
     }
     // Administrators can review the run for governance but not read its event history or thread.
-    expect(db.execution.getRun(admin, body.agentRun.id).run.id).toBe(body.agentRun.id);
+    expect((await db.execution.getRun(admin, body.agentRun.id)).run.id).toBe(body.agentRun.id);
     await request(app)
       .get(`/api/execution/v1/runs/${body.agentRun.id}`)
       .set(adminHeaders)
@@ -235,11 +241,11 @@ describe('generic execution records for the legacy QA flow', () => {
     const app = createApp(db);
     const { body } = await startQaRun(app);
     const sql = raw(db);
-    sql
+    await sql
       .prepare("INSERT INTO organizations (id, name, slug) VALUES ('other-org','Other','other')")
       .run();
     expect(
-      errorOf(() =>
+      await errorOf(() =>
         sql
           .prepare(
             `INSERT INTO agent_events (id,organization_id,thread_id,run_id,sequence,event_type,source,payload,payload_hash,occurred_at,recorded_at)
@@ -255,21 +261,21 @@ describe('generic execution records for the legacy QA flow', () => {
             'now',
           ),
       ),
-    ).toMatch(/FOREIGN KEY|EVENT_SCOPE_MISMATCH/);
-    expect(errorOf(() => sql.prepare('UPDATE agent_events SET payload=?').run('{}'))).toMatch(
+    ).toMatch(/foreign key|EVENT_SCOPE_MISMATCH/);
+    expect(await errorOf(() => sql.prepare('UPDATE agent_events SET payload=?').run('{}'))).toMatch(
       'AGENT_EVENTS_APPEND_ONLY',
     );
-    expect(errorOf(() => sql.prepare('DELETE FROM agent_events').run())).toMatch(
+    expect(await errorOf(() => sql.prepare('DELETE FROM agent_events').run())).toMatch(
       'AGENT_EVENTS_APPEND_ONLY',
     );
-    expect(errorOf(() => sql.prepare('DELETE FROM agent_runs').run())).toMatch(
+    expect(await errorOf(() => sql.prepare('DELETE FROM agent_runs').run())).toMatch(
       'RUN_HISTORY_RETAINED',
     );
     expect(
-      errorOf(() => sql.prepare("UPDATE agent_runs SET employee_id='someone-else'").run()),
+      await errorOf(() => sql.prepare("UPDATE agent_runs SET employee_id='someone-else'").run()),
     ).toMatch('RUN_IDENTITY_IMMUTABLE');
     expect(
-      errorOf(() =>
+      await errorOf(() =>
         sql.prepare('UPDATE approvals SET run_id=? WHERE id=?').run(randomUUID(), body.approval.id),
       ),
     ).toMatch('APPROVAL_RUN_LINK_IMMUTABLE');
@@ -278,9 +284,9 @@ describe('generic execution records for the legacy QA flow', () => {
       .set(adminHeaders)
       .send({ decision: 'REJECTED' })
       .expect(200);
-    expect(errorOf(() => sql.prepare("UPDATE agent_runs SET status='RUNNING'").run())).toMatch(
-      'RUN_TERMINAL',
-    );
+    expect(
+      await errorOf(() => sql.prepare("UPDATE agent_runs SET status='RUNNING'").run()),
+    ).toMatch('RUN_TERMINAL');
   });
 });
 
@@ -288,10 +294,11 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
   let db: ControlPlaneDatabase;
   let manifest: AnySignedAgentManifest;
   let agentId: string;
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
-    const pending = db.requestProvisioning(employee.id, provisioning, org);
-    manifest = db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot').manifest!;
+  beforeEach(async () => {
+    db = await testDatabase({ manifestV2Issuance: true });
+    const pending = await db.requestProvisioning(employee.id, provisioning, org);
+    manifest = (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot'))
+      .manifest!;
     agentId = manifestSubject(manifest.payload).agentId;
   });
   afterEach(() => db.close());
@@ -314,7 +321,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       action: 'production.deploy',
       outcome: 'DENY',
     });
-    expect(db.getManifest(agentId, org, employee.id)).toEqual(manifest);
+    expect(await db.getManifest(agentId, org, employee.id)).toEqual(manifest);
     const expected = { agentId, employeeId: employee.id, organizationId: org };
     expect(await verifyManifest(manifest, db.signer.verificationKey, expected)).toBe(true);
     expect(
@@ -332,23 +339,23 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
     expect(
       await verifyManifest(unknown as AnySignedAgentManifest, db.signer.verificationKey, expected),
     ).toBe(false);
-    raw(db)
+    await raw(db)
       .prepare('UPDATE agent_manifests SET body=? WHERE agent_id=?')
       .run(JSON.stringify(unknown), agentId);
-    expect(errorOf(() => db.getManifest(agentId, org))).toBe('MANIFEST_INVALID');
+    expect(await errorOf(() => db.getManifest(agentId, org))).toBe('MANIFEST_INVALID');
   });
 
   it('records the v2 manifest reference when the legacy QA flow uses a v2 agent', async () => {
     const { body } = await startQaRun(createApp(db), agentId);
-    expect(db.execution.getRun(employee, body.agentRun.id).run.manifest).toEqual({
+    expect((await db.execution.getRun(employee, body.agentRun.id)).run.manifest).toEqual({
       manifestId: manifestSubject(manifest.payload).manifestId,
       apiVersion: 'agents-foundry/v2',
       keyId: db.signer.verificationKey.keyId,
     });
   });
 
-  it('drives a generic run through submit, events, approval pause, resume and completion', () => {
-    const run = db.execution.createRun({
+  it('drives a generic run through submit, events, approval pause, resume and completion', async () => {
+    const run = await db.execution.createRun({
       organizationId: org,
       employeeId: employee.id,
       agentId,
@@ -357,7 +364,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       manifest,
     });
     expect(run).toMatchObject({ status: 'QUEUED', runtimeProfile: 'standard-agent' });
-    const command = db.execution.buildRunSubmitCommand(org, run.id);
+    const command = await db.execution.buildRunSubmitCommand(org, run.id);
     expect(parseRuntimeCommand(command)).toMatchObject({ type: 'run.submit' });
     expect(command.run.manifest).toEqual(manifest);
     // Phase F: the workflow comes from the pinned catalog bundle, and must match the task.
@@ -400,30 +407,30 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
     };
 
     const started = send('run.started', { runtimeSessionId: randomUUID(), kernel: 'test-kernel' });
-    expect(started.result().duplicate).toBe(false);
-    expect(db.execution.ingestRuntimeEvent(org, started.envelope).duplicate).toBe(true);
+    expect((await started.result()).duplicate).toBe(false);
+    expect((await db.execution.ingestRuntimeEvent(org, started.envelope)).duplicate).toBe(true);
     expect(
-      errorOf(() =>
+      await errorOf(() =>
         db.execution.ingestRuntimeEvent(org, {
           ...started.envelope,
           occurredAt: new Date(0).toISOString(),
         }),
       ),
     ).toBe('RUNTIME_EVENT_CONFLICT');
-    expect(errorOf(() => db.execution.buildRunSubmitCommand(org, run.id))).toBe(
+    expect(await errorOf(() => db.execution.buildRunSubmitCommand(org, run.id))).toBe(
       'RUN_NOT_SUBMITTABLE',
     );
 
     const stepId = randomUUID();
-    send('step.started', { kind: 'TOOL', title: 'Capture screenshot' }, { stepId }).result();
+    await send('step.started', { kind: 'TOOL', title: 'Capture screenshot' }, { stepId }).result();
     const toolCallId = randomUUID();
-    send(
+    await send(
       'tool.requested',
       { toolCallId, toolId: 'browser', toolVersion: '1.0.0', inputDigest: 'b'.repeat(64) },
       { stepId },
     ).result();
     const artifactId = randomUUID();
-    send(
+    await send(
       'artifact.created',
       {
         artifact: {
@@ -439,7 +446,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       },
       { stepId },
     ).result();
-    send('step.completed', { outputSummary: 'Captured' }, { stepId }).result();
+    await send('step.completed', { outputSummary: 'Captured' }, { stepId }).result();
 
     // Out-of-order, cross-tenant and mis-correlated events are rejected without side effects.
     const skipped = {
@@ -447,16 +454,16 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       sequence: sequence + 5,
     };
     sequence--;
-    expect(errorOf(() => db.execution.ingestRuntimeEvent(org, skipped))).toBe(
+    expect(await errorOf(() => db.execution.ingestRuntimeEvent(org, skipped))).toBe(
       'RUNTIME_EVENT_OUT_OF_ORDER',
     );
     const next = send('agent.message', { content: 'hello' }).envelope;
     sequence--;
-    expect(errorOf(() => db.execution.ingestRuntimeEvent('other-org', next))).toBe(
+    expect(await errorOf(() => db.execution.ingestRuntimeEvent('other-org', next))).toBe(
       'RUNTIME_TENANT_FORBIDDEN',
     );
     expect(
-      errorOf(() =>
+      await errorOf(() =>
         db.execution.ingestRuntimeEvent(org, {
           ...next,
           correlation: { ...correlation, employeeId: 'someone-else' },
@@ -464,14 +471,14 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       ),
     ).toBe('RUNTIME_CORRELATION_MISMATCH');
 
-    send('run.paused', { reason: 'APPROVAL_REQUIRED', actionId: randomUUID() }).result();
+    await send('run.paused', { reason: 'APPROVAL_REQUIRED', actionId: randomUUID() }).result();
     const resumeEarly = send('run.resumed', { approvalId: randomUUID() });
-    expect(errorOf(resumeEarly.result)).toBe('ILLEGAL_RUN_TRANSITION');
+    expect(await errorOf(resumeEarly.result)).toBe('ILLEGAL_RUN_TRANSITION');
     sequence--;
 
     // Stand-in for the Phase D Action Gateway: a governed approval linked to the paused run.
     const approvalId = randomUUID();
-    raw(db)
+    await raw(db)
       .prepare(
         `INSERT INTO approvals (id, organization_id, requested_by, action, resource_type, resource_id, risk, summary, status, created_at, run_id, step_id)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -490,20 +497,20 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
         run.id,
         stepId,
       );
-    expect(errorOf(() => db.decideApproval(approvalId, 'APPROVED', employee.id, org))).toBe(
+    expect(await errorOf(() => db.decideApproval(approvalId, 'APPROVED', employee.id, org))).toBe(
       'SELF_APPROVAL_FORBIDDEN',
     );
-    db.decideApproval(approvalId, 'APPROVED', admin.id, org);
-    expect(db.execution.getRun(employee, run.id).run).toMatchObject({
+    await db.decideApproval(approvalId, 'APPROVED', admin.id, org);
+    expect((await db.execution.getRun(employee, run.id)).run).toMatchObject({
       status: 'QUEUED',
       statusReason: 'APPROVAL_GRANTED',
     });
 
-    send('run.resumed', { approvalId }).result();
-    send('run.completed', { summary: 'Done', artifactIds: [artifactId] }).result();
-    expect(errorOf(send('agent.message', { content: 'late' }).result)).toBe('RUN_TERMINAL');
+    await send('run.resumed', { approvalId }).result();
+    await send('run.completed', { summary: 'Done', artifactIds: [artifactId] }).result();
+    expect(await errorOf(send('agent.message', { content: 'late' }).result)).toBe('RUN_TERMINAL');
 
-    const detail = db.execution.getRun(employee, run.id);
+    const detail = await db.execution.getRun(employee, run.id);
     expect(detail.run).toMatchObject({ status: 'COMPLETED', statusReason: null });
     expect(detail.run.completedAt).not.toBeNull();
     expect(detail.steps).toEqual([
@@ -513,7 +520,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
       expect.objectContaining({ id: artifactId, type: 'screenshot', sizeBytes: 2048 }),
     ]);
     expect(JSON.stringify(detail)).not.toContain('artifact://');
-    const history = db.execution.listEvents(employee, run.id, 0, 100).items;
+    const history = (await db.execution.listEvents(employee, run.id, 0, 100)).items;
     expect(JSON.stringify(history)).not.toContain('artifact://');
     expect(history.map((event) => event.type)).toEqual([
       'run.created',
@@ -530,19 +537,15 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
     expect(history.filter((event) => event.source === 'RUNTIME')).toHaveLength(8);
   });
 
-  it('refuses to submit runs whose agents only have a v1 manifest', () => {
-    const v1 = new ControlPlaneDatabase(':memory:');
+  it('refuses to submit runs whose agents only have a v1 manifest', async () => {
+    const v1 = await testDatabase();
     try {
-      const pending = v1.requestProvisioning(employee.id, provisioning, org);
-      const legacyManifest = v1.decideProvisioning(
-        pending.id,
-        org,
-        admin.id,
-        'APPROVED',
-        'Pilot',
+      const pending = await v1.requestProvisioning(employee.id, provisioning, org);
+      const legacyManifest = (
+        await v1.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')
       ).manifest!;
       const legacyAgent = manifestSubject(legacyManifest.payload).agentId;
-      const run = v1.execution.createRun({
+      const run = await v1.execution.createRun({
         organizationId: org,
         employeeId: employee.id,
         agentId: legacyAgent,
@@ -550,11 +553,11 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
         task: { objective: 'Legacy', inputs: {} },
         manifest: legacyManifest,
       });
-      expect(errorOf(() => v1.execution.buildRunSubmitCommand(org, run.id))).toBe(
+      expect(await errorOf(() => v1.execution.buildRunSubmitCommand(org, run.id))).toBe(
         'RUNTIME_MANIFEST_V2_REQUIRED',
       );
       expect(
-        errorOf(() =>
+        await errorOf(() =>
           v1.execution.createRun({
             organizationId: org,
             employeeId: employee.id,
@@ -567,7 +570,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
         ),
       ).toBe('THREAD_HAS_ACTIVE_RUN');
       expect(
-        errorOf(() =>
+        await errorOf(() =>
           v1.execution.createRun({
             organizationId: org,
             employeeId: 'someone-else',
@@ -579,7 +582,7 @@ describe('Agent Manifest v2 and runtime ingestion', () => {
         ),
       ).toBe('MANIFEST_INVALID');
     } finally {
-      v1.close();
+      await v1.close();
     }
   });
 });
@@ -589,12 +592,7 @@ describe('migration 006 upgrade', () => {
     const sql = new DatabaseSync(':memory:');
     try {
       sql.exec('PRAGMA foreign_keys=ON');
-      const legacy = Object.create(ControlPlaneDatabase.prototype) as {
-        db: DatabaseSync;
-        migrate(): void;
-      };
-      legacy.db = sql;
-      legacy.migrate();
+      sql.exec(legacyBaseSql);
       migrateOrganization(sql, 5);
       sql.exec(`INSERT INTO organizations (id,name,slug) VALUES ('o','O','o');
         INSERT INTO employees (id,organization_id,display_name,email,role,team) VALUES ('e','o','E','e@example.com','EMPLOYEE','QA');
@@ -622,12 +620,7 @@ describe('migration 006 upgrade', () => {
     const sql = new DatabaseSync(':memory:');
     try {
       sql.exec('PRAGMA foreign_keys=ON');
-      const legacy = Object.create(ControlPlaneDatabase.prototype) as {
-        db: DatabaseSync;
-        migrate(): void;
-      };
-      legacy.db = sql;
-      legacy.migrate();
+      sql.exec(legacyBaseSql);
       migrateOrganization(sql, 10);
       sql.exec(`INSERT INTO organizations (id,name,slug) VALUES ('o','O','o');
         INSERT INTO employees (id,organization_id,display_name,email,role,team) VALUES ('e','o','E','e@example.com','ADMIN','QA');

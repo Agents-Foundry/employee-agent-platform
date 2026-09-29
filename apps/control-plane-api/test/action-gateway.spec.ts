@@ -28,6 +28,8 @@ import { ToolRegistry } from '../../agent-runtime/src/tools/runtime-tool.js';
 import { IssueTrackerTool } from '../../agent-runtime/src/tools/issue-tracker-tool.js';
 import { MemoryArtifactStore } from '../../agent-runtime/src/tools/artifact-store.js';
 import { MemoryCheckpointStore } from '../../agent-runtime/src/checkpoints.js';
+import { testDatabase } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const config: PasswordConfig = {
   mode: 'password',
@@ -75,11 +77,12 @@ describe('Action Gateway', () => {
     hash = await hashPassword('a long test-only password');
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     secrets = new MemorySecretStore();
     jira = [];
     jiraStatus = 201;
-    db = new ControlPlaneDatabase(':memory:', false, {
+    db = await testDatabase({
+      seedDemo: false,
       manifestV2Issuance: true,
       genericRuntime: true,
       secrets,
@@ -103,36 +106,45 @@ describe('Action Gateway', () => {
       ],
     });
     app = createApp(db, config);
-    const tenant = (name: string) => {
-      const org = db.createCustomer(
+    const tenant = async (name: string) => {
+      const org = await db.createCustomer(
         { name, slug: name.toLowerCase() },
         { displayName: 'Admin', email: `admin@${name}.example`, team: 'Admin' },
       );
-      db.acceptInvitation(hashToken(org.token), hash);
+      await db.acceptInvitation(hashToken(org.token), hash);
       return { id: org.employeeId, organizationId: org.organizationId, role: 'ADMIN' as const };
     };
-    admin = tenant('Alpha');
-    otherAdmin = tenant('Beta');
-    const invitation = db.inviteEmployee(admin, {
+    admin = await tenant('Alpha');
+    otherAdmin = await tenant('Beta');
+    const invitation = await db.inviteEmployee(admin, {
       displayName: 'Quinn',
       email: 'quinn@alpha.example',
       team: 'QA',
     });
-    db.acceptInvitation(hashToken(invitation.token), hash);
+    await db.acceptInvitation(hashToken(invitation.token), hash);
     employee = {
       id: invitation.employeeId,
       organizationId: admin.organizationId,
       role: 'EMPLOYEE',
     };
     secrets.set(admin.organizationId, 'jira-token', TOKEN);
+    sessions.clear();
+    for (const actor of [admin, otherAdmin, employee]) await signIn(actor);
   });
   afterEach(() => db.close());
 
-  const raw = () => (db as unknown as { db: DatabaseSync }).db;
-  const cookie = (actor: Actor) => {
+  const raw = () => rawSql(db);
+  // One session per actor, created up front: request helpers stay synchronous supertest chains.
+  const sessions = new Map<string, string>();
+  const signIn = async (actor: Actor) => {
     const token = Buffer.from(randomUUID()).toString('base64url').slice(0, 43);
-    db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 3600000);
-    return `af_session=${token}`;
+    await db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 3600000);
+    sessions.set(actor.id, `af_session=${token}`);
+  };
+  const cookie = (actor: Actor) => {
+    const value = sessions.get(actor.id);
+    if (!value) throw new Error(`No test session for ${actor.id}`);
+    return value;
   };
   const call = (
     method: 'get' | 'post' | 'put' | 'delete',
@@ -281,12 +293,14 @@ describe('Action Gateway', () => {
       ).body;
       expect(disabled).toMatchObject({ status: 'DISABLED', version: 2 });
       expect(
-        JSON.stringify(raw().prepare('SELECT * FROM organization_connector_connections').all()),
+        JSON.stringify(
+          await raw().prepare('SELECT * FROM organization_connector_connections').all(),
+        ),
       ).not.toContain(TOKEN);
-      expect(JSON.stringify(raw().prepare('SELECT * FROM audit_events').all())).not.toContain(
+      expect(JSON.stringify(await raw().prepare('SELECT * FROM audit_events').all())).not.toContain(
         TOKEN,
       );
-      const demo = new ControlPlaneDatabase(':memory:');
+      const demo = await testDatabase();
       try {
         await request(createApp(demo, { mode: 'demo' }))
           .get('/api/organization/connector-connections')
@@ -297,7 +311,7 @@ describe('Action Gateway', () => {
           })
           .expect(404);
       } finally {
-        demo.close();
+        await demo.close();
       }
     });
 
@@ -335,7 +349,9 @@ describe('Action Gateway', () => {
         }).expect(200)
       ).body;
       expect(set).toMatchObject({ action: 'repository.read', outcome: 'REQUIRE_APPROVAL' });
-      expect(db.actionPolicies.outcome(otherAdmin.organizationId, 'repository.read')).toBeNull();
+      expect(
+        await db.actionPolicies.outcome(otherAdmin.organizationId, 'repository.read'),
+      ).toBeNull();
       await call('delete', '/api/organization/action-policies/repository.read', admin).expect(204);
       await call('delete', '/api/organization/action-policies/repository.read', admin).expect(404);
     });
@@ -370,7 +386,7 @@ describe('Action Gateway', () => {
         decision: 'DENIED',
         reason: 'CONNECTOR_CAPABILITY_MISSING',
       });
-      const stored = raw()
+      const stored = await raw()
         .prepare("SELECT policy_id, parameters FROM agent_action_requests WHERE decision='DENIED'")
         .all();
       expect(stored.every((row) => row['parameters'] === null)).toBe(true);
@@ -394,7 +410,7 @@ describe('Action Gateway', () => {
       const older = await runningStep(await createAgent('1.1.0'));
       expect(await decide(read(older, 'QA-1'))).toMatchObject({ decision: 'ALLOWED' });
       expect(
-        raw()
+        await raw()
           .prepare("SELECT action, parameters FROM agent_action_requests WHERE decision='ALLOWED'")
           .all(),
       ).toEqual([{ action: 'jira.read', parameters: '{"issueKey":"QA-1"}' }]);
@@ -421,7 +437,7 @@ describe('Action Gateway', () => {
       const ttl = Date.parse(approval.expiresAt) - Date.parse(approval.createdAt);
       expect(ttl).toBe(24 * 3600 * 1000);
       expect(
-        raw()
+        await raw()
           .prepare('SELECT policy_id, policy_version FROM agent_action_requests WHERE id=?')
           .get(request.requestId),
       ).toEqual({ policy_id: 'agents-foundry.foundation', policy_version: 'foundation-v2' });
@@ -457,25 +473,26 @@ describe('Action Gateway', () => {
       // Single use: a retry returns the recorded outcome without calling Jira again.
       expect((await execute(request.requestId).expect(200)).body).toEqual(executed);
       expect(jira).toHaveLength(1);
-      expect(() =>
+      await expect(
         raw().prepare("UPDATE agent_action_executions SET status='FAILED'").run(),
-      ).toThrow('ACTION_EXECUTION_FINAL');
+      ).rejects.toThrow('ACTION_EXECUTION_FINAL');
 
       const allowed = action({ action: 'repository.read', toolId: 'repository' }, null);
       await post('/runtime/v1/actions', allowed).expect(200);
       await execute(allowed.requestId).expect(409, { error: 'ACTION_NOT_EXECUTABLE' });
 
       const history = JSON.stringify([
-        raw().prepare('SELECT * FROM audit_events').all(),
-        raw().prepare('SELECT * FROM agent_events').all(),
-        raw().prepare('SELECT * FROM agent_action_executions').all(),
+        await raw().prepare('SELECT * FROM audit_events').all(),
+        await raw().prepare('SELECT * FROM agent_events').all(),
+        await raw().prepare('SELECT * FROM agent_action_executions').all(),
       ]);
       expect(history).not.toContain(TOKEN);
       expect(
-        raw()
-          .prepare("SELECT event_type FROM audit_events WHERE event_type LIKE 'action.%'")
-          .all()
-          .map((row) => row['event_type']),
+        (
+          await raw()
+            .prepare("SELECT event_type FROM audit_events WHERE event_type LIKE 'action.%'")
+            .all()
+        ).map((row) => row['event_type']),
       ).toEqual(['action.executed']);
     });
 
@@ -550,7 +567,7 @@ describe('Action Gateway', () => {
       const agentId = await createAgent();
       const { run, action } = await runningStep(agentId);
       const decision = (await post('/runtime/v1/actions', action()).expect(200)).body;
-      raw()
+      await raw()
         .prepare('UPDATE approvals SET expires_at=? WHERE id=?')
         .run(new Date(Date.now() - 1000).toISOString(), decision.approvalId);
       await call('post', `/api/approvals/${decision.approvalId}/decision`, admin, {
@@ -560,12 +577,12 @@ describe('Action Gateway', () => {
       expect(listed.find((item: { id: string }) => item.id === decision.approvalId).status).toBe(
         'EXPIRED',
       );
-      const detail = db.execution.getRun(employee, run.id);
+      const detail = await db.execution.getRun(employee, run.id);
       expect(detail.run).toMatchObject({ status: 'CANCELLED', statusReason: 'APPROVAL_EXPIRED' });
       expect(detail.approvals[0]).toMatchObject({ status: 'EXPIRED' });
-      const types = db.execution
-        .listEvents(employee, run.id, 0, 200)
-        .items.map((event) => event.type);
+      const types = (await db.execution.listEvents(employee, run.id, 0, 200)).items.map(
+        (event) => event.type,
+      );
       expect(types.slice(-2)).toEqual(['approval.expired', 'run.cancelled']);
       expect((await post('/runtime/v1/commands/claim').expect(200)).body.command).toMatchObject({
         type: 'run.cancel',
@@ -622,7 +639,7 @@ describe('Action Gateway', () => {
       ).body;
       await host.pollOnce();
       await host.drain();
-      const approval = db.execution.getRun(employee, run.id).approvals[0]!;
+      const approval = (await db.execution.getRun(employee, run.id)).approvals[0]!;
       expect(approval.status).toBe('PENDING');
       expect(jira).toHaveLength(0);
       await call('post', `/api/approvals/${approval.id}/decision`, admin, {
@@ -630,7 +647,7 @@ describe('Action Gateway', () => {
       }).expect(200);
       await host.pollOnce();
       await host.drain();
-      const detail = db.execution.getRun(employee, run.id);
+      const detail = await db.execution.getRun(employee, run.id);
       expect(detail.run.status).toBe('COMPLETED');
       expect(jira).toHaveLength(1);
       expect(detail.steps.map((step) => [step.kind, step.status])).toEqual([

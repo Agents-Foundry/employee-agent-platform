@@ -18,6 +18,7 @@ import { ToolRegistry, type RuntimeTool } from '../../agent-runtime/src/tools/ru
 import { ArtifactTool } from '../../agent-runtime/src/tools/artifact-tool.js';
 import { MemoryArtifactStore } from '../../agent-runtime/src/tools/artifact-store.js';
 import { MemoryCheckpointStore } from '../../agent-runtime/src/checkpoints.js';
+import { testDatabase } from './support/database.js';
 
 const org = 'org_agents_foundry';
 const employee = { id: 'employee_qa_demo', role: 'EMPLOYEE' as const, organizationId: org };
@@ -115,7 +116,7 @@ describe('agent runtime end to end over the signed transport', () => {
 
   beforeEach(async () => {
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    db = new ControlPlaneDatabase(':memory:', true, {
+    db = await testDatabase({
       manifestV2Issuance: true,
       genericRuntime: true,
       runtimeIdentities: [
@@ -127,7 +128,7 @@ describe('agent runtime end to end over the signed transport', () => {
         },
       ],
     });
-    const pending = db.requestProvisioning(
+    const pending = await db.requestProvisioning(
       employee.id,
       {
         blueprintId: 'engineering.qa-engineer',
@@ -147,7 +148,8 @@ describe('agent runtime end to end over the signed transport', () => {
       org,
     );
     agentId = manifestSubject(
-      db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot').manifest!.payload,
+      (await db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot')).manifest!
+        .payload,
     ).agentId;
     app = createApp(db);
     server = await new Promise<Server>((resolve) => {
@@ -177,7 +179,7 @@ describe('agent runtime end to end over the signed transport', () => {
   afterEach(async () => {
     await host.drain();
     await new Promise((resolve) => server.close(resolve));
-    db.close();
+    await db.close();
   });
 
   it('runs, pauses for approval, resumes after the admin decision and completes', async () => {
@@ -193,7 +195,7 @@ describe('agent runtime end to end over the signed transport', () => {
 
     expect(await host.pollOnce()).toBe(true);
     await host.drain();
-    let detail = db.execution.getRun(employee, run.id);
+    let detail = await db.execution.getRun(employee, run.id);
     expect(detail.run).toMatchObject({
       status: 'WAITING_FOR_APPROVAL',
       statusReason: 'APPROVAL_REQUIRED',
@@ -217,7 +219,7 @@ describe('agent runtime end to end over the signed transport', () => {
     expect(await host.pollOnce()).toBe(true);
     await host.drain();
 
-    detail = db.execution.getRun(employee, run.id);
+    detail = await db.execution.getRun(employee, run.id);
     expect(detail.run).toMatchObject({ status: 'COMPLETED' });
     expect(issues.executed).toEqual(['cart-smoke']);
     expect(checkpoints.items.size).toBe(0);
@@ -260,7 +262,7 @@ describe('agent runtime end to end over the signed transport', () => {
     ).body;
     await host.pollOnce();
     await host.drain();
-    const approval = db.execution.getRun(employee, run.id).approvals[0]!;
+    const approval = (await db.execution.getRun(employee, run.id)).approvals[0]!;
     await request(app)
       .post(`/api/approvals/${approval.id}/decision`)
       .set(adminHeaders)
@@ -268,7 +270,7 @@ describe('agent runtime end to end over the signed transport', () => {
       .expect(200);
     expect(await host.pollOnce()).toBe(true);
     await host.drain();
-    expect(db.execution.getRun(employee, run.id).run).toMatchObject({
+    expect((await db.execution.getRun(employee, run.id)).run).toMatchObject({
       status: 'CANCELLED',
       statusReason: 'APPROVAL_REJECTED',
     });

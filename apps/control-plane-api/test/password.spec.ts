@@ -5,6 +5,7 @@ import { GOOGLE_ISSUER, type GoogleConfig } from '../src/auth.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { hashPassword, verifyPassword } from '../src/passwords.js';
 import type { IdentityEntry } from '../src/identity-directory.js';
+import { testDatabase } from './support/database.js';
 
 const config: GoogleConfig = {
   mode: 'google',
@@ -24,8 +25,8 @@ describe('email and password authentication', () => {
   beforeAll(async () => {
     hash = await hashPassword(password);
   });
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false);
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false });
     entry = {
       subject: 'local:employee',
       employeeId: 'employee',
@@ -36,7 +37,7 @@ describe('email and password authentication', () => {
       team: 'QA',
       passwordHash: hash,
     };
-    db.syncIdentities(GOOGLE_ISSUER, [entry]);
+    await db.syncIdentities(GOOGLE_ISSUER, [entry]);
   });
   afterEach(() => db.close());
   const login = (
@@ -73,9 +74,9 @@ describe('email and password authentication', () => {
     const app = createApp(db, config);
     const wrong = await login(app, entry.email, 'incorrect').expect(401);
     expect((await login(app, 'unknown@example.com').expect(401)).body).toEqual(wrong.body);
-    db.syncIdentities(GOOGLE_ISSUER, [{ ...entry, passwordHash: undefined }]);
+    await db.syncIdentities(GOOGLE_ISSUER, [{ ...entry, passwordHash: undefined }]);
     expect((await login(app).expect(401)).body).toEqual(wrong.body);
-    db.syncIdentities(GOOGLE_ISSUER, []);
+    await db.syncIdentities(GOOGLE_ISSUER, []);
     expect((await login(app).expect(401)).body).toEqual(wrong.body);
   });
   it('rejects login CSRF and throttles repeated attempts', async () => {
@@ -97,11 +98,11 @@ describe('email and password authentication', () => {
     const first = await login(app).expect(200);
     const cookie = first.headers['set-cookie'][0].split(';')[0];
     const updated = { ...entry, passwordHash: await hashPassword('a different long passphrase') };
-    db.syncIdentities(GOOGLE_ISSUER, [updated]);
+    await db.syncIdentities(GOOGLE_ISSUER, [updated]);
     await request(app).get('/api/auth/session').set('Cookie', cookie).expect(401);
     await login(app).expect(401);
     const second = await login(app, entry.email, 'a different long passphrase').expect(200);
-    db.syncIdentities(GOOGLE_ISSUER, [{ ...entry, passwordHash: undefined }]);
+    await db.syncIdentities(GOOGLE_ISSUER, [{ ...entry, passwordHash: undefined }]);
     await request(app)
       .get('/api/auth/session')
       .set('Cookie', second.headers['set-cookie'][0].split(';')[0])

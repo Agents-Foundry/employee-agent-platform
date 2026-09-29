@@ -23,6 +23,9 @@ import { isKnownAction } from '../../../packages/policy-engine/src/index.js';
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { verifyManifest } from '../../employee-desktop/src/app/verify-manifest.js';
 import { createDemoApp, demoRequest } from './helpers.js';
+import { testDatabase, testStore } from './support/database.js';
+import { ManifestSigner } from '../src/manifest-signing.js';
+import { rawSql } from './support/raw-sql.js';
 
 const qa = builtInCatalog.blueprints[0]!;
 const latest = builtInCatalog.blueprints.find((blueprint) => blueprint.version === '1.2.0')!;
@@ -98,19 +101,19 @@ describe('catalog validation', () => {
 });
 
 describe('catalog of record', () => {
-  it('pins released versions: a mutated version fails startup, new versions register', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agents-foundry-catalog-'));
-    const path = join(directory, 'catalog.db');
+  it('pins released versions: a mutated version fails startup, new versions register', async () => {
+    const { store, connect, drop } = await testStore();
+    const signer = new ManifestSigner();
     try {
-      new ControlPlaneDatabase(path, false).close();
+      await ControlPlaneDatabase.open({ store, signer });
       const mutated = withBlueprint((b) => (b.mission = 'Silently changed mission.'));
-      expect(() => new ControlPlaneDatabase(path, false, { catalog: mutated })).toThrow(
-        'CATALOG_VERSION_MUTATED: engineering.qa-engineer@1.1.0',
-      );
+      await expect(
+        ControlPlaneDatabase.open({ store: await connect(), signer, catalog: mutated }),
+      ).rejects.toThrow('CATALOG_VERSION_MUTATED: engineering.qa-engineer@1.1.0');
       const next = clone();
       next.blueprints = [{ ...structuredClone(qa), version: '1.3.0', mission: 'Next version.' }];
-      const db = new ControlPlaneDatabase(path, false, { catalog: next });
-      try {
+      const db = await ControlPlaneDatabase.open({ store: await connect(), signer, catalog: next });
+      {
         // 1.1.0 and 1.2.0 stopped shipping but stay resolvable from the catalog of record.
         expect(db.catalog.bundle(qa.id, '1.1.0').blueprint.mission).toBe(qa.mission);
         const qaSummaries = db.catalog.summaries().filter((s) => s.id === qa.id);
@@ -125,23 +128,21 @@ describe('catalog of record', () => {
             .filter((b) => b.id === qa.id)
             .map((b) => b.version),
         ).toEqual(['1.3.0']);
-        const sql = (db as unknown as { db: DatabaseSync }).db;
-        expect(() => sql.prepare("UPDATE catalog_blueprint_versions SET digest='x'").run()).toThrow(
+        const sql = rawSql(db);
+        await expect(
+          sql.prepare("UPDATE catalog_blueprint_versions SET digest='x'").run(),
+        ).rejects.toThrow('CATALOG_VERSION_IMMUTABLE');
+        await expect(sql.prepare('DELETE FROM catalog_blueprint_versions').run()).rejects.toThrow(
           'CATALOG_VERSION_IMMUTABLE',
         );
-        expect(() => sql.prepare('DELETE FROM catalog_blueprint_versions').run()).toThrow(
-          'CATALOG_VERSION_IMMUTABLE',
-        );
-      } finally {
-        db.close();
       }
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      await drop();
     }
   });
 
   it('keeps the legacy /api/blueprints contract and serves versioned bundles', async () => {
-    const db = new ControlPlaneDatabase(':memory:');
+    const db = await testDatabase();
     try {
       const app = createDemoApp(db);
       const legacy = (await demoRequest(app).get('/api/blueprints').expect(200)).body;
@@ -190,7 +191,7 @@ describe('catalog of record', () => {
       await demoRequest(app).get(`/api/catalog/v1/blueprints/${qa.id}/versions/9.9.9`).expect(404);
       await request(app).get('/api/catalog/v1/blueprints').expect(401);
     } finally {
-      db.close();
+      await db.close();
     }
   });
 });
@@ -219,37 +220,46 @@ describe('organization installations', () => {
   beforeAll(async () => {
     hash = await hashPassword('a long test-only password');
   });
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', false, { manifestV2Issuance: true });
+  beforeEach(async () => {
+    db = await testDatabase({ seedDemo: false, manifestV2Issuance: true });
     app = createApp(db, config);
-    const tenant = (name: string) => {
-      const org = db.createCustomer(
+    const tenant = async (name: string) => {
+      const org = await db.createCustomer(
         { name, slug: name.toLowerCase() },
         { displayName: 'Admin', email: `admin@${name}.example`, team: 'Admin' },
       );
-      db.acceptInvitation(hashToken(org.token), hash);
+      await db.acceptInvitation(hashToken(org.token), hash);
       return { id: org.employeeId, organizationId: org.organizationId, role: 'ADMIN' as const };
     };
-    admin = tenant('Alpha');
-    otherAdmin = tenant('Beta');
-    const invitation = db.inviteEmployee(admin, {
+    admin = await tenant('Alpha');
+    otherAdmin = await tenant('Beta');
+    const invitation = await db.inviteEmployee(admin, {
       displayName: 'Quinn',
       email: 'quinn@alpha.example',
       team: 'QA',
     });
-    db.acceptInvitation(hashToken(invitation.token), hash);
+    await db.acceptInvitation(hashToken(invitation.token), hash);
     employee = {
       id: invitation.employeeId,
       organizationId: admin.organizationId,
       role: 'EMPLOYEE',
     };
+    sessions.clear();
+    for (const actor of [admin, otherAdmin, employee]) await signIn(actor);
   });
   afterEach(() => db.close());
 
-  const cookie = (actor: Actor) => {
+  // One session per actor, created up front: request helpers stay synchronous supertest chains.
+  const sessions = new Map<string, string>();
+  const signIn = async (actor: Actor) => {
     const token = Buffer.from(randomUUID()).toString('base64url').slice(0, 43);
-    db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 3600000);
-    return `af_session=${token}`;
+    await db.createSession(hashToken(token), LOCAL_ISSUER, actor.id, Date.now() + 3600000);
+    sessions.set(actor.id, `af_session=${token}`);
+  };
+  const cookie = (actor: Actor) => {
+    const value = sessions.get(actor.id);
+    if (!value) throw new Error(`No test session for ${actor.id}`);
+    return value;
   };
   const call = (method: 'get' | 'post' | 'put', path: string, actor: Actor, body?: object) => {
     const pending = request(app)
@@ -312,21 +322,22 @@ describe('organization installations', () => {
     const listed = (await call('get', '/api/organization/agent-installations', admin).expect(200))
       .body;
     expect(listed.map((item: OrganizationAgentInstallation) => item.id)).toEqual([installation.id]);
-    const sql = (db as unknown as { db: DatabaseSync }).db;
+    const sql = rawSql(db);
     expect(
-      sql
-        .prepare(
-          "SELECT action FROM organization_change_events WHERE resource_type='agent_installation'",
-        )
-        .all()
-        .map((row) => row['action']),
+      (
+        await sql
+          .prepare(
+            "SELECT action FROM organization_change_events WHERE resource_type='agent_installation'",
+          )
+          .all()
+      ).map((row) => row['action']),
     ).toEqual(['agent_installation.created']);
   });
 
   it('creates agents that inherit installation configuration into signed v2 manifests', async () => {
     const installation = await install();
     const [assignment] = (await createAgent(installation).expect(201)).body;
-    const manifest = db.getManifest(assignment.agentId, admin.organizationId, employee.id);
+    const manifest = await db.getManifest(assignment.agentId, admin.organizationId, employee.id);
     if (manifest.payload.apiVersion !== 'agents-foundry/v2') throw new Error('EXPECTED_V2');
     expect(manifest.payload.metadata).toMatchObject({
       installationId: installation.id,
@@ -356,7 +367,7 @@ describe('organization installations', () => {
     const installation = await install();
     const firstRequest = randomUUID();
     const [first] = (await createAgent(installation, agentAnswers, firstRequest).expect(201)).body;
-    const before = db.getManifest(first.agentId, admin.organizationId);
+    const before = await db.getManifest(first.agentId, admin.organizationId);
     await call('put', `/api/organization/agent-installations/${installation.id}`, admin, {
       name: installation.name,
       blueprintVersion: '1.1.0',
@@ -373,10 +384,10 @@ describe('organization installations', () => {
     ).body as OrganizationAgentInstallation;
     expect(updated.version).toBe(2);
     const [second] = (await createAgent(updated).expect(201)).body;
-    const secondManifest = db.getManifest(second.agentId, admin.organizationId);
+    const secondManifest = await db.getManifest(second.agentId, admin.organizationId);
     if (secondManifest.payload.apiVersion !== 'agents-foundry/v2') throw new Error('EXPECTED_V2');
     expect(secondManifest.payload.connectors.map((c) => c.id)).toEqual(['linear', 'bitbucket']);
-    expect(db.getManifest(first.agentId, admin.organizationId)).toEqual(before);
+    expect(await db.getManifest(first.agentId, admin.organizationId)).toEqual(before);
 
     await call('post', `/api/organization/agent-installations/${installation.id}/retire`, admin, {
       version: 2,
@@ -385,7 +396,7 @@ describe('organization installations', () => {
     // An unchanged retry of a completed request still replays its original result.
     const replay = (await createAgent(installation, agentAnswers, firstRequest).expect(201)).body;
     expect(replay[0].agentId).toBe(first.agentId);
-    expect(db.getManifest(first.agentId, admin.organizationId)).toEqual(before);
+    expect(await db.getManifest(first.agentId, admin.organizationId)).toEqual(before);
     await call('put', `/api/organization/agent-installations/${installation.id}`, admin, {
       name: 'Revived',
       blueprintVersion: '1.1.0',
@@ -417,14 +428,14 @@ describe('organization installations', () => {
     expect(
       (await call('get', '/api/organization/agent-installations', otherAdmin).expect(200)).body,
     ).toEqual([]);
-    const sql = (db as unknown as { db: DatabaseSync }).db;
-    expect(() =>
+    const sql = rawSql(db);
+    await expect(
       sql
         .prepare(
           "INSERT INTO agents (id, organization_id, name, department, team, status, capabilities, installation_id) VALUES (?,?,?,?,?,'ACTIVE','[]',?)",
         )
         .run(randomUUID(), otherAdmin.organizationId, 'x', 'x', 'x', installation.id),
-    ).toThrow('INSTALLATION_SCOPE_MISMATCH');
+    ).rejects.toThrow('INSTALLATION_SCOPE_MISMATCH');
   });
 
   it('rejects an installation for a different blueprint version than requested', async () => {
@@ -437,14 +448,14 @@ describe('organization installations', () => {
 });
 
 describe('second role through configuration only (ADR 0009)', () => {
-  it('resolves the shipped Frontend Engineer into a signed manifest without platform code', () => {
+  it('resolves the shipped Frontend Engineer into a signed manifest without platform code', async () => {
     const frontend = builtInCatalog.blueprints.find(
       (blueprint) => blueprint.id === 'engineering.frontend-engineer',
     )!;
     expect(frontend.version).toBe('1.0.0');
-    const db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
+    const db = await testDatabase({ manifestV2Issuance: true });
     try {
-      const pending = db.requestProvisioning('employee_qa_demo', {
+      const pending = await db.requestProvisioning('employee_qa_demo', {
         blueprintId: frontend.id,
         blueprintVersion: frontend.version,
         provider: 'test',
@@ -458,7 +469,7 @@ describe('second role through configuration only (ADR 0009)', () => {
           sourceControl: ['GitHub'],
         },
       });
-      const { manifest } = db.decideProvisioning(
+      const { manifest } = await db.decideProvisioning(
         pending.id,
         'org_agents_foundry',
         'admin_demo',
@@ -496,7 +507,7 @@ describe('second role through configuration only (ADR 0009)', () => {
         { action: 'production.deploy', outcome: 'DENY' },
       ]);
       const agentId = manifestSubject(manifest.payload).agentId;
-      expect(db.getManifest(agentId, 'org_agents_foundry')).toEqual(manifest);
+      expect(await db.getManifest(agentId, 'org_agents_foundry')).toEqual(manifest);
       expect(
         db.pinnedWorkflow(manifest, 'implement-ui-change')?.steps.map((step) => step.action),
       ).toEqual([
@@ -506,14 +517,14 @@ describe('second role through configuration only (ADR 0009)', () => {
         'repository.pull_request.create',
       ]);
     } finally {
-      db.close();
+      await db.close();
     }
   });
 
-  it('adds governed dependency installs in Frontend Engineer 1.1.0 as data only', () => {
-    const db = new ControlPlaneDatabase(':memory:', true, { manifestV2Issuance: true });
+  it('adds governed dependency installs in Frontend Engineer 1.1.0 as data only', async () => {
+    const db = await testDatabase({ manifestV2Issuance: true });
     try {
-      const pending = db.requestProvisioning('employee_qa_demo', {
+      const pending = await db.requestProvisioning('employee_qa_demo', {
         blueprintId: 'engineering.frontend-engineer',
         blueprintVersion: '1.1.0',
         provider: 'test',
@@ -527,7 +538,7 @@ describe('second role through configuration only (ADR 0009)', () => {
           sourceControl: ['GitHub'],
         },
       });
-      const { manifest } = db.decideProvisioning(
+      const { manifest } = await db.decideProvisioning(
         pending.id,
         'org_agents_foundry',
         'admin_demo',
@@ -561,7 +572,7 @@ describe('second role through configuration only (ADR 0009)', () => {
         'repository.pull_request.create',
       ]);
     } finally {
-      db.close();
+      await db.close();
     }
   });
 });

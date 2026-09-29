@@ -9,6 +9,8 @@ import { executionGrantSigningInput } from '../../../packages/contracts/src/exec
 import { parseSignedExecutionGrant } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import { sameRepository } from '../src/actions/execution-actions.js';
 import { runtimeKeyPair, signedRuntimePost } from './runtime-helpers.js';
+import { testDatabase } from './support/database.js';
+import { rawSql } from './support/raw-sql.js';
 
 const org = 'org_agents_foundry';
 const employeeId = 'employee_qa_demo';
@@ -26,8 +28,8 @@ describe('execution grants', () => {
   let app: ReturnType<typeof createApp>;
   let agentId: string;
 
-  beforeEach(() => {
-    db = new ControlPlaneDatabase(':memory:', true, {
+  beforeEach(async () => {
+    db = await testDatabase({
       manifestV2Issuance: true,
       genericRuntime: true,
       runtimeIdentities: [
@@ -39,7 +41,7 @@ describe('execution grants', () => {
         },
       ],
     });
-    const pending = db.requestProvisioning(
+    const pending = await db.requestProvisioning(
       employeeId,
       {
         blueprintId: 'engineering.qa-engineer',
@@ -59,7 +61,8 @@ describe('execution grants', () => {
       org,
     );
     agentId = manifestSubject(
-      db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot').manifest!.payload,
+      (await db.decideProvisioning(pending.id, org, 'admin_demo', 'APPROVED', 'Pilot')).manifest!
+        .payload,
     ).agentId;
     app = createApp(db);
   });
@@ -165,8 +168,8 @@ describe('execution grants', () => {
     );
     // Redelivery returns the same grant; the execution runtime enforces single use.
     expect((await grant(decision.requestId).expect(200)).body).toEqual(signed);
-    const sql = (db as unknown as { db: DatabaseSync }).db;
-    expect(() => sql.prepare('DELETE FROM agent_execution_grants').run()).toThrow(
+    const sql = rawSql(db);
+    await expect(sql.prepare('DELETE FROM agent_execution_grants').run()).rejects.toThrow(
       'EXECUTION_GRANTS_IMMUTABLE',
     );
   });
@@ -202,7 +205,7 @@ describe('execution grants', () => {
       kind: 'git.status',
       path: 'repo',
     }).expect(200);
-    (db as unknown as { db: DatabaseSync }).db
+    await rawSql(db)
       .prepare(
         `INSERT INTO organization_action_policies (organization_id, action, outcome, reason, updated_by, updated_at)
          VALUES (?, 'repository.read', 'REQUIRE_APPROVAL', 'Tightened', 'admin_demo', ?)`,

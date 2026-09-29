@@ -1,4 +1,3 @@
-import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type {
   AgentBlueprint,
@@ -12,8 +11,11 @@ import type {
 import { evaluatePolicy, isKnownAction } from '../../../../packages/policy-engine/src/index.js';
 import { OrganizationDomainError } from '../organization/structure-service.js';
 import { resolveCatalog, type BlueprintBundleContent } from './catalog-registry.js';
+import type { PgStore } from '../db/pg-store.js';
 
 export type Answers = Record<string, string | string[]>;
+
+type CatalogRow = { blueprint_id: string; version: string; digest: string; content: string };
 
 /** Numeric semver ordering; a pre-release sorts before its release. */
 export function compareVersions(a: string, b: string): number {
@@ -66,39 +68,51 @@ function answerSchema(questions: CatalogQuestion[]) {
  * so a version stays resolvable even after it stops shipping.
  */
 export class CatalogService {
-  constructor(
-    private readonly db: DatabaseSync,
-    definitions: CatalogDefinitions,
-  ) {
+  private constructor(private readonly rows: readonly CatalogRow[]) {}
+
+  /**
+   * Registers the shipped definitions (platform scope) and loads every registered version.
+   * Registered versions are immutable, so they are served from memory afterwards; a version
+   * registered later by another instance is unknown here and fails closed.
+   */
+  static async open(db: PgStore, definitions: CatalogDefinitions): Promise<CatalogService> {
     const bundles = resolveCatalog(definitions, isKnownAction);
     const now = new Date().toISOString();
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
+    const rows = await db.platform(async () => {
       for (const { content, digest } of bundles) {
         const { blueprint } = content;
-        const existing = this.db
-          .prepare(
-            'SELECT digest FROM catalog_blueprint_versions WHERE blueprint_id=? AND version=?',
-          )
-          .get(blueprint.id, blueprint.version) as { digest: string } | undefined;
+        const existing = await db.get<{ digest: string }>(
+          'SELECT digest FROM catalog_blueprint_versions WHERE blueprint_id=? AND version=?',
+          blueprint.id,
+          blueprint.version,
+        );
         if (existing && existing.digest !== digest)
           throw new Error(`CATALOG_VERSION_MUTATED: ${blueprint.id}@${blueprint.version}`);
         if (!existing)
-          this.db
-            .prepare('INSERT INTO catalog_blueprint_versions VALUES (?,?,?,?,?)')
-            .run(blueprint.id, blueprint.version, digest, JSON.stringify(content), now);
+          await db.run(
+            'INSERT INTO catalog_blueprint_versions (blueprint_id,version,digest,content,registered_at) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING',
+            blueprint.id,
+            blueprint.version,
+            digest,
+            JSON.stringify(content),
+            now,
+          );
       }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      return db.all<CatalogRow>(
+        'SELECT blueprint_id, version, digest, content FROM catalog_blueprint_versions ORDER BY blueprint_id, version',
+      );
+    });
+    // A concurrent start of a different release may have registered first.
+    for (const { content, digest } of bundles) {
+      const { id, version } = content.blueprint;
+      const row = rows.find((item) => item.blueprint_id === id && item.version === version);
+      if (row?.digest !== digest) throw new Error(`CATALOG_VERSION_MUTATED: ${id}@${version}`);
     }
+    return new CatalogService(rows);
   }
 
   summaries(): CatalogBlueprintSummary[] {
-    const rows = this.db
-      .prepare('SELECT blueprint_id, version, digest, content FROM catalog_blueprint_versions')
-      .all() as { blueprint_id: string; version: string; digest: string; content: string }[];
+    const rows = this.rows;
     const latest = new Map<string, string>();
     for (const row of rows) {
       const current = latest.get(row.blueprint_id);
@@ -124,11 +138,7 @@ export class CatalogService {
 
   /** Resolve a registered version; unknown versions fail with `missingStatus` (400 or 404). */
   bundle(id: string, version: string, missingStatus = 400): ResolvedBlueprintBundle {
-    const row = this.db
-      .prepare(
-        'SELECT digest, content FROM catalog_blueprint_versions WHERE blueprint_id=? AND version=?',
-      )
-      .get(id, version) as { digest: string; content: string } | undefined;
+    const row = this.rows.find((item) => item.blueprint_id === id && item.version === version);
     if (!row) throw new OrganizationDomainError(missingStatus, 'BLUEPRINT_VERSION_UNKNOWN');
     const content = JSON.parse(row.content) as BlueprintBundleContent;
     return {

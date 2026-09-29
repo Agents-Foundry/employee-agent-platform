@@ -24,9 +24,9 @@ const input = z
   })
   .strict()
   .parse(JSON.parse(readFileSync(filename, 'utf8')));
-const db = new ControlPlaneDatabase(undefined, false);
+const db = await ControlPlaneDatabase.open();
 try {
-  const result = db.createCustomer(input.organization, input.admin);
+  const result = await db.createCustomer(input.organization, input.admin);
   console.log(
     JSON.stringify(
       {
@@ -41,5 +41,5 @@ try {
     ),
   );
 } finally {
-  db.close();
+  await db.close();
 }

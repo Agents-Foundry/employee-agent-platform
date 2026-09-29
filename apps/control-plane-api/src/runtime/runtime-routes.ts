@@ -33,7 +33,7 @@ export function configureRuntimeRoutes(
     next();
   });
 
-  const authenticate = (request: Request): RuntimeIdentity =>
+  const authenticate = (request: Request): Promise<RuntimeIdentity> =>
     authenticateRuntimeRequest(
       registry,
       {
@@ -53,28 +53,28 @@ export function configureRuntimeRoutes(
     }
   };
 
-  router.post(relative(runtimeTransportPaths.claim), (request, response) => {
-    const runtime = authenticate(request);
-    const claim = transport.claim(runtime);
+  router.post(relative(runtimeTransportPaths.claim), async (request, response) => {
+    const runtime = await authenticate(request);
+    const claim = await transport.claim(runtime);
     if (!claim) return response.status(204).end();
     return response.json(claim);
   });
-  router.post(relative(runtimeTransportPaths.events), (request, response) => {
-    const runtime = authenticate(request);
-    const ack = transport.ingest(runtime, json(request));
+  router.post(relative(runtimeTransportPaths.events), async (request, response) => {
+    const runtime = await authenticate(request);
+    const ack = await transport.ingest(runtime, json(request));
     response.status(ack.duplicate ? 200 : 201).json(ack);
   });
-  router.post(relative(runtimeTransportPaths.actions), (request, response) => {
-    const runtime = authenticate(request);
-    response.json(transport.requestAction(runtime, json(request)));
+  router.post(relative(runtimeTransportPaths.actions), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.requestAction(runtime, json(request)));
   });
   router.post(relative(runtimeTransportPaths.execute), async (request, response) => {
-    const runtime = authenticate(request);
+    const runtime = await authenticate(request);
     response.json(await transport.executeAction(runtime, json(request)));
   });
-  router.post(relative(runtimeTransportPaths.grant), (request, response) => {
-    const runtime = authenticate(request);
-    response.json(transport.issueGrant(runtime, json(request)));
+  router.post(relative(runtimeTransportPaths.grant), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.issueGrant(runtime, json(request)));
   });
   app.use(RUNTIME_BASE, router);
 }

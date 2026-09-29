@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { z } from 'zod';
 import type { Actor } from '@agents-foundry/contracts';
 import { jobKinds, type JobKind, type JobRecord } from '../../../../packages/contracts/src/jobs.js';
 import type { Page } from '../../../../packages/contracts/src/organization.js';
-import { OrganizationDomainError, type OrganizationStructureService } from './structure-service.js';
+import { constraintKind, type PgStore, type SqlParam } from '../db/pg-store.js';
+import {
+  OrganizationDomainError,
+  contains,
+  type OrganizationStructureService,
+} from './structure-service.js';
 
 const uuid = z.string().uuid();
 const base = z
@@ -80,7 +84,7 @@ const querySchema = z
 /** SQL identifiers come only from these static maps, never from request values. */
 export class JobArchitectureService {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: PgStore,
     private readonly security: OrganizationStructureService,
   ) {}
   private kind(value: string): JobKind {
@@ -89,127 +93,132 @@ export class JobArchitectureService {
   private columns(kind: JobKind): string {
     return [
       'id',
-      'organization_id AS organizationId',
+      'organization_id AS "organizationId"',
       'name',
       'code',
       'description',
       'status',
       'version',
-      'created_at AS createdAt',
-      'updated_at AS updatedAt',
-      ...Object.entries(extra[kind]).map(([key, column]) => `${column} AS ${key}`),
+      'created_at AS "createdAt"',
+      'updated_at AS "updatedAt"',
+      ...Object.entries(extra[kind]).map(([key, column]) => `${column} AS "${key}"`),
     ].join(',');
   }
-  private get(actor: Actor, kind: JobKind, id: string): JobRecord {
-    const row = this.db
-      .prepare(`SELECT ${this.columns(kind)} FROM ${tables[kind]} WHERE organization_id=? AND id=?`)
-      .get(actor.organizationId, id);
+  private async get(actor: Actor, kind: JobKind, id: string): Promise<JobRecord> {
+    const row = await this.db.get(
+      `SELECT ${this.columns(kind)} FROM ${tables[kind]} WHERE organization_id=? AND id=?`,
+      actor.organizationId,
+      id,
+    );
     if (!row) throw new OrganizationDomainError(404, 'JOB_RECORD_NOT_FOUND');
     return this.describeReferences(actor, kind, row as unknown as JobRecord);
   }
-  private describeReferences(actor: Actor, kind: JobKind, record: JobRecord): JobRecord {
+  private async describeReferences(
+    actor: Actor,
+    kind: JobKind,
+    record: JobRecord,
+  ): Promise<JobRecord> {
     const names: Record<string, string> = {};
     for (const key of Object.keys(extra[kind])) {
       const value = record[key as keyof JobRecord];
       if (references[key] && typeof value === 'string') {
-        const row = this.db
-          .prepare(`SELECT name FROM ${references[key]} WHERE organization_id=? AND id=?`)
-          .get(actor.organizationId, value);
+        const row = await this.db.get(
+          `SELECT name FROM ${references[key]} WHERE organization_id=? AND id=?`,
+          actor.organizationId,
+          value,
+        );
         if (row) names[key] = String(row['name']);
       }
     }
     return { ...record, referenceNames: names };
   }
-  list(actor: Actor, resource: string, query: unknown): Page<JobRecord> {
-    this.security.authorize(actor);
-    const kind = this.kind(resource),
-      input = querySchema.parse(query);
-    const where = [
-      'organization_id=?',
-      '(instr(lower(name),lower(?))>0 OR instr(lower(code),lower(?))>0)',
-    ];
-    const values: SQLInputValue[] = [actor.organizationId, input.search, input.search];
-    if (input.status !== 'all') {
-      where.push('status=?');
-      values.push(input.status);
-    }
-    const clause = where.join(' AND '),
-      order = { name: 'name COLLATE NOCASE', code: 'code', updated: 'updated_at DESC' }[input.sort];
-    const total = Number(
-      this.db.prepare(`SELECT count(*) AS n FROM ${tables[kind]} WHERE ${clause}`).get(...values)![
-        'n'
-      ],
-    );
-    const items = this.db
-      .prepare(
+  list(actor: Actor, resource: string, query: unknown): Promise<Page<JobRecord>> {
+    return this.db.tenant(actor.organizationId, async () => {
+      await this.security.authorize(actor);
+      const kind = this.kind(resource),
+        input = querySchema.parse(query);
+      const where = ['organization_id=?', `(${contains('name')} OR ${contains('code')})`];
+      const values: SqlParam[] = [actor.organizationId, input.search, input.search];
+      if (input.status !== 'all') {
+        where.push('status=?');
+        values.push(input.status);
+      }
+      const clause = where.join(' AND '),
+        order = { name: 'lower(name)', code: 'code', updated: 'updated_at DESC' }[input.sort];
+      const total = Number(
+        (await this.db.get(
+          `SELECT count(*) AS n FROM ${tables[kind]} WHERE ${clause}`,
+          ...values,
+        ))!['n'],
+      );
+      const items = (await this.db.all(
         `SELECT ${this.columns(kind)} FROM ${tables[kind]} WHERE ${clause} ORDER BY ${order},id LIMIT ? OFFSET ?`,
-      )
-      .all(...values, input.pageSize, (input.page - 1) * input.pageSize) as unknown as JobRecord[];
-    return {
-      items: items.map((record) => this.describeReferences(actor, kind, record)),
-      total,
-      page: input.page,
-      pageSize: input.pageSize,
-    };
+        ...values,
+        input.pageSize,
+        (input.page - 1) * input.pageSize,
+      )) as unknown as JobRecord[];
+      const described: JobRecord[] = [];
+      for (const record of items)
+        described.push(await this.describeReferences(actor, kind, record));
+      return { items: described, total, page: input.page, pageSize: input.pageSize };
+    });
   }
-  private transaction<T>(actor: Actor, work: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
+  private async transaction<T>(actor: Actor, work: () => Promise<T>): Promise<T> {
     try {
-      this.security.authorize(actor);
-      const result = work();
-      this.db.exec('COMMIT');
-      return result;
+      return await this.db.tenant(actor.organizationId, async () => {
+        await this.security.authorize(actor);
+        return work();
+      });
     } catch (error) {
-      this.db.exec('ROLLBACK');
       if (error instanceof OrganizationDomainError) throw error;
       if (
-        error instanceof Error &&
-        /UNIQUE constraint failed|JOB_FAMILY_MISMATCH|HIERARCHY_CYCLE/.test(error.message)
+        constraintKind(error) === 'unique' ||
+        (error instanceof Error && /JOB_FAMILY_MISMATCH|HIERARCHY_CYCLE/.test(error.message))
       )
         throw new OrganizationDomainError(409, 'JOB_DEPENDENCY_CONFLICT');
       throw error;
     }
   }
-  private audit(
+  private async audit(
     actor: Actor,
     kind: JobKind,
     id: string,
     before: JobRecord | null,
     after: JobRecord,
-  ): void {
-    this.db
-      .prepare('INSERT INTO organization_change_events VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(
-        randomUUID(),
-        actor.organizationId,
-        actor.id,
-        after.status === 'archived' ? 'JOB_ARCHIVED' : before ? 'JOB_UPDATED' : 'JOB_CREATED',
-        tables[kind],
-        id,
-        before ? JSON.stringify(before) : null,
-        JSON.stringify(after),
-        randomUUID(),
-        new Date().toISOString(),
-      );
+  ): Promise<void> {
+    await this.db.run(
+      `INSERT INTO organization_change_events (id,organization_id,actor_id,action,resource_type,resource_id,before_json,after_json,request_id,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      randomUUID(),
+      actor.organizationId,
+      actor.id,
+      after.status === 'archived' ? 'JOB_ARCHIVED' : before ? 'JOB_UPDATED' : 'JOB_CREATED',
+      tables[kind],
+      id,
+      before ? JSON.stringify(before) : null,
+      JSON.stringify(after),
+      randomUUID(),
+      new Date().toISOString(),
+    );
   }
-  save(actor: Actor, resource: string, raw: unknown, id?: string): JobRecord {
+  async save(actor: Actor, resource: string, raw: unknown, id?: string): Promise<JobRecord> {
     const kind = this.kind(resource);
     const input = (
       id ? schemas[kind].extend({ version: z.number().int().positive() }) : schemas[kind]
-    ).parse(raw) as Record<string, SQLInputValue>;
+    ).parse(raw) as Record<string, SqlParam>;
     if (id) uuid.parse(id);
-    return this.transaction(actor, () => {
-      const before = id ? this.get(actor, kind, id) : null;
+    return this.transaction(actor, async () => {
+      const before = id ? await this.get(actor, kind, id) : null;
       if (before && (before.version !== input['version'] || before.status !== 'active'))
         throw new OrganizationDomainError(409, 'JOB_VERSION_CONFLICT');
       for (const key of Object.keys(extra[kind])) {
         if (references[key] && input[key] !== null) {
           if (
-            !this.db
-              .prepare(
-                `SELECT 1 FROM ${references[key]} WHERE organization_id=? AND id=? AND status='active'`,
-              )
-              .get(actor.organizationId, input[key])
+            !(await this.db.get(
+              `SELECT 1 FROM ${references[key]} WHERE organization_id=? AND id=? AND status='active'`,
+              actor.organizationId,
+              input[key]!,
+            ))
           )
             throw new OrganizationDomainError(404, 'JOB_DEPENDENCY_NOT_FOUND');
           if (key === 'reportsToPositionId' && input[key] === id)
@@ -220,52 +229,62 @@ export class JobArchitectureService {
         timestamp = new Date().toISOString();
       const mapping = { name: 'name', code: 'code', description: 'description', ...extra[kind] };
       const columns = Object.values(mapping),
-        values = Object.keys(mapping).map((field) => input[field]);
+        values = Object.keys(mapping).map((field) => input[field] ?? null);
       if (before)
-        this.db
-          .prepare(
-            `UPDATE ${tables[kind]} SET ${columns.map((column) => `${column}=?`).join(',')},version=version+1,updated_at=?,updated_by=? WHERE organization_id=? AND id=?`,
-          )
-          .run(...values, timestamp, actor.id, actor.organizationId, key);
+        await this.db.run(
+          `UPDATE ${tables[kind]} SET ${columns.map((column) => `${column}=?`).join(',')},version=version+1,updated_at=?,updated_by=? WHERE organization_id=? AND id=?`,
+          ...values,
+          timestamp,
+          actor.id,
+          actor.organizationId,
+          key,
+        );
       else
-        this.db
-          .prepare(
-            `INSERT INTO ${tables[kind]} (id,organization_id,${columns.join(',')},created_at,updated_at,created_by,updated_by) VALUES (${Array(
-              columns.length + 6,
-            )
-              .fill('?')
-              .join(',')})`,
+        await this.db.run(
+          `INSERT INTO ${tables[kind]} (id,organization_id,${columns.join(',')},created_at,updated_at,created_by,updated_by) VALUES (${Array(
+            columns.length + 6,
           )
-          .run(key, actor.organizationId, ...values, timestamp, timestamp, actor.id, actor.id);
-      const result = this.get(actor, kind, key);
-      this.audit(actor, kind, key, before, result);
+            .fill('?')
+            .join(',')})`,
+          key,
+          actor.organizationId,
+          ...values,
+          timestamp,
+          timestamp,
+          actor.id,
+          actor.id,
+        );
+      const result = await this.get(actor, kind, key);
+      await this.audit(actor, kind, key, before, result);
       return result;
     });
   }
-  archive(actor: Actor, resource: string, id: string, version: number): void {
+  async archive(actor: Actor, resource: string, id: string, version: number): Promise<void> {
     const kind = this.kind(resource);
     uuid.parse(id);
     z.number().int().positive().parse(version);
-    this.transaction(actor, () => {
-      const before = this.get(actor, kind, id);
+    await this.transaction(actor, async () => {
+      const before = await this.get(actor, kind, id);
       if (before.version !== version || before.status !== 'active')
         throw new OrganizationDomainError(409, 'JOB_VERSION_CONFLICT');
       for (const [table, column] of dependencies[kind]) {
         if (
-          this.db
-            .prepare(
-              `SELECT 1 FROM ${table} WHERE organization_id=? AND ${column}=? AND status='active' LIMIT 1`,
-            )
-            .get(actor.organizationId, id)
+          await this.db.get(
+            `SELECT 1 FROM ${table} WHERE organization_id=? AND ${column}=? AND status='active' LIMIT 1`,
+            actor.organizationId,
+            id,
+          )
         )
           throw new OrganizationDomainError(409, 'JOB_DEPENDENCY_CONFLICT');
       }
-      this.db
-        .prepare(
-          `UPDATE ${tables[kind]} SET status='archived',version=version+1,updated_at=?,updated_by=? WHERE organization_id=? AND id=?`,
-        )
-        .run(new Date().toISOString(), actor.id, actor.organizationId, id);
-      this.audit(actor, kind, id, before, this.get(actor, kind, id));
+      await this.db.run(
+        `UPDATE ${tables[kind]} SET status='archived',version=version+1,updated_at=?,updated_by=? WHERE organization_id=? AND id=?`,
+        new Date().toISOString(),
+        actor.id,
+        actor.organizationId,
+        id,
+      );
+      await this.audit(actor, kind, id, before, await this.get(actor, kind, id));
     });
   }
 }
