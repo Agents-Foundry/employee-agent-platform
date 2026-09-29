@@ -245,6 +245,26 @@ See [ADR 0019](adr/0019-role-evaluation-suites.md).
 - Commands, installs and browser runs are recorded, not executed.
 - The runner simulates Jira and GitHub only.
 
+## Model-quality evaluations — delivered
+
+See [ADR 0020](adr/0020-model-quality-evaluations.md).
+
+- Quality tasks are catalog data: answers, a task, approved actions, simulated command and
+  browser results, a budget, weighted checks (required ones are gates), a rubric and a pass
+  threshold. Every role has one.
+- A generic runner lets a real model work each task through the real platform, then grades
+  it with deterministic checks and a grader model. Invalid or missing grades score zero.
+- Cost controls: per-task turn and token limits, one token ledger for the whole run with no
+  default, output capped at what remains, and a cost estimate from operator prices.
+- `npm run eval:quality` runs live and writes reports; offline tests cover the runner with
+  scripted models in `npm run check`.
+
+### Limitations
+
+- No live run is part of CI. Results depend on the model and the grader, and vary between runs.
+- Commands, installs and browser runs are simulated.
+- Budgets are per evaluation run, not per organization.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -271,10 +291,11 @@ locked dependencies from its configured registry
 the proxy, and Playwright grants allow 256 processes, because Chromium crashes under 64. The
 control plane now runs on PostgreSQL with row-level security
 ([ADR 0018](adr/0018-postgresql-row-level-security.md)), and roles ship with governance
-evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)). The highest-value
-follow-ups are:
+evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)) and model-quality
+tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). The highest-value follow-ups are:
 
-- model-quality evaluations: real models, graded outputs and cost controls;
+- per-organization model spending limits in the control plane;
+- a scheduled live quality run that tracks scores per model over time;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
   not change.

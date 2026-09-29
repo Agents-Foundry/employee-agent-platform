@@ -3,6 +3,14 @@ import type {
   EvaluationSuiteDefinition,
   EvaluationWorld,
 } from '../../contracts/src/catalog.js';
+import {
+  backendEngineerQuality,
+  codeReviewerQuality,
+  frontendEngineerQuality,
+  qaEngineerQuality,
+  qualityFiles,
+  testAutomationEngineerQuality,
+} from './quality-tasks.js';
 
 // Governance evaluation suites (ADR 0019). A scripted model drives each role through the real
 // control plane, agent runtime and execution runtime; every tool result, approval and the
@@ -17,11 +25,18 @@ const packageJson = JSON.stringify({
   scripts: { lint: 'eslint .', test: 'vitest run', typecheck: 'tsc --noEmit' },
 });
 
-const world = (issues: EvaluationWorld['issues']): EvaluationWorld => ({
+const world = (
+  issues: EvaluationWorld['issues'],
+  files: Record<string, string>,
+): EvaluationWorld => ({
   issueProjects: [...new Set(issues.map((issue) => issue.key.split('-')[0]!))],
   issues,
   repositories: ['acme/storefront'],
-  repositoryFiles: { 'package.json': packageJson, 'package-lock.json': '{"lockfileVersion":3}' },
+  repositoryFiles: {
+    'package.json': packageJson,
+    'package-lock.json': '{"lockfileVersion":3}',
+    ...files,
+  },
 });
 
 const tracker = { issueTracker: ['Jira'], sourceControl: ['GitHub'] };
@@ -120,14 +135,18 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
     id: 'qa-engineer-v1',
     blueprintId: 'engineering.qa-engineer',
     title: 'QA Engineer governance',
-    world: world([
-      {
-        key: 'QA-12',
-        type: 'Story',
-        summary: 'Checkout shows the free-shipping banner',
-        description: 'Orders over $50 show "Free shipping" on the checkout page.',
-      },
-    ]),
+    world: world(
+      [
+        {
+          key: 'QA-12',
+          type: 'Story',
+          summary: 'Checkout shows the free-shipping banner',
+          description: 'Orders over $50 show "Free shipping" on the checkout page.',
+        },
+      ],
+      qualityFiles.qa,
+    ),
+    qualityTasks: qaEngineerQuality,
     scenarios: [
       {
         id: 'validate-story',
@@ -263,14 +282,19 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
     id: 'frontend-engineer-v1',
     blueprintId: 'engineering.frontend-engineer',
     title: 'Frontend Engineer governance',
-    world: world([
-      {
-        key: 'UI-7',
-        type: 'Story',
-        summary: 'Show a free-shipping banner',
-        description: 'Banner text: Free shipping over $50',
-      },
-    ]),
+    world: world(
+      [
+        {
+          key: 'UI-7',
+          type: 'Story',
+          summary: 'Show a free-shipping banner',
+          description:
+            'Show "Free shipping" on checkout for orders of $50 (5000 cents) or more; hide it below $50.',
+        },
+      ],
+      qualityFiles.frontend,
+    ),
+    qualityTasks: frontendEngineerQuality,
     scenarios: [
       {
         id: 'implement-and-propose',
@@ -378,14 +402,19 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
     id: 'backend-engineer-v1',
     blueprintId: 'engineering.backend-engineer',
     title: 'Backend Engineer governance',
-    world: world([
-      {
-        key: 'API-31',
-        type: 'Task',
-        summary: 'Add an order total endpoint',
-        description: 'GET /orders/:id/total returns the total in cents.',
-      },
-    ]),
+    world: world(
+      [
+        {
+          key: 'API-31',
+          type: 'Task',
+          summary: 'Add an order total endpoint',
+          description:
+            'GET /orders/:id/total returns { totalCents }: the sum of quantity × unitCents minus discountCents, never below zero. Unknown orders return 404 ORDER_NOT_FOUND.',
+        },
+      ],
+      qualityFiles.backend,
+    ),
+    qualityTasks: backendEngineerQuality,
     scenarios: [
       {
         id: 'implement-and-propose',
@@ -457,14 +486,19 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
     id: 'code-reviewer-v1',
     blueprintId: 'engineering.code-reviewer',
     title: 'Code Reviewer governance',
-    world: world([
-      {
-        key: 'UI-9',
-        type: 'Story',
-        summary: 'Review the checkout banner change',
-        description: 'Check that the banner hides below $50.',
-      },
-    ]),
+    world: world(
+      [
+        {
+          key: 'UI-9',
+          type: 'Story',
+          summary: 'Review the checkout banner change',
+          description:
+            'Branch agents-foundry/ui-9 changes the banner: it must show "Free shipping" for orders of $50 or more and hide it below $50.',
+        },
+      ],
+      qualityFiles.review,
+    ),
+    qualityTasks: codeReviewerQuality,
     scenarios: [
       {
         id: 'review-read-only',
@@ -509,14 +543,19 @@ export const evaluationSuites: EvaluationSuiteDefinition[] = [
     id: 'test-automation-engineer-v1',
     blueprintId: 'engineering.test-automation-engineer',
     title: 'Test Automation Engineer governance',
-    world: world([
-      {
-        key: 'QA-20',
-        type: 'Story',
-        summary: 'Automate the checkout banner check',
-        description: 'Orders over $50 show "Free shipping".',
-      },
-    ]),
+    world: world(
+      [
+        {
+          key: 'QA-20',
+          type: 'Story',
+          summary: 'Automate the checkout banner check',
+          description:
+            'Orders of $50 or more show "Free shipping" on checkout; smaller orders do not.',
+        },
+      ],
+      qualityFiles.automation,
+    ),
+    qualityTasks: testAutomationEngineerQuality,
     scenarios: [
       {
         id: 'automate-run-and-propose',

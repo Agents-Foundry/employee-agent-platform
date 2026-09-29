@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import type {
   AgentBlueprintVersionDefinition,
   CatalogDefinitions,
+  EvaluationScenario,
   EvaluationSuiteDefinition,
   SkillDefinition,
   ToolDefinition,
@@ -140,8 +141,9 @@ export function resolveCatalog(
 
 /**
  * Every role version names an evaluation suite (ADR 0019). Suites must exist, belong to that
- * role, and only use workflows, answers, tools and actions that are real. They are not part
- * of any bundle, so adding or improving evaluations never changes a released version.
+ * role, and only use workflows, answers, tools and actions that are real; so must their
+ * model-quality tasks (ADR 0020). They are not part of any bundle, so adding or improving
+ * evaluations never changes a released version.
  */
 function validateEvaluations(
   definitions: CatalogDefinitions,
@@ -176,10 +178,13 @@ function validateEvaluations(
     );
     if (!versions.length) problems.push(`evaluation suite ${suite.id}: no blueprint uses it`);
     const issues = new Set(suite.world.issues.map((issue) => issue.key));
-    for (const scenario of suite.scenarios) {
-      const at = `evaluation ${suite.id}/${scenario.id}`;
-      const applicable = scenario.blueprintVersions
-        ? scenario.blueprintVersions.map((version) => {
+    // Scenarios and quality tasks are both run as an agent provisioned from their answers.
+    const checkRunnable = (
+      at: string,
+      item: Pick<EvaluationScenario, 'blueprintVersions' | 'answers' | 'task'>,
+    ) => {
+      const applicable = item.blueprintVersions
+        ? item.blueprintVersions.map((version) => {
             const found = versions.find((blueprint) => blueprint.version === version);
             if (!found) problems.push(`${at}: version ${version} does not use this suite`);
             return found;
@@ -188,17 +193,33 @@ function validateEvaluations(
       for (const blueprint of applicable) {
         if (!blueprint) continue;
         const version = `${at} on ${blueprint.version}`;
-        if (!blueprint.workflows.some((workflow) => workflow.id === scenario.task.workflow))
-          problems.push(`${version}: workflow ${scenario.task.workflow} is not in the blueprint`);
+        if (!blueprint.workflows.some((workflow) => workflow.id === item.task.workflow))
+          problems.push(`${version}: workflow ${item.task.workflow} is not in the blueprint`);
         const questions = new Map(blueprint.questionnaire.map((q) => [q.id, q]));
-        for (const answer of Object.keys(scenario.answers))
+        for (const answer of Object.keys(item.answers))
           if (!questions.has(answer)) problems.push(`${version}: unknown answer ${answer}`);
         for (const question of questions.values())
-          if (question.required && !(question.id in scenario.answers))
+          if (question.required && !(question.id in item.answers))
             problems.push(`${version}: missing required answer ${question.id}`);
       }
-      if (scenario.task.workItemKey && !issues.has(scenario.task.workItemKey))
-        problems.push(`${at}: work item ${scenario.task.workItemKey} is not in the world`);
+      if (item.task.workItemKey && !issues.has(item.task.workItemKey))
+        problems.push(`${at}: work item ${item.task.workItemKey} is not in the world`);
+    };
+    for (const task of suite.qualityTasks ?? []) {
+      const at = `quality ${suite.id}/${task.id}`;
+      checkRunnable(at, task);
+      for (const action of task.approve)
+        if (!isKnownAction(action)) problems.push(`${at}: unknown approved action ${action}`);
+      for (const check of task.checks) {
+        if ('tool' in check && !toolIds.has(check.tool))
+          problems.push(`${at}: check ${check.id} names unknown tool ${check.tool}`);
+        if ('action' in check && !isKnownAction(check.action))
+          problems.push(`${at}: check ${check.id} names unknown action ${check.action}`);
+      }
+    }
+    for (const scenario of suite.scenarios) {
+      const at = `evaluation ${suite.id}/${scenario.id}`;
+      checkRunnable(at, scenario);
       for (const step of scenario.steps) {
         if (!toolIds.has(step.tool)) problems.push(`${at}: unknown tool ${step.tool}`);
         if (step.expect.approval && !isKnownAction(step.expect.approval.action))

@@ -110,6 +110,18 @@ export interface EvaluationWorld {
   repositoryFiles: Record<string, string>;
 }
 
+/**
+ * A simulated result for a command, install or browser run. The first entry of the same
+ * operation whose `match` occurs in the operation line wins (the command line, the registry
+ * URL, or the browser project and base URL); anything unmatched is recorded as succeeded.
+ */
+export interface EvaluationExecutionResult {
+  operation: 'command' | 'dependencies.install' | 'playwright.run';
+  match: string;
+  status: 'SUCCEEDED' | 'FAILED';
+  output: string;
+}
+
 /** What one scripted tool call must produce. */
 export interface EvaluationStepExpectation {
   /** SUCCEEDED: the tool ran; FAILED: it returned an error code; NOT_AVAILABLE: not granted. */
@@ -156,6 +168,52 @@ export interface EvaluationScenario {
   };
 }
 
+/**
+ * A deterministic check on what a real model did during a quality task (ADR 0020). `required`
+ * checks are gates: the task fails if one misses, whatever the score.
+ */
+export type QualityCheck = { id: string; weight: number; required?: boolean } & (
+  | { kind: 'tool-called' | 'tool-not-called'; tool: string }
+  | { kind: 'action-executed' | 'action-not-executed'; action: string }
+  /** No governed action the model requested was denied by policy. */
+  | { kind: 'no-denials' }
+  | { kind: 'run-status'; status: 'COMPLETED' | 'CANCELLED' | 'FAILED' }
+  /** A stored artifact of this type whose content includes every string (case-insensitive). */
+  | { kind: 'artifact'; type: 'report' | 'test_report'; contains?: string[] }
+  /** A file written whose path includes `pathIncludes` and whose content includes every string. */
+  | { kind: 'file-written'; pathIncludes: string; contains?: string[] }
+);
+
+/** A criterion a grader model scores from 0 to 1 against the run's transcript. */
+export interface QualityCriterion {
+  id: string;
+  description: string;
+  weight: number;
+}
+
+/**
+ * One model-quality task (ADR 0020): a real model works the task unscripted through the real
+ * platform, within a budget; its work is then scored by deterministic checks and a rubric.
+ */
+export interface QualityTask {
+  id: string;
+  title: string;
+  /** Blueprint versions the task applies to; all versions of the role when absent. */
+  blueprintVersions?: string[];
+  answers: Record<string, string | string[]>;
+  task: EvaluationScenario['task'];
+  /** Governed actions the evaluator approves; every other approval is rejected. */
+  approve: string[];
+  /** What commands, installs and browser runs return during this task. */
+  executionResults?: EvaluationExecutionResult[];
+  /** Hard limits for the evaluated model. The run stops when one is reached. */
+  budget: { maxTurns: number; maxInputTokens: number; maxOutputTokens: number };
+  checks: QualityCheck[];
+  rubric: QualityCriterion[];
+  /** Weighted score (0 to 1) at or above which the task passes. */
+  passThreshold: number;
+}
+
 export interface EvaluationSuiteDefinition {
   id: string;
   /** The role (blueprint id) whose versions reference this suite. */
@@ -163,6 +221,8 @@ export interface EvaluationSuiteDefinition {
   title: string;
   world: EvaluationWorld;
   scenarios: EvaluationScenario[];
+  /** Model-quality tasks, run only on request with real models (ADR 0020). */
+  qualityTasks?: QualityTask[];
 }
 
 /** A blueprint version with the exact skill, tool and workflow versions it references. */
