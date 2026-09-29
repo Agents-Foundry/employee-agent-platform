@@ -129,6 +129,8 @@ Every failure returns the same `401 RUNTIME_UNAUTHENTICATED`.
 | `POST /runtime/v1/actions`         | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
 | `POST /runtime/v1/actions/execute` | `{ requestId, status: SUCCEEDED \| FAILED, result?, error? }` for control-plane-executed actions (Phase D)                                                                  |
 | `POST /runtime/v1/actions/grant`   | Signed single-use execution grant for an allowed or approved execution-runtime action (Phase E, ADR 0013)                                                                   |
+| `POST /runtime/v1/models/reserve`  | `{ reservationId, decision: ALLOWED, maxOutputTokens }` or `{ reservationId, decision: DENIED, code: MODEL_BUDGET_EXCEEDED, reason }`; before every model call (ADR 0021)   |
+| `POST /runtime/v1/models/settle`   | `{ reservationId, status: SETTLED }`; the call's provider-reported tokens, once                                                                                             |
 
 Leases (`agent_run_leases`) bind a run to one runtime and session. A queued run that never
 started can be reclaimed after 10 minutes. An undelivered command is redelivered to its holder
