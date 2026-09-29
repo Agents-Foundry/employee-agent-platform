@@ -20,6 +20,8 @@ Implemented, meaning data model, validation, persistence, authorization, API, ad
 - Organization installations: create, update, retire, admin panel, and change events.
 - Admin agent creation from an installation.
 - A generic manifest resolver with no role-specific code (ADR 0009).
+- Governance evaluation suites for every role, run by a generic runner through the real
+  platform ([ADR 0019](adr/0019-role-evaluation-suites.md)).
 
 Not implemented yet:
 
@@ -40,6 +42,7 @@ so role-package repositories can validate against the same contract.
 | Skill     | `id`, `version`, `requires.tools`, `requires.connectorCapabilities`, `activatesWhen.workflows`                                                                                                                                                                                         |
 | Tool      | `id`, `version`, `risk`, `executionLocation`, `sideEffects`, `governedActions`, `timeoutMs`                                                                                                                                                                                            |
 | Workflow  | `id`, `version`, `steps[]` of `{ id, title, skill, action? }`                                                                                                                                                                                                                          |
+| Suite     | `id`, `blueprintId`, `world` (issues, repositories, checkout files), `scenarios[]` of answers, task, scripted tool calls with expected results and approvals, offered tools, final run status, executed actions (ADR 0019)                                                             |
 | Blueprint | Identity, persona, runtime, model profile, pinned skill/tool/workflow versions, connector requirements with answer→provider mappings, conditional MCP, memory, knowledge, `policy.actions`, evaluation suite, and a questionnaire whose questions are scoped `INSTALLATION` or `AGENT` |
 
 Blueprints list the **actions** a role may ever request. The **outcome** of each action
@@ -58,6 +61,12 @@ never from catalog data. A catalog can't grant itself permission.
 - A policy action is unknown to the policy engine.
 - A connector mapping doesn't cover every option of its question.
 - An MCP condition references an option that doesn't exist.
+- A role version names a missing evaluation suite, or another role's suite; a suite is unused.
+- A scenario uses a workflow its version doesn't have, answers unknown questions or omits
+  required ones, calls an unknown tool, or expects an unknown action.
+
+Evaluation suites are validated with the catalog but are not part of bundle digests, so adding
+or improving evaluations never changes a released role version.
 
 The API does not start with an invalid catalog.
 
@@ -108,9 +117,32 @@ cannot diverge from organization settings.
 
 ## Adding a role
 
-Add skills, tools, workflows and a blueprint as data, then add the entries to
-`packages/catalog/src/index.ts`. No platform code changes are needed. The Frontend Engineer
-(Phase G, ADR 0015) is the proof. It ships as data only and runs end to end on the same
-runtimes, and a test checks that platform code names no role outside legacy QA compatibility.
+Add skills, tools, workflows, a blueprint and its evaluation suite as data, then add the
+entries to `packages/catalog/src/index.ts`. No platform code changes are needed. The Frontend
+Engineer (Phase G, ADR 0015) was the first proof. The Backend Engineer, Code Reviewer and
+Test Automation Engineer followed as data only (ADR 0019). A test checks that platform code
+names no catalog role, workflow or suite outside legacy QA compatibility.
+
+Change a released role only by adding a new version. Shared skills change the same way: the
+new roles pin `change-scoping` and `change-proposal` 1.1.0, while released roles keep 1.0.0.
+
+### Evaluation suites
+
+Every role version names a suite (`evaluations.suite`) for that role. `npm run test:evals` runs
+every scenario on every version it applies to, through the real control plane, agent runtime
+and execution runtime with a scripted model. A scenario lists tool calls and, for each call,
+what must happen:
+
+| Expectation     | Meaning                                                                        |
+| --------------- | ------------------------------------------------------------------------------ |
+| `SUCCEEDED`     | The tool ran; `contains` checks its output                                     |
+| `FAILED` + code | The tool returned that error, for example `ACTION_DENIED` out of scope         |
+| `NOT_AVAILABLE` | The role is not granted the tool                                               |
+| `approval`      | The call pauses for this governed action; the evaluator approves or rejects it |
+
+The scenario also names the tools the model must be offered, the final run status, and the
+control-plane actions that executed (reached an external system). Commands, installs and
+browser runs are recorded, not executed: these are governance evaluations, not model-quality
+evaluations.
 A new governed action still needs a policy-engine decision, and a new capability (a connector
 or an execution operation) needs platform support first, by design.

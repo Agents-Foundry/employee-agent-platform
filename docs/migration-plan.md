@@ -224,6 +224,27 @@ See [ADR 0018](adr/0018-postgresql-row-level-security.md).
   closed until restart.
 - Timestamps and JSON stay text columns.
 
+## Roles as catalog data, with evaluation suites — delivered
+
+See [ADR 0019](adr/0019-role-evaluation-suites.md).
+
+- Evaluation suites are catalog data, and every role version must name one for its role.
+- A generic runner plays each scenario through the real control plane, agent runtime and
+  execution runtime with a scripted model. It checks each tool result, each approval, the
+  offered tools, the final run and the external actions that executed.
+- Three new roles, as data only:
+  - Backend Engineer 1.0.0;
+  - Code Reviewer 1.0.0, least privilege: no editing or source-control tools, no writes;
+  - Test Automation Engineer 1.0.0.
+- 14 scenarios cover all seven role versions: approvals granted and rejected, scope limits,
+  unavailable tools, and version differences. `npm run test:evals` runs them alone.
+
+### Limitations
+
+- They evaluate governance and role wiring, not model quality.
+- Commands, installs and browser runs are recorded, not executed.
+- The runner simulates Jira and GitHub only.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -249,9 +270,11 @@ locked dependencies from its configured registry
 ([ADR 0017](adr/0017-dependency-installation.md)). An opt-in check runs real Chromium behind
 the proxy, and Playwright grants allow 256 processes, because Chromium crashes under 64. The
 control plane now runs on PostgreSQL with row-level security
-([ADR 0018](adr/0018-postgresql-row-level-security.md)). The highest-value follow-ups are:
+([ADR 0018](adr/0018-postgresql-row-level-security.md)), and roles ship with governance
+evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)). The highest-value
+follow-ups are:
 
-- more roles as catalog data, with evaluation suites;
+- model-quality evaluations: real models, graded outputs and cost controls;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
   not change.
