@@ -88,4 +88,5 @@ export const skills: SkillDefinition[] = [
     requires: { tools: ['source-control'], connectorCapabilities: ['sourceControl.write'] },
     activatesWhen: { workflows: ['implement-ui-change'] },
   },
+
 ];

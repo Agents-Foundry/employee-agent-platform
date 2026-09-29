@@ -3,6 +3,7 @@
 import type { CatalogDefinitions } from '../../contracts/src/catalog.js';
 import { frontendEngineer, frontendEngineerV1_1 } from './blueprints/frontend-engineer.js';
 import { qaEngineer, qaEngineerV1_2 } from './blueprints/qa-engineer.js';
+import { evaluationSuites } from './evaluations.js';
 import { skills } from './skills.js';
 import { tools } from './tools.js';
 import { workflows } from './workflows.js';
@@ -12,4 +13,5 @@ export const builtInCatalog: CatalogDefinitions = {
   tools,
   workflows,
   blueprints: [qaEngineer, qaEngineerV1_2, frontendEngineer, frontendEngineerV1_1],
+  evaluationSuites,
 };
