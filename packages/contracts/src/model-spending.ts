@@ -13,20 +13,52 @@ export interface OrganizationModelBudget {
   monthlyCostLimitMicros: number | null;
   /** Cost one run may incur, in micros. */
   runCostLimitMicros: number | null;
+  /**
+   * Percentages (1-99) of the monthly token and cost limits at which administrators are
+   * alerted (ADR 0023). Reaching a limit always raises an alert.
+   */
+  alertThresholdsPercent: number[];
   /** Optimistic concurrency; 0 until the organization first sets a budget. */
   version: number;
   updatedBy: string | null;
   updatedAt: string | null;
 }
 
-/** `PUT /api/organization/model-budget`. Omitted currency and cost fields stay as they are. */
+/** `PUT /api/organization/model-budget`. Omitted optional fields stay as they are. */
 export interface OrganizationModelBudgetInput {
   monthlyTokenLimit: number | null;
   runTokenLimit: number | null;
   currency?: string;
   monthlyCostLimitMicros?: number | null;
   runCostLimitMicros?: number | null;
+  alertThresholdsPercent?: number[];
   version: number;
+}
+
+/**
+ * Raised once per month, monthly limit and threshold when charged usage reaches the threshold
+ * (ADR 0023). A threshold of 100 means the limit is reached.
+ */
+export interface ModelBudgetAlert {
+  id: string;
+  /** UTC calendar month, `YYYY-MM`. */
+  period: string;
+  scope: 'MONTHLY_TOKENS' | 'MONTHLY_COST';
+  thresholdPercent: number;
+  /** The limit when the alert was raised: tokens, or micros of `currency`. */
+  limit: number;
+  /** Charged usage when the alert was raised, in the limit's unit. */
+  charged: number;
+  /** Cost alerts only. */
+  currency: string | null;
+  createdAt: string;
+  acknowledgedBy: string | null;
+  acknowledgedAt: string | null;
+}
+
+export interface ModelBudgetAlertList {
+  period: string;
+  alerts: ModelBudgetAlert[];
 }
 
 /** A model's current price, per million tokens, in micros of the organization's currency. */

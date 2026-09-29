@@ -8,6 +8,8 @@ import request from 'supertest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type {
   Actor,
+  ModelBudgetAlert,
+  ModelBudgetAlertList,
   ModelPrice,
   ModelPriceBook,
   ModelUsageReport,
@@ -430,6 +432,131 @@ describe('model spending at the runtime transport', () => {
     );
   });
 
+  const alerts = () =>
+    rawSql(db)
+      .prepare(
+        'SELECT scope, threshold_percent, limit_value, charged_value, currency FROM model_budget_alerts ORDER BY seq',
+      )
+      .all();
+  const thresholds = (value: string) =>
+    rawSql(db)
+      .prepare('UPDATE organization_model_budgets SET alert_thresholds=?::smallint[]')
+      .run(value);
+
+  it('raises each monthly alert once, as charged usage reaches its threshold', async () => {
+    await budget(10_000, null);
+    await thresholds('{50,80}');
+    const correlation = await runningRun();
+    await reserve(correlation, 1000, 3000); // 40%
+    expect(await alerts()).toEqual([]);
+    const second = await reserve(correlation, 1000, 1000); // 60%
+    await settle(correlation, second.reservationId, 1000, 1000).expect(200);
+    await reserve(correlation, 1000, 1000); // 80%
+    expect((await reserve(correlation, 10, 4096)).maxOutputTokens).toBe(1990); // 100%
+    expect(await reserve(correlation, 10, 4096)).toMatchObject({ decision: 'DENIED' });
+    expect(await alerts()).toEqual([
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 50,
+        limit_value: 10_000,
+        charged_value: 6000,
+        currency: null,
+      },
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 80,
+        limit_value: 10_000,
+        charged_value: 8000,
+        currency: null,
+      },
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 100,
+        limit_value: 10_000,
+        charged_value: 10_000,
+        currency: null,
+      },
+    ]);
+    const audit = await rawSql(db)
+      .prepare("SELECT actor_id, metadata FROM audit_events WHERE event_type='model.budget.alert'")
+      .all<{ actor_id: string; metadata: string }>();
+    expect(audit.map((row) => [row.actor_id, JSON.parse(row.metadata).thresholdPercent])).toEqual([
+      ['runtime-a', 50],
+      ['runtime-a', 80],
+      ['runtime-a', 100],
+    ]);
+  });
+
+  it('alerts a monthly limit as reached when it refuses a call, and never for per-run limits', async () => {
+    await budget(6000, 100_000);
+    const correlation = await runningRun();
+    await reserve(correlation, 1000, 4096); // 84.9%: the default 80% threshold
+    expect(await reserve(correlation, 5000, 4096)).toMatchObject({ decision: 'DENIED' });
+    expect(await alerts()).toEqual([
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 80,
+        limit_value: 6000,
+        charged_value: 5096,
+        currency: null,
+      },
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 100,
+        limit_value: 6000,
+        charged_value: 5096,
+        currency: null,
+      },
+    ]);
+    await rawSql(db)
+      .prepare('UPDATE organization_model_budgets SET monthly_token_limit=NULL, run_token_limit=10')
+      .run();
+    expect(await reserve(correlation, 5000, 4096)).toMatchObject({ decision: 'DENIED' });
+    expect(await alerts()).toHaveLength(2);
+  });
+
+  it('alerts on the monthly cost limit in its currency', async () => {
+    await price(1_000_000, 1_000_000);
+    await budget(null, null, { monthly: 10_000 });
+    const correlation = await runningRun();
+    await reserve(correlation, 1000, 7000);
+    expect(await alerts()).toEqual([
+      {
+        scope: 'MONTHLY_COST',
+        threshold_percent: 80,
+        limit_value: 10_000,
+        charged_value: 8000,
+        currency: 'USD',
+      },
+    ]);
+  });
+
+  it('alerts when an admin lowers a limit below what the month has used', async () => {
+    const correlation = await runningRun();
+    await reserve(correlation, 1000, 4000);
+    db.structure.authorize = async () => undefined;
+    await db.modelSpending.setBudget(
+      { id: 'admin_demo', organizationId: org, role: 'ADMIN' },
+      { monthlyTokenLimit: 5000, runTokenLimit: null, alertThresholdsPercent: [90], version: 0 },
+    );
+    expect(await alerts()).toEqual([
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 90,
+        limit_value: 5000,
+        charged_value: 5000,
+        currency: null,
+      },
+      {
+        scope: 'MONTHLY_TOKENS',
+        threshold_percent: 100,
+        limit_value: 5000,
+        charged_value: 5000,
+        currency: null,
+      },
+    ]);
+  });
+
   it('reports usage by agent and model for the month', async () => {
     await budget(100_000, null);
     const correlation = await runningRun();
@@ -538,6 +665,7 @@ describe('model budget administration', () => {
       currency: 'USD',
       monthlyCostLimitMicros: null,
       runCostLimitMicros: null,
+      alertThresholdsPercent: [80],
       version: 0,
       updatedBy: null,
       updatedAt: null,
@@ -769,6 +897,87 @@ describe('model budget administration', () => {
       }).expect(200)
     ).body as OrganizationModelBudget;
     expect(cleared).toMatchObject({ monthlyCostLimitMicros: null, runCostLimitMicros: null });
+  });
+
+  it('sets alert thresholds, keeping them when a client omits them', async () => {
+    const put = (body: object, version: number) =>
+      call('put', '/api/organization/model-budget', admin, {
+        monthlyTokenLimit: 1000,
+        runTokenLimit: null,
+        version,
+        ...body,
+      });
+    expect((await put({}, 0).expect(200)).body).toMatchObject({ alertThresholdsPercent: [80] });
+    expect((await put({ alertThresholdsPercent: [50, 90] }, 1).expect(200)).body).toMatchObject({
+      alertThresholdsPercent: [50, 90],
+    });
+    expect((await put({}, 2).expect(200)).body).toMatchObject({ alertThresholdsPercent: [50, 90] });
+    expect((await put({ alertThresholdsPercent: [] }, 3).expect(200)).body).toMatchObject({
+      alertThresholdsPercent: [],
+    });
+    for (const alertThresholdsPercent of [[0], [100], [50, 50], [10, 20, 30, 40, 50, 60], [5.5]])
+      await put({ alertThresholdsPercent }, 4).expect(400);
+  });
+
+  it('lists and acknowledges alerts once, for admins of the organization only', async () => {
+    const period = new Date().toISOString().slice(0, 7);
+    const alert = (organizationId: string) => {
+      const id = randomUUID();
+      return rawSql(db)
+        .prepare(
+          `INSERT INTO model_budget_alerts (id,organization_id,period,scope,threshold_percent,limit_value,charged_value,created_at)
+           VALUES (?,?,?,'MONTHLY_TOKENS',80,1000,800,?)`,
+        )
+        .run(id, organizationId, period, new Date().toISOString())
+        .then(() => id);
+    };
+    const id = await alert(admin.organizationId);
+    const theirs = await alert(otherAdmin.organizationId);
+    const list = (await call('get', '/api/organization/model-alerts', admin).expect(200))
+      .body as ModelBudgetAlertList;
+    expect(list).toEqual({
+      period,
+      alerts: [
+        expect.objectContaining({
+          id,
+          scope: 'MONTHLY_TOKENS',
+          thresholdPercent: 80,
+          limit: 1000,
+          charged: 800,
+          currency: null,
+          acknowledgedBy: null,
+        }),
+      ],
+    });
+    await call('get', '/api/organization/model-alerts?period=2001-01', admin).expect(200, {
+      period: '2001-01',
+      alerts: [],
+    });
+    await call('get', '/api/organization/model-alerts', employee).expect(403);
+    await call('post', `/api/organization/model-alerts/${id}/acknowledge`, employee).expect(403);
+    await call('post', `/api/organization/model-alerts/${theirs}/acknowledge`, admin).expect(404);
+    await call('post', '/api/organization/model-alerts/not-a-uuid/acknowledge', admin).expect(400);
+    const acknowledged = (
+      await call('post', `/api/organization/model-alerts/${id}/acknowledge`, admin).expect(200)
+    ).body as ModelBudgetAlert;
+    expect(acknowledged).toMatchObject({ id, acknowledgedBy: admin.id });
+    await call('post', `/api/organization/model-alerts/${id}/acknowledge`, admin).expect(409, {
+      error: 'MODEL_BUDGET_ALERT_ACKNOWLEDGED',
+    });
+    const sql = rawSql(db);
+    await expect(
+      sql.prepare('UPDATE model_budget_alerts SET charged_value=0 WHERE id=?').run(theirs),
+    ).rejects.toThrow('MODEL_BUDGET_ALERT_IMMUTABLE');
+    await expect(
+      sql
+        .prepare(
+          'UPDATE model_budget_alerts SET acknowledged_at=NULL, acknowledged_by=NULL WHERE id=?',
+        )
+        .run(id),
+    ).rejects.toThrow('MODEL_BUDGET_ALERT_IMMUTABLE');
+    await expect(sql.prepare('DELETE FROM model_budget_alerts').run()).rejects.toThrow(
+      'MODEL_BUDGET_ALERT_IMMUTABLE',
+    );
   });
 
   it('is not served outside password mode', async () => {
