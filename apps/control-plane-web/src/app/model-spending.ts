@@ -1,14 +1,26 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
-import { DecimalPipe } from '@angular/common';
+import { CurrencyPipe, DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
-import type { ModelUsageReport, OrganizationModelBudget } from '@agents-foundry/contracts';
+import type {
+  ModelPrice,
+  ModelPriceBook,
+  ModelUsageReport,
+  OrganizationModelBudget,
+} from '@agents-foundry/contracts';
 import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session';
 
+const MICROS = 1_000_000;
+/** Currency amounts are entered in whole units and sent in micros. */
+const toMicros = (value: number | null) =>
+  value === null || (value as unknown) === '' ? null : Math.round(Number(value) * MICROS);
+const fromMicros = (value: number | null) => (value === null ? null : value / MICROS);
+
 /**
- * Model spending limits (ADR 0021): the organization's monthly and per-run token limits, and
- * this month's usage. The runtime makes no model call the limits do not allow.
+ * Model spending limits (ADRs 0021 and 0022): the organization's token and cost limits, the
+ * prices its cost is counted at, and this month's usage. The runtime makes no model call the
+ * limits do not allow.
  */
 @Component({
   selector: 'af-model-spending',
@@ -18,8 +30,9 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
       <h2 id="spending-heading">Model spending</h2>
       <p>
         Every model call an agent makes is reserved against these limits first. When a limit is
-        reached, calls stop and the run fails. Limits are in tokens (input and output) as the model
-        provider reports them; months are UTC calendar months.
+        reached, calls stop and the run fails. Tokens (input and output) are as the model provider
+        reports them. Cost is counted at the prices you set below, not from provider bills; months
+        are UTC calendar months.
       </p>
       @if (error()) {
         <p role="alert">{{ error() }}</p>
@@ -30,14 +43,29 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
       @if (usage(); as report) {
         <div class="summary">
           <article>
-            <span>Used in {{ report.period }}</span>
+            <span>Tokens used in {{ report.period }}</span>
             <strong>{{ report.chargedTokens | number }}</strong>
             <small>
               @if (report.budget.monthlyTokenLimit !== null) {
                 of {{ report.budget.monthlyTokenLimit | number }} ·
                 {{ report.remainingTokens | number }} left
               } @else {
-                No monthly limit
+                No monthly token limit
+              }
+            </small>
+          </article>
+          <article>
+            <span>Cost in {{ report.period }}</span>
+            <strong>{{ money(report.chargedCostMicros) }}</strong>
+            <small>
+              @if (report.budget.monthlyCostLimitMicros !== null) {
+                of {{ money(report.budget.monthlyCostLimitMicros) }} ·
+                {{ money(report.remainingCostMicros) }} left
+              } @else {
+                No monthly cost limit
+              }
+              @if (report.unpricedCalls) {
+                · {{ report.unpricedCalls | number }} calls without a price not included
               }
             </small>
           </article>
@@ -57,14 +85,20 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
           @for (row of report.byAgent; track row.agentId) {
             <p class="row">
               <span>{{ row.agentId }}</span
-              ><small>{{ row.chargedTokens | number }} tokens · {{ row.calls }} calls</small>
+              ><small
+                >{{ row.chargedTokens | number }} tokens · {{ money(row.chargedCostMicros) }} ·
+                {{ row.calls }} calls</small
+              >
             </p>
           }
           <h3>By model</h3>
           @for (row of report.byModel; track row.provider + row.model) {
             <p class="row">
               <span>{{ row.provider }} · {{ row.model }}</span
-              ><small>{{ row.chargedTokens | number }} tokens · {{ row.calls }} calls</small>
+              ><small
+                >{{ row.chargedTokens | number }} tokens · {{ money(row.chargedCostMicros) }} ·
+                {{ row.calls }} calls</small
+              >
             </p>
           }
         }
@@ -90,10 +124,103 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
             [(ngModel)]="perRun"
             placeholder="No limit"
             [disabled]="busy()"
-          /><small>Leave a field empty for no limit.</small></label
+        /></label>
+        <label
+          >Currency<input
+            name="currency"
+            required
+            pattern="[A-Z]{3}"
+            maxlength="3"
+            [(ngModel)]="currency"
+            [disabled]="busy() || prices().length > 0"
+          /><small>ISO 4217 code, such as USD. It can't change once a price is set.</small></label
+        >
+        <label
+          >Monthly cost limit<input
+            name="monthlyCost"
+            type="number"
+            min="0.000001"
+            step="any"
+            [(ngModel)]="monthlyCost"
+            placeholder="No limit"
+            [disabled]="busy()"
+        /></label>
+        <label
+          >Per-run cost limit<input
+            name="perRunCost"
+            type="number"
+            min="0.000001"
+            step="any"
+            [(ngModel)]="perRunCost"
+            placeholder="No limit"
+            [disabled]="busy()"
+          /><small
+            >Leave a field empty for no limit. With a cost limit set, models without a price can't
+            be called.</small
+          ></label
         >
         <button type="submit" [disabled]="busy() || loading() || !budgetForm.valid">
           {{ busy() ? 'Saving…' : 'Save limits' }}
+        </button>
+      </form>
+      <h3>Model prices</h3>
+      <p>
+        Prices per million tokens, in {{ usage()?.budget?.currency ?? currency }}. Each call is
+        costed at the price in effect when it was reserved.
+      </p>
+      @for (price of prices(); track price.priceId) {
+        <p class="row">
+          <span>{{ price.provider }} · {{ price.model }}</span
+          ><small
+            >{{ money(price.inputMicrosPerMillionTokens) }} in ·
+            {{ money(price.outputMicrosPerMillionTokens) }} out
+            <button type="button" (click)="edit(price)" [disabled]="busy()">Edit</button>
+            <button type="button" (click)="remove(price)" [disabled]="busy()">Remove</button></small
+          >
+        </p>
+      } @empty {
+        <p>No prices yet.</p>
+      }
+      <form #priceForm="ngForm" (ngSubmit)="priceForm.valid && savePrice()">
+        <label
+          >Provider<input
+            name="provider"
+            required
+            pattern="[a-zA-Z0-9._\\-]{1,80}"
+            [(ngModel)]="draft.provider"
+            placeholder="anthropic"
+            [disabled]="busy()"
+        /></label>
+        <label
+          >Model<input
+            name="model"
+            required
+            pattern="[a-zA-Z0-9._:/\\-]{1,160}"
+            [(ngModel)]="draft.model"
+            [disabled]="busy()"
+        /></label>
+        <label
+          >Input price per million tokens<input
+            name="inputPrice"
+            type="number"
+            required
+            min="0"
+            step="any"
+            [(ngModel)]="draft.input"
+            [disabled]="busy()"
+        /></label>
+        <label
+          >Output price per million tokens<input
+            name="outputPrice"
+            type="number"
+            required
+            min="0"
+            step="any"
+            [(ngModel)]="draft.output"
+            [disabled]="busy()"
+        /></label>
+        <button type="submit" [disabled]="busy() || loading() || !priceForm.valid">
+          Save price
         </button>
       </form>
     </section>
@@ -166,6 +293,10 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
         color: #254c7c;
         cursor: pointer;
       }
+      .row button {
+        margin-left: 8px;
+        padding: 4px 10px;
+      }
       button:disabled {
         opacity: 0.5;
         cursor: not-allowed;
@@ -180,17 +311,35 @@ import { AuthSession, API_URL } from '../../../../packages/web-auth/src/session'
 export class ModelSpending implements OnInit {
   readonly auth = inject(AuthSession);
   private readonly http = inject(HttpClient);
+  private readonly currencyPipe = new CurrencyPipe('en-US');
   readonly usage = signal<ModelUsageReport | null>(null);
+  readonly prices = signal<ModelPrice[]>([]);
   readonly busy = signal(false);
   readonly loading = signal(false);
   readonly error = signal('');
   readonly notice = signal('');
   monthly: number | null = null;
   perRun: number | null = null;
+  currency = 'USD';
+  monthlyCost: number | null = null;
+  perRunCost: number | null = null;
+  draft: { provider: string; model: string; input: number | null; output: number | null } = {
+    provider: '',
+    model: '',
+    input: null,
+    output: null,
+  };
   private version = 0;
 
   ngOnInit() {
     if (this.auth.config()?.mode === 'password') void this.refresh();
+  }
+
+  /** An amount in micros, in the organization's currency, to the micro when it is small. */
+  money(micros: number | null) {
+    if (micros === null) return '';
+    const code = this.usage()?.budget.currency ?? this.currency;
+    return this.currencyPipe.transform(micros / MICROS, code, 'symbol', '1.2-6') ?? '';
   }
 
   async refresh() {
@@ -198,10 +347,12 @@ export class ModelSpending implements OnInit {
     this.loading.set(true);
     this.error.set('');
     try {
-      const report = await firstValueFrom(
-        this.http.get<ModelUsageReport>(`${API_URL}/organization/model-usage`),
-      );
+      const [report, book] = await Promise.all([
+        firstValueFrom(this.http.get<ModelUsageReport>(`${API_URL}/organization/model-usage`)),
+        firstValueFrom(this.http.get<ModelPriceBook>(`${API_URL}/organization/model-prices`)),
+      ]);
       this.usage.set(report);
+      this.prices.set(book.prices);
       this.apply(report.budget);
     } catch {
       this.error.set('Could not load model spending. Refresh and try again.');
@@ -211,27 +362,84 @@ export class ModelSpending implements OnInit {
   }
 
   async save() {
-    if (this.busy()) return;
     const limit = (value: number | null) =>
       value === null || (value as unknown) === '' ? null : Math.floor(Number(value));
+    await this.submit(
+      async () => {
+        const budget = await firstValueFrom(
+          this.http.put<OrganizationModelBudget>(`${API_URL}/organization/model-budget`, {
+            monthlyTokenLimit: limit(this.monthly),
+            runTokenLimit: limit(this.perRun),
+            currency: this.currency,
+            monthlyCostLimitMicros: toMicros(this.monthlyCost),
+            runCostLimitMicros: toMicros(this.perRunCost),
+            version: this.version,
+          }),
+        );
+        this.apply(budget);
+      },
+      'Model spending limits saved.',
+      'The limits were not saved. Use amounts above zero; someone may have changed them, so refresh and try again.',
+    );
+  }
+
+  edit(price: ModelPrice) {
+    this.draft = {
+      provider: price.provider,
+      model: price.model,
+      input: fromMicros(price.inputMicrosPerMillionTokens),
+      output: fromMicros(price.outputMicrosPerMillionTokens),
+    };
+  }
+
+  async savePrice() {
+    const { provider, model } = this.draft;
+    // Replacing the price the page shows; a price someone else changed meanwhile is a conflict.
+    const current = this.prices().find((p) => p.provider === provider && p.model === model);
+    await this.submit(
+      async () => {
+        await firstValueFrom(
+          this.http.put<ModelPrice>(`${API_URL}/organization/model-prices`, {
+            provider,
+            model,
+            inputMicrosPerMillionTokens: toMicros(this.draft.input),
+            outputMicrosPerMillionTokens: toMicros(this.draft.output),
+            expectedPriceId: current?.priceId ?? null,
+          }),
+        );
+        this.draft = { provider: '', model: '', input: null, output: null };
+      },
+      `Price for ${model} saved.`,
+      'The price was not saved. Check the provider, model and amounts; someone may have changed it, so refresh and try again.',
+    );
+  }
+
+  async remove(price: ModelPrice) {
+    await this.submit(
+      () =>
+        firstValueFrom(
+          this.http.post<void>(`${API_URL}/organization/model-prices/remove`, {
+            provider: price.provider,
+            model: price.model,
+            expectedPriceId: price.priceId,
+          }),
+        ),
+      `Price for ${price.model} removed.`,
+      'The price was not removed. Someone may have changed it, so refresh and try again.',
+    );
+  }
+
+  private async submit(work: () => Promise<unknown>, success: string, failure: string) {
+    if (this.busy()) return;
     this.busy.set(true);
     this.error.set('');
     this.notice.set('');
     try {
-      const budget = await firstValueFrom(
-        this.http.put<OrganizationModelBudget>(`${API_URL}/organization/model-budget`, {
-          monthlyTokenLimit: limit(this.monthly),
-          runTokenLimit: limit(this.perRun),
-          version: this.version,
-        }),
-      );
-      this.apply(budget);
-      this.notice.set('Model spending limits saved.');
+      await work();
+      this.notice.set(success);
       await this.refresh();
     } catch {
-      this.error.set(
-        'The limits were not saved. Use whole numbers above zero; someone may have changed them, so refresh and try again.',
-      );
+      this.error.set(failure);
     } finally {
       this.busy.set(false);
     }
@@ -241,5 +449,8 @@ export class ModelSpending implements OnInit {
     this.version = budget.version;
     this.monthly = budget.monthlyTokenLimit;
     this.perRun = budget.runTokenLimit;
+    this.currency = budget.currency;
+    this.monthlyCost = fromMicros(budget.monthlyCostLimitMicros);
+    this.perRunCost = fromMicros(budget.runCostLimitMicros);
   }
 }
