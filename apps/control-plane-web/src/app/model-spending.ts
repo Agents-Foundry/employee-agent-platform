@@ -4,6 +4,8 @@ import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import type {
+  ModelBudgetAlert,
+  ModelBudgetAlertList,
   ModelPrice,
   ModelPriceBook,
   ModelUsageReport,
@@ -18,9 +20,9 @@ const toMicros = (value: number | null) =>
 const fromMicros = (value: number | null) => (value === null ? null : value / MICROS);
 
 /**
- * Model spending limits (ADRs 0021 and 0022): the organization's token and cost limits, the
- * prices its cost is counted at, and this month's usage. The runtime makes no model call the
- * limits do not allow.
+ * Model spending limits (ADRs 0021 to 0023): the organization's token and cost limits, the
+ * prices its cost is counted at, this month's usage and its alerts. The runtime makes no model
+ * call the limits do not allow.
  */
 @Component({
   selector: 'af-model-spending',
@@ -39,6 +41,21 @@ const fromMicros = (value: number | null) => (value === null ? null : value / MI
       }
       @if (notice()) {
         <p role="status">{{ notice() }}</p>
+      }
+      @for (alert of alerts(); track alert.id) {
+        <p class="alert" [class.acknowledged]="alert.acknowledgedAt">
+          <span>
+            {{ describe(alert) }}
+            @if (alert.acknowledgedAt) {
+              <small>Acknowledged</small>
+            }
+          </span>
+          @if (!alert.acknowledgedAt) {
+            <button type="button" (click)="acknowledge(alert)" [disabled]="busy()">
+              Acknowledge
+            </button>
+          }
+        </p>
       }
       @if (usage(); as report) {
         <div class="summary">
@@ -157,6 +174,18 @@ const fromMicros = (value: number | null) => (value === null ? null : value / MI
           /><small
             >Leave a field empty for no limit. With a cost limit set, models without a price can't
             be called.</small
+          ></label
+        >
+        <label
+          >Alert at (% of the monthly limits)<input
+            name="thresholds"
+            pattern="\\s*([1-9][0-9]?\\s*(,\\s*[1-9][0-9]?\\s*){0,4})?"
+            [(ngModel)]="thresholds"
+            placeholder="80, 95"
+            [disabled]="busy()"
+          /><small
+            >Up to five percentages from 1 to 99, separated by commas. Reaching a monthly limit
+            always alerts. Alerts appear here; they are not emailed.</small
           ></label
         >
         <button type="submit" [disabled]="busy() || loading() || !budgetForm.valid">
@@ -293,6 +322,25 @@ const fromMicros = (value: number | null) => (value === null ? null : value / MI
         color: #254c7c;
         cursor: pointer;
       }
+      .alert {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 10px;
+        padding: 10px 14px;
+        border: 1px solid #e8c77a;
+        border-radius: 10px;
+        background: #fff8e6;
+      }
+      .alert.acknowledged {
+        border-color: #e0e7f0;
+        background: white;
+      }
+      .alert small {
+        margin-left: 8px;
+      }
       .row button {
         margin-left: 8px;
         padding: 4px 10px;
@@ -314,6 +362,7 @@ export class ModelSpending implements OnInit {
   private readonly currencyPipe = new CurrencyPipe('en-US');
   readonly usage = signal<ModelUsageReport | null>(null);
   readonly prices = signal<ModelPrice[]>([]);
+  readonly alerts = signal<ModelBudgetAlert[]>([]);
   readonly busy = signal(false);
   readonly loading = signal(false);
   readonly error = signal('');
@@ -323,6 +372,7 @@ export class ModelSpending implements OnInit {
   currency = 'USD';
   monthlyCost: number | null = null;
   perRunCost: number | null = null;
+  thresholds = '';
   draft: { provider: string; model: string; input: number | null; output: number | null } = {
     provider: '',
     model: '',
@@ -347,12 +397,14 @@ export class ModelSpending implements OnInit {
     this.loading.set(true);
     this.error.set('');
     try {
-      const [report, book] = await Promise.all([
+      const [report, book, alerts] = await Promise.all([
         firstValueFrom(this.http.get<ModelUsageReport>(`${API_URL}/organization/model-usage`)),
         firstValueFrom(this.http.get<ModelPriceBook>(`${API_URL}/organization/model-prices`)),
+        firstValueFrom(this.http.get<ModelBudgetAlertList>(`${API_URL}/organization/model-alerts`)),
       ]);
       this.usage.set(report);
       this.prices.set(book.prices);
+      this.alerts.set(alerts.alerts);
       this.apply(report.budget);
     } catch {
       this.error.set('Could not load model spending. Refresh and try again.');
@@ -373,6 +425,11 @@ export class ModelSpending implements OnInit {
             currency: this.currency,
             monthlyCostLimitMicros: toMicros(this.monthlyCost),
             runCostLimitMicros: toMicros(this.perRunCost),
+            alertThresholdsPercent: this.thresholds
+              .split(',')
+              .map((value) => value.trim())
+              .filter(Boolean)
+              .map(Number),
             version: this.version,
           }),
         );
@@ -380,6 +437,33 @@ export class ModelSpending implements OnInit {
       },
       'Model spending limits saved.',
       'The limits were not saved. Use amounts above zero; someone may have changed them, so refresh and try again.',
+    );
+  }
+
+  describe(alert: ModelBudgetAlert) {
+    const used = (value: number) =>
+      alert.scope === 'MONTHLY_COST'
+        ? this.money(value)
+        : `${value.toLocaleString('en-US')} tokens`;
+    const what = alert.scope === 'MONTHLY_COST' ? 'cost' : 'token';
+    const head =
+      alert.thresholdPercent === 100
+        ? `The monthly model ${what} limit is reached`
+        : `${alert.thresholdPercent}% of the monthly model ${what} limit is used`;
+    return `${head} (${used(alert.charged)} of ${used(alert.limit)}, ${alert.period}).`;
+  }
+
+  async acknowledge(alert: ModelBudgetAlert) {
+    await this.submit(
+      () =>
+        firstValueFrom(
+          this.http.post<ModelBudgetAlert>(
+            `${API_URL}/organization/model-alerts/${alert.id}/acknowledge`,
+            {},
+          ),
+        ),
+      'Alert acknowledged.',
+      'The alert was not acknowledged. Someone may have acknowledged it already, so refresh.',
     );
   }
 
@@ -452,5 +536,6 @@ export class ModelSpending implements OnInit {
     this.currency = budget.currency;
     this.monthlyCost = fromMicros(budget.monthlyCostLimitMicros);
     this.perRunCost = fromMicros(budget.runCostLimitMicros);
+    this.thresholds = budget.alertThresholdsPercent.join(', ');
   }
 }
