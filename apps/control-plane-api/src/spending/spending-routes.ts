@@ -3,7 +3,8 @@ import type { AuthConfig } from '../auth.js';
 import type { ModelSpendingService } from './model-spending-service.js';
 
 /**
- * Model spending administration (ADR 0021): the organization's token limits and its usage.
+ * Model spending administration (ADRs 0021 and 0022): the organization's limits, its model
+ * prices and its usage.
  * Tenant administration, so password-mode organization admins only; the tenant always comes
  * from the session.
  */
@@ -29,5 +30,15 @@ export function configureSpendingRoutes(
   router.get('/model-usage', async (req, res) =>
     res.json(await spending.usage(res.locals['actor'], req.query)),
   );
+  router.get('/model-prices', async (_req, res) =>
+    res.json(await spending.prices.list(res.locals['actor'])),
+  );
+  router.put('/model-prices', async (req, res) =>
+    res.json(await spending.prices.set(res.locals['actor'], req.body)),
+  );
+  router.post('/model-prices/remove', async (req, res) => {
+    await spending.prices.remove(res.locals['actor'], req.body);
+    res.status(204).end();
+  });
   app.use('/api/organization', router);
 }

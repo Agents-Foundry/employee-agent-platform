@@ -6,7 +6,13 @@
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { Actor, ModelUsageReport, OrganizationModelBudget } from '@agents-foundry/contracts';
+import type {
+  Actor,
+  ModelPrice,
+  ModelPriceBook,
+  ModelUsageReport,
+  OrganizationModelBudget,
+} from '@agents-foundry/contracts';
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { createApp } from '../src/app.js';
 import { hashToken, type PasswordConfig } from '../src/auth.js';
@@ -145,13 +151,43 @@ describe('model spending at the runtime transport', () => {
       inputTokens: input,
       outputTokens: output,
     });
-  const budget = (monthlyTokenLimit: number | null, runTokenLimit: number | null) =>
+  const budget = (
+    monthlyTokenLimit: number | null,
+    runTokenLimit: number | null,
+    cost: { monthly?: number; run?: number } = {},
+  ) =>
     rawSql(db)
       .prepare(
-        `INSERT INTO organization_model_budgets (organization_id,monthly_token_limit,run_token_limit,updated_by,updated_at)
-         VALUES (?,?,?,'admin_demo',?)`,
+        `INSERT INTO organization_model_budgets (organization_id,monthly_token_limit,run_token_limit,
+         monthly_cost_limit_micros,run_cost_limit_micros,updated_by,updated_at) VALUES (?,?,?,?,?,'admin_demo',?)`,
       )
-      .run(org, monthlyTokenLimit, runTokenLimit, new Date().toISOString());
+      .run(
+        org,
+        monthlyTokenLimit,
+        runTokenLimit,
+        cost.monthly ?? null,
+        cost.run ?? null,
+        new Date().toISOString(),
+      );
+  /** Sets test-model's price per million tokens in micros; null prices remove it. */
+  const price = async (input: number | null, output: number | null) => {
+    const sql = rawSql(db);
+    const latest = await sql
+      .prepare('SELECT id FROM model_prices WHERE organization_id=? ORDER BY seq DESC LIMIT 1')
+      .get<{ id: string }>(org);
+    await sql
+      .prepare(
+        `INSERT INTO model_prices (id,organization_id,provider,model,currency,input_micros_per_million,
+         output_micros_per_million,supersedes,set_by,set_at) VALUES (?,?,'test-provider','test-model','USD',?,?,?,'admin_demo',?)`,
+      )
+      .run(randomUUID(), org, input, output, latest?.id ?? null, new Date().toISOString());
+  };
+  const costs = () =>
+    rawSql(db)
+      .prepare(
+        'SELECT max_output_tokens, reserved_cost_micros, cost_micros FROM model_usage_reservations ORDER BY seq',
+      )
+      .all();
   const rows = () =>
     rawSql(db)
       .prepare(
@@ -303,9 +339,106 @@ describe('model spending at the runtime transport', () => {
     ).rejects.toThrow('MODEL_USAGE_IMMUTABLE');
   });
 
+  it("limits cost at the model's price, charging each call the price it was reserved at", async () => {
+    // $3 and $15 per million input and output tokens; $0.03 a month.
+    await price(3_000_000, 15_000_000);
+    await budget(null, null, { monthly: 30_000 });
+    const correlation = await runningRun();
+    // 1000 input tokens cost 3000 micros; the remaining 27000 buy 1800 output tokens.
+    const first = await reserve(correlation, 1000, 4096);
+    expect(first.maxOutputTokens).toBe(1800);
+    expect(await reserve(correlation, 10, 4096)).toMatchObject({
+      decision: 'DENIED',
+      code: 'MODEL_BUDGET_EXCEEDED',
+      reason: "The organization's monthly model cost limit is reached.",
+    });
+    // The price doubles while the call runs; it still settles at the price it was reserved at.
+    await price(6_000_000, 30_000_000);
+    await settle(correlation, first.reservationId, 1000, 200).expect(200);
+    // 24000 left: 6000 for the input at the new price, 18000 for 600 output tokens.
+    expect((await reserve(correlation, 1000, 4096)).maxOutputTokens).toBe(600);
+    expect(await costs()).toEqual([
+      { max_output_tokens: 1800, reserved_cost_micros: 30_000, cost_micros: 6000 },
+      { max_output_tokens: 600, reserved_cost_micros: 24_000, cost_micros: null },
+    ]);
+    const audit = await rawSql(db)
+      .prepare("SELECT metadata FROM audit_events WHERE event_type='model.budget.exceeded'")
+      .all<{ metadata: string }>();
+    expect(audit.map((row) => JSON.parse(row.metadata))).toEqual([
+      expect.objectContaining({ scope: 'MONTHLY_COST', remainingCostMicros: 0 }),
+    ]);
+  });
+
+  it('applies the per-run cost limit to each run separately', async () => {
+    await price(1_000_000, 1_000_000);
+    await budget(null, null, { run: 10_000 });
+    const a = await runningRun();
+    expect((await reserve(a, 1000, 4096)).maxOutputTokens).toBe(4096);
+    expect((await reserve(a, 1000, 4096)).maxOutputTokens).toBe(3904);
+    expect(await reserve(a, 10, 4096)).toMatchObject({
+      decision: 'DENIED',
+      reason: "This run's model cost limit is reached.",
+    });
+    const b = await runningRun();
+    expect((await reserve(b, 1000, 4096)).maxOutputTokens).toBe(4096);
+  });
+
+  it('with a cost limit, refuses models without a price; without one, records them unpriced', async () => {
+    const correlation = await runningRun();
+    const unpriced = await reserve(correlation, 100, 1000);
+    expect(unpriced.decision).toBe('ALLOWED');
+    await settle(correlation, unpriced.reservationId, 100, 100).expect(200);
+    expect(await costs()).toEqual([
+      { max_output_tokens: 1000, reserved_cost_micros: null, cost_micros: null },
+    ]);
+    await budget(null, null, { monthly: 1_000_000 });
+    const refusal = {
+      decision: 'DENIED',
+      code: 'MODEL_BUDGET_EXCEEDED',
+      reason: 'The organization limits model cost, and this model has no price.',
+    };
+    expect(await reserve(correlation, 100, 1000)).toMatchObject(refusal);
+    await price(1_000_000, 1_000_000);
+    expect(await reserve(correlation, 100, 1000)).toMatchObject({ decision: 'ALLOWED' });
+    // A removed price is no price.
+    await price(null, null);
+    expect(await reserve(correlation, 100, 1000)).toMatchObject(refusal);
+    const audit = await rawSql(db)
+      .prepare("SELECT metadata FROM audit_events WHERE event_type='model.price.unavailable'")
+      .all<{ metadata: string }>();
+    expect(audit).toHaveLength(2);
+    expect(JSON.parse(audit[0]!.metadata)).toMatchObject({ scope: 'PRICE', model: 'test-model' });
+  });
+
+  it('keeps prices and the cost of each call immutable', async () => {
+    await price(1_000_000, 2_000_000);
+    const correlation = await runningRun();
+    const { reservationId } = await reserve(correlation, 10, 100);
+    const sql = rawSql(db);
+    await expect(
+      sql.prepare('UPDATE model_usage_reservations SET reserved_cost_micros=0').run(),
+    ).rejects.toThrow('MODEL_USAGE_IMMUTABLE');
+    await settle(correlation, reservationId, 10, 10).expect(200);
+    await expect(
+      sql.prepare('UPDATE model_usage_reservations SET cost_micros=0').run(),
+    ).rejects.toThrow('MODEL_USAGE_IMMUTABLE');
+    await expect(
+      sql.prepare('UPDATE model_prices SET input_micros_per_million=0').run(),
+    ).rejects.toThrow('MODEL_PRICE_IMMUTABLE');
+    await expect(sql.prepare('DELETE FROM model_prices').run()).rejects.toThrow(
+      'MODEL_PRICE_IMMUTABLE',
+    );
+  });
+
   it('reports usage by agent and model for the month', async () => {
     await budget(100_000, null);
     const correlation = await runningRun();
+    const unpriced = await reserve(correlation, 1, 1000);
+    await settle(correlation, unpriced.reservationId, 0, 0).expect(200);
+    await price(2_000_000, 10_000_000);
+    await rawSql(db)
+      .prepare('UPDATE organization_model_budgets SET monthly_cost_limit_micros=50000')
+      .run();
     const settled = await reserve(correlation, 1000, 2000);
     await settle(correlation, settled.reservationId, 800, 200).expect(200);
     await reserve(correlation, 500, 1000);
@@ -315,15 +448,18 @@ describe('model spending at the runtime transport', () => {
       { id: 'admin_demo', organizationId: org, role: 'ADMIN' },
       {},
     );
+    // Cost: 1600 + 2000 settled, 1000 + 10000 reserved; the unpriced call adds none.
+    const totals = { chargedTokens: 2500, chargedCostMicros: 14_600, calls: 3, unpricedCalls: 1 };
     expect(report).toMatchObject({
-      chargedTokens: 2500,
-      calls: 2,
+      ...totals,
       inputTokens: 800,
       outputTokens: 200,
       unsettledReservedTokens: 1500,
       remainingTokens: 97_500,
-      byAgent: [{ agentId, chargedTokens: 2500, calls: 2 }],
-      byModel: [{ provider: 'test-provider', model: 'test-model', chargedTokens: 2500, calls: 2 }],
+      remainingCostMicros: 35_400,
+      budget: { currency: 'USD', monthlyCostLimitMicros: 50_000 },
+      byAgent: [{ agentId, ...totals }],
+      byModel: [{ provider: 'test-provider', model: 'test-model', ...totals }],
     });
     expect(report.period).toMatch(/^\d{4}-\d{2}$/);
     const empty = await db.modelSpending.usage(
@@ -387,7 +523,7 @@ describe('model budget administration', () => {
   });
   afterEach(() => db.close());
 
-  const call = (method: 'get' | 'put', path: string, actor: Actor, body?: object) => {
+  const call = (method: 'get' | 'put' | 'post', path: string, actor: Actor, body?: object) => {
     const pending = request(app)
       [method](path)
       .set('Cookie', sessions.get(actor.id)!)
@@ -399,6 +535,9 @@ describe('model budget administration', () => {
     expect((await call('get', '/api/organization/model-budget', admin).expect(200)).body).toEqual({
       monthlyTokenLimit: null,
       runTokenLimit: null,
+      currency: 'USD',
+      monthlyCostLimitMicros: null,
+      runCostLimitMicros: null,
       version: 0,
       updatedBy: null,
       updatedAt: null,
@@ -475,6 +614,161 @@ describe('model budget administration', () => {
       remainingTokens: 10,
       budget: { monthlyTokenLimit: 10 },
     });
+  });
+
+  const priceOf = (input: number, output: number, expectedPriceId: string | null) => ({
+    provider: 'anthropic',
+    model: 'claude-sonnet-5-5',
+    inputMicrosPerMillionTokens: input,
+    outputMicrosPerMillionTokens: output,
+    expectedPriceId,
+  });
+
+  it('keeps an append-only price book with optimistic concurrency', async () => {
+    expect((await call('get', '/api/organization/model-prices', admin).expect(200)).body).toEqual({
+      currency: 'USD',
+      prices: [],
+    });
+    const first = (
+      await call('put', '/api/organization/model-prices', admin, priceOf(3e6, 15e6, null)).expect(
+        200,
+      )
+    ).body as ModelPrice;
+    expect(first).toMatchObject({
+      provider: 'anthropic',
+      model: 'claude-sonnet-5-5',
+      currency: 'USD',
+      inputMicrosPerMillionTokens: 3_000_000,
+      outputMicrosPerMillionTokens: 15_000_000,
+      setBy: admin.id,
+    });
+    await call('put', '/api/organization/model-prices', admin, priceOf(1, 1, null)).expect(409, {
+      error: 'VERSION_CONFLICT',
+    });
+    const second = (
+      await call(
+        'put',
+        '/api/organization/model-prices',
+        admin,
+        priceOf(2e6, 10e6, first.priceId),
+      ).expect(200)
+    ).body as ModelPrice;
+    expect(
+      (
+        (await call('get', '/api/organization/model-prices', admin).expect(200))
+          .body as ModelPriceBook
+      ).prices,
+    ).toEqual([second]);
+    const removal = { provider: 'anthropic', model: 'claude-sonnet-5-5' };
+    await call('post', '/api/organization/model-prices/remove', admin, {
+      ...removal,
+      expectedPriceId: first.priceId,
+    }).expect(409);
+    await call('post', '/api/organization/model-prices/remove', admin, {
+      ...removal,
+      expectedPriceId: second.priceId,
+    }).expect(204);
+    expect((await call('get', '/api/organization/model-prices', admin).expect(200)).body).toEqual({
+      currency: 'USD',
+      prices: [],
+    });
+    await call('put', '/api/organization/model-prices', admin, priceOf(1e6, 1e6, null)).expect(200);
+    const events = await rawSql(db)
+      .prepare(
+        "SELECT action, before_json FROM organization_change_events WHERE resource_type='model_price' ORDER BY created_at",
+      )
+      .all<{ action: string; before_json: string | null }>();
+    expect(events.map((event) => [event.action, event.before_json === null])).toEqual([
+      ['model_price.updated', true],
+      ['model_price.updated', false],
+      ['model_price.removed', false],
+      ['model_price.updated', true],
+    ]);
+    // Each organization has its own price book.
+    expect(
+      (
+        (await call('get', '/api/organization/model-prices', otherAdmin).expect(200))
+          .body as ModelPriceBook
+      ).prices,
+    ).toEqual([]);
+  });
+
+  it('rejects invalid prices and non-admins', async () => {
+    for (const body of [
+      priceOf(-1, 1, null),
+      priceOf(1.5, 1, null),
+      priceOf(1, 10_000_000_001, null),
+      { ...priceOf(1, 1, null), model: 'bad model' },
+      { ...priceOf(1, 1, null), expectedPriceId: undefined },
+      { ...priceOf(1, 1, null), organizationId: otherAdmin.organizationId },
+    ])
+      await call('put', '/api/organization/model-prices', admin, body).expect(400);
+    await call('get', '/api/organization/model-prices', employee).expect(403);
+    await call('put', '/api/organization/model-prices', employee, priceOf(1, 1, null)).expect(403);
+  });
+
+  it('sets cost limits in a currency that is fixed once prices exist', async () => {
+    const budget = (
+      await call('put', '/api/organization/model-budget', admin, {
+        monthlyTokenLimit: null,
+        runTokenLimit: null,
+        currency: 'EUR',
+        monthlyCostLimitMicros: 500_000_000,
+        runCostLimitMicros: 5_000_000,
+        version: 0,
+      }).expect(200)
+    ).body as OrganizationModelBudget;
+    expect(budget).toMatchObject({
+      currency: 'EUR',
+      monthlyCostLimitMicros: 500_000_000,
+      runCostLimitMicros: 5_000_000,
+    });
+    const set = (
+      await call('put', '/api/organization/model-prices', admin, priceOf(1, 1, null)).expect(200)
+    ).body as ModelPrice;
+    expect(set.currency).toBe('EUR');
+    await call('put', '/api/organization/model-budget', admin, {
+      monthlyTokenLimit: null,
+      runTokenLimit: null,
+      currency: 'USD',
+      version: 1,
+    }).expect(409, { error: 'MODEL_CURRENCY_FIXED' });
+    // A client that knows only token limits leaves the currency and cost limits unchanged.
+    const tokensOnly = (
+      await call('put', '/api/organization/model-budget', admin, {
+        monthlyTokenLimit: 1000,
+        runTokenLimit: null,
+        version: 1,
+      }).expect(200)
+    ).body as OrganizationModelBudget;
+    expect(tokensOnly).toMatchObject({
+      monthlyTokenLimit: 1000,
+      currency: 'EUR',
+      monthlyCostLimitMicros: 500_000_000,
+      runCostLimitMicros: 5_000_000,
+      version: 2,
+    });
+    for (const change of [
+      { currency: 'eur' },
+      { monthlyCostLimitMicros: 0 },
+      { runCostLimitMicros: 1.5 },
+    ])
+      await call('put', '/api/organization/model-budget', admin, {
+        monthlyTokenLimit: null,
+        runTokenLimit: null,
+        version: 2,
+        ...change,
+      }).expect(400);
+    const cleared = (
+      await call('put', '/api/organization/model-budget', admin, {
+        monthlyTokenLimit: null,
+        runTokenLimit: null,
+        monthlyCostLimitMicros: null,
+        runCostLimitMicros: null,
+        version: 2,
+      }).expect(200)
+    ).body as OrganizationModelBudget;
+    expect(cleared).toMatchObject({ monthlyCostLimitMicros: null, runCostLimitMicros: null });
   });
 
   it('is not served outside password mode', async () => {
