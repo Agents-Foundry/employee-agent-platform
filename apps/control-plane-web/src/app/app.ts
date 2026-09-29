@@ -7,6 +7,7 @@ import { OrganizationAdmin } from './organization-admin';
 import { AgentAdmin } from './agent-admin';
 import { AgentInstallations } from './agent-installations';
 import { ActionGovernance } from './action-governance';
+import { ModelSpending } from './model-spending';
 import { StructureAdmin } from './organization/structure-admin';
 import { JobAdmin } from './organization/job-admin';
 import { TenantAdmin } from './organization/tenant-admin';
@@ -27,6 +28,7 @@ import type {
     AgentAdmin,
     AgentInstallations,
     ActionGovernance,
+    ModelSpending,
     StructureAdmin,
     JobAdmin,
     TenantAdmin,
