@@ -12,7 +12,7 @@ import type {
   WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import type { RuntimeFailure } from '../errors.js';
-import type { ModelGateway } from '../models/model-gateway.js';
+import type { RunModels } from '../models/model-gateway.js';
 import type { ArtifactStore } from '../tools/artifact-store.js';
 import type { RuntimeTool } from '../tools/runtime-tool.js';
 
@@ -45,7 +45,8 @@ export interface KernelContext {
   requestGrant(
     request: Omit<RuntimeActionExecuteRequest, 'protocol'>,
   ): Promise<SignedExecutionGrant>;
-  models: ModelGateway;
+  /** Metered against the organization's model spending limits by the host (ADR 0021). */
+  models: RunModels;
   tools: RuntimeTool[];
   artifacts: ArtifactStore;
   signal: AbortSignal;

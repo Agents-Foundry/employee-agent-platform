@@ -9,6 +9,10 @@ import type {
   RuntimeClaimResponse,
   RuntimeEventAck,
   RuntimeEventEnvelope,
+  RuntimeModelReservation,
+  RuntimeModelReservationRequest,
+  RuntimeModelSettlement,
+  RuntimeModelSettlementRequest,
 } from '@agents-foundry/contracts';
 import {
   runtimeAuthHeaders,
@@ -19,6 +23,7 @@ import {
   parseRuntimeActionDecision,
   parseRuntimeActionExecution,
   parseRuntimeClaimResponse,
+  parseRuntimeModelReservation,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import { parseSignedExecutionGrant } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import { ControlPlaneError } from '../errors.js';
@@ -30,6 +35,9 @@ export interface ControlPlanePort {
   requestAction(request: RuntimeActionRequest): Promise<RuntimeActionDecision>;
   executeAction(request: RuntimeActionExecuteRequest): Promise<RuntimeActionExecution>;
   requestGrant(request: RuntimeActionGrantRequest): Promise<SignedExecutionGrant>;
+  /** Reserve tokens for one model call against the organization's limits (ADR 0021). */
+  reserveModelTokens(request: RuntimeModelReservationRequest): Promise<RuntimeModelReservation>;
+  settleModelTokens(request: RuntimeModelSettlementRequest): Promise<RuntimeModelSettlement>;
 }
 
 export interface ControlPlaneClientOptions {
@@ -80,6 +88,18 @@ export class ControlPlaneClient implements ControlPlanePort {
 
   async requestGrant(request: RuntimeActionGrantRequest): Promise<SignedExecutionGrant> {
     return parseSignedExecutionGrant(await this.post(runtimeTransportPaths.grant, request));
+  }
+
+  async reserveModelTokens(
+    request: RuntimeModelReservationRequest,
+  ): Promise<RuntimeModelReservation> {
+    return parseRuntimeModelReservation(
+      await this.post(runtimeTransportPaths.modelReserve, request),
+    );
+  }
+
+  async settleModelTokens(request: RuntimeModelSettlementRequest): Promise<RuntimeModelSettlement> {
+    return (await this.post(runtimeTransportPaths.modelSettle, request)) as RuntimeModelSettlement;
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

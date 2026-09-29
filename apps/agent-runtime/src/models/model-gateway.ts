@@ -86,6 +86,33 @@ export class EnvironmentCredentialBroker implements CredentialBroker {
 }
 
 /**
+ * Meters one run's model calls against the organization's spending limits (ADR 0021). The
+ * host binds it to the run; kernels never see it and cannot skip it.
+ */
+export interface ModelUsageMeter {
+  /** Returns the output the call may ask for; throws if the call must not be made. */
+  reserve(request: {
+    provider: string;
+    model: string;
+    estimatedInputTokens: number;
+    maxOutputTokens: number;
+  }): Promise<{ reservationId: string; maxOutputTokens: number }>;
+  settle(reservationId: string, usage: ModelResponse['usage']): Promise<void>;
+}
+
+/** What kernels call: the gateway, bound to a run by the host. */
+export type RunModels = Pick<ModelGateway, 'complete'>;
+
+/**
+ * A conservative prompt size: about three characters per token, over everything sent. The
+ * settlement records the provider's real count.
+ */
+export function estimateInputTokens(request: Omit<ModelRequest, 'model' | 'maxTokens'>): number {
+  const size = JSON.stringify([request.system, request.messages, request.tools]).length;
+  return Math.min(10_000_000, Math.ceil(size / 3));
+}
+
+/**
  * Routes a manifest's model selection to a registered provider. Roles request a profile and
  * a provider/model pinned at issuance; they never name an SDK. Unknown providers fail closed.
  */
@@ -99,10 +126,15 @@ export class ModelGateway {
     for (const provider of providers) this.providers.set(provider.id, provider);
   }
 
+  /**
+   * With a meter, no call is made without an allowed reservation, the call asks for no more
+   * output than was reserved, and its reported usage is settled afterwards.
+   */
   async complete(
     manifest: SignedAgentManifestV2,
     request: Omit<ModelRequest, 'model'>,
     signal: AbortSignal,
+    meter?: ModelUsageMeter,
   ): Promise<{ response: ModelResponse; latencyMs: number }> {
     const { model, metadata } = manifest.payload;
     const provider = this.providers.get(model.provider);
@@ -117,12 +149,39 @@ export class ModelGateway {
       provider: model.provider,
       credentialMode: model.credentialMode,
     });
+    const reservation = meter
+      ? await meter.reserve({
+          provider: model.provider,
+          model: model.model,
+          estimatedInputTokens: estimateInputTokens(request),
+          maxOutputTokens: request.maxTokens,
+        })
+      : null;
     const started = Date.now();
-    const response = await provider.complete(
-      { ...request, model: model.model },
-      credential,
-      signal,
-    );
+    let response: ModelResponse;
+    try {
+      response = await provider.complete(
+        {
+          ...request,
+          model: model.model,
+          maxTokens: Math.min(request.maxTokens, reservation?.maxOutputTokens ?? request.maxTokens),
+        },
+        credential,
+        signal,
+      );
+    } catch (error) {
+      // A provider that answered with an error generated nothing. Anything else (a timeout, an
+      // abort) may have used tokens: the reservation stays counted at its reserved size.
+      if (reservation && error instanceof RuntimeFailure && error.code === 'MODEL_REQUEST_FAILED')
+        await meter!
+          .settle(reservation.reservationId, { inputTokens: 0, outputTokens: 0 })
+          .catch(() => undefined);
+      throw error;
+    }
+    // An unsettled reservation keeps counting at its reserved size, so a failed settlement
+    // never frees budget; it must not fail a call that already happened.
+    if (reservation)
+      await meter!.settle(reservation.reservationId, response.usage).catch(() => undefined);
     return { response, latencyMs: Date.now() - started };
   }
 }

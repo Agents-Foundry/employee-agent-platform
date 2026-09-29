@@ -9,6 +9,10 @@ import type {
   RuntimeCorrelation,
   RuntimeEventAck,
   RuntimeEventEnvelope,
+  RuntimeModelReservation,
+  RuntimeModelReservationRequest,
+  RuntimeModelSettlement,
+  RuntimeModelSettlementRequest,
   SignedAgentManifestV2,
   SignedExecutionGrant,
   WorkflowDefinition,
@@ -149,6 +153,26 @@ export class FakeControlPlane implements ControlPlanePort {
   async requestGrant(request: RuntimeActionExecuteRequest): Promise<SignedExecutionGrant> {
     this.grants.push(request);
     return this.grant(request);
+  }
+
+  readonly reservations: RuntimeModelReservationRequest[] = [];
+  readonly settlements: RuntimeModelSettlementRequest[] = [];
+  reserve: (request: RuntimeModelReservationRequest) => RuntimeModelReservation = (request) => ({
+    reservationId: request.reservationId,
+    decision: 'ALLOWED',
+    maxOutputTokens: request.maxOutputTokens,
+  });
+
+  async reserveModelTokens(
+    request: RuntimeModelReservationRequest,
+  ): Promise<RuntimeModelReservation> {
+    this.reservations.push(request);
+    return this.reserve(request);
+  }
+
+  async settleModelTokens(request: RuntimeModelSettlementRequest): Promise<RuntimeModelSettlement> {
+    this.settlements.push(request);
+    return { reservationId: request.reservationId, status: 'SETTLED' };
   }
 
   types(runId: string): string[] {

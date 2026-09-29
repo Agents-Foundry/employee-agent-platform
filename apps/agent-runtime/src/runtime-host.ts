@@ -16,7 +16,7 @@ import type { CheckpointStore } from './checkpoints.js';
 import { ControlPlaneError, RuntimeFailure, asRuntimeFailure } from './errors.js';
 import type { AgentKernel, KernelContext, KernelOutcome } from './kernel/agent-kernel.js';
 import type { ManifestVerifier } from './manifest-verifier.js';
-import type { ModelGateway } from './models/model-gateway.js';
+import type { ModelGateway, ModelUsageMeter } from './models/model-gateway.js';
 import type { ArtifactStore } from './tools/artifact-store.js';
 import type { ToolRegistry } from './tools/runtime-tool.js';
 import type { ControlPlanePort } from './transport/control-plane-client.js';
@@ -242,6 +242,43 @@ export class RuntimeHost {
     this.logger.info('run cancelled', { runId });
   }
 
+  /** Reserves and settles each of the run's model calls with the control plane (ADR 0021). */
+  private meter(correlation: RuntimeCorrelation): ModelUsageMeter {
+    const controlPlane = this.options.controlPlane;
+    return {
+      async reserve(request) {
+        let reservation;
+        try {
+          reservation = await controlPlane.reserveModelTokens({
+            protocol: RUNTIME_PROTOCOL_V1,
+            reservationId: randomUUID(),
+            correlation,
+            ...request,
+          });
+        } catch {
+          // No decision means no call: spending limits fail closed.
+          throw new RuntimeFailure(
+            'MODEL_BUDGET_UNAVAILABLE',
+            'The model spending limit could not be checked.',
+            true,
+          );
+        }
+        if (reservation.decision === 'DENIED')
+          throw new RuntimeFailure(reservation.code, reservation.reason);
+        return reservation;
+      },
+      async settle(reservationId, usage) {
+        await controlPlane.settleModelTokens({
+          protocol: RUNTIME_PROTOCOL_V1,
+          reservationId,
+          correlation,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+        });
+      },
+    };
+  }
+
   private context(
     correlation: RuntimeCorrelation,
     work: { task: TaskSpec; workflow: WorkflowDefinition | undefined },
@@ -265,7 +302,10 @@ export class RuntimeHost {
         this.options.controlPlane.executeAction({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
       requestGrant: (request) =>
         this.options.controlPlane.requestGrant({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
-      models: this.options.models,
+      models: {
+        complete: (runManifest, request, runSignal) =>
+          this.options.models.complete(runManifest, request, runSignal, this.meter(correlation)),
+      },
       tools: this.options.tools.forManifest(manifest),
       artifacts: this.options.artifacts,
       signal,
