@@ -287,6 +287,27 @@ See [ADR 0021](adr/0021-model-spending-limits.md).
   error, which errs high.
 - A limit takes effect at a run's next model turn, not mid-call.
 
+## Per-model prices and cost limits — delivered
+
+See [ADR 0022](adr/0022-model-prices-and-cost-limits.md).
+
+- Migration 0003 adds the append-only `model_prices` table, with row-level security. It adds
+  a currency and monthly and per-run cost limits to `organization_model_budgets`, and the
+  price and cost of each call to `model_usage_reservations`.
+- Admins set a price per million input and output tokens for each model, in the
+  organization's currency, through the console and `/api/organization/model-prices`.
+- Each call is costed at the price it was reserved under. The tightest limit, in tokens or
+  cost, decides how much output a call gets.
+- With a cost limit set, a model without a price is refused and audited.
+- The runtime protocol is unchanged.
+
+### Limitations
+
+- Cost follows the organization's own prices, not provider bills. Discounts, cached input and
+  taxes are not modelled.
+- The currency is fixed once the first price is set.
+- A denial for a missing price uses the `MODEL_BUDGET_EXCEEDED` code, with its own reason.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -315,10 +336,11 @@ control plane now runs on PostgreSQL with row-level security
 ([ADR 0018](adr/0018-postgresql-row-level-security.md)), and roles ship with governance
 evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)) and model-quality
 tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). Organizations limit model token
-use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)). The highest-value
-follow-ups are:
+use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)), and cost at their
+own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)). The
+highest-value follow-ups are:
 
-- per-model prices, so limits can be set in currency, and alerts before a limit is reached;
+- alerts to administrators before a token or cost limit is reached;
 - a scheduled live quality run that tracks scores per model over time;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
