@@ -90,6 +90,43 @@ describe('catalog validation', () => {
     expect(problems(extra)).toMatch('tool[0]');
   });
 
+  it('requires every role version to name a consistent evaluation suite', () => {
+    expect(problems(withBlueprint((b) => (b.evaluations.suite = 'missing-suite')))).toMatch(
+      'unknown evaluation suite missing-suite',
+    );
+    expect(problems(withBlueprint((b) => (b.evaluations.suite = 'frontend-engineer-v1')))).toMatch(
+      'evaluation suite frontend-engineer-v1 belongs to engineering.frontend-engineer',
+    );
+    const suite = (change: (catalog: CatalogDefinitions) => void) => {
+      const catalog = clone();
+      change(catalog);
+      return problems(catalog);
+    };
+    const qaSuite = (catalog: CatalogDefinitions) =>
+      catalog.evaluationSuites.find((item) => item.id === 'qa-engineer-v1')!;
+    expect(suite((c) => (qaSuite(c).scenarios[0]!.task.workflow = 'implement-ui-change'))).toMatch(
+      'workflow implement-ui-change is not in the blueprint',
+    );
+    expect(suite((c) => delete qaSuite(c).scenarios[0]!.answers['qaUrl'])).toMatch(
+      'missing required answer qaUrl',
+    );
+    expect(suite((c) => (qaSuite(c).scenarios[0]!.steps[0]!.tool = 'shell'))).toMatch(
+      'unknown tool shell',
+    );
+    expect(
+      suite((c) => qaSuite(c).scenarios[0]!.expect.executedActions.push('bank.transfer')),
+    ).toMatch('unknown executed action bank.transfer');
+    expect(suite((c) => (qaSuite(c).scenarios[0]!.blueprintVersions = ['9.9.9']))).toMatch(
+      'version 9.9.9 does not use this suite',
+    );
+    expect(
+      suite((c) => (qaSuite(c).scenarios[0]!.steps[0]!.expect = { outcome: 'FAILED' })),
+    ).toMatch('A FAILED step names its error code');
+    expect(
+      suite((c) => c.evaluationSuites.push({ ...structuredClone(qaSuite(c)), id: 'orphan-suite' })),
+    ).toMatch('evaluation suite orphan-suite: no blueprint uses it');
+  });
+
   it('orders versions numerically with pre-releases first', () => {
     expect(['1.10.0', '1.2.0', '1.2.0-rc.1', '0.9.9'].sort(compareVersions)).toEqual([
       '0.9.9',
@@ -112,6 +149,13 @@ describe('catalog of record', () => {
       ).rejects.toThrow('CATALOG_VERSION_MUTATED: engineering.qa-engineer@1.1.0');
       const next = clone();
       next.blueprints = [{ ...structuredClone(qa), version: '1.3.0', mission: 'Next version.' }];
+      // Suites ship with the roles they evaluate; scenarios pinned to retired versions go too.
+      next.evaluationSuites = next.evaluationSuites
+        .filter((suite) => suite.blueprintId === qa.id)
+        .map((suite) => ({
+          ...suite,
+          scenarios: suite.scenarios.filter((scenario) => !scenario.blueprintVersions),
+        }));
       const db = await ControlPlaneDatabase.open({ store: await connect(), signer, catalog: next });
       {
         // 1.1.0 and 1.2.0 stopped shipping but stay resolvable from the catalog of record.
@@ -148,10 +192,13 @@ describe('catalog of record', () => {
       const legacy = (await demoRequest(app).get('/api/blueprints').expect(200)).body;
       // The legacy shape serves the latest version of each blueprint (QA: 1.2.0 since Phase D).
       expect(legacy.map((b: { id: string }) => b.id)).toEqual([
+        'engineering.backend-engineer',
+        'engineering.code-reviewer',
         'engineering.frontend-engineer',
         'engineering.qa-engineer',
+        'engineering.test-automation-engineer',
       ]);
-      expect(legacy[1]).toEqual({
+      expect(legacy.find((b: { id: string }) => b.id === qa.id)).toEqual({
         id: 'engineering.qa-engineer',
         version: '1.2.0',
         title: 'QA Engineer',

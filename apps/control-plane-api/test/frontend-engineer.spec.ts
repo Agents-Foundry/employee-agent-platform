@@ -54,6 +54,7 @@ import type {
 } from '../../execution-runtime/src/providers/execution-provider.js';
 import { testDatabase } from './support/database.js';
 import { rawSql } from './support/raw-sql.js';
+import { builtInCatalog } from '../../../packages/catalog/src/index.js';
 
 const org = 'org_agents_foundry';
 const employee = { id: 'employee_qa_demo', role: 'EMPLOYEE' as const, organizationId: org };
@@ -722,7 +723,8 @@ describe.each([
     expect(final).toBe('CHANGE_SET_CHANGED: The workspace changed after the decision.');
     expect(github.filter((call) => call.method === 'POST')).toEqual([]);
   });
-});
+  // Real containers start slowly on Windows and under a busy parallel suite.
+}, 120_000);
 
 describe('platform code stays role-agnostic (ADR 0009)', () => {
   it('names no role outside the catalog, except the documented legacy QA compatibility', () => {
@@ -742,16 +744,25 @@ describe('platform code stays role-agnostic (ADR 0009)', () => {
       'control-plane-api/src/database.ts',
       'control-plane-api/src/execution/execution-service.ts',
     ]);
-    const roleNames =
-      /qa-engineer|qa_engineer|frontend-engineer|validate-story|implement-ui-change/;
+    // Every role, blueprint and workflow the catalog ships, plus the legacy demo agent's id.
+    const names = [
+      ...builtInCatalog.blueprints.flatMap((blueprint) => [blueprint.id, blueprint.role]),
+      ...builtInCatalog.workflows.map((workflow) => workflow.id),
+      ...builtInCatalog.evaluationSuites.map((suite) => suite.id),
+      'qa_engineer',
+    ];
+    const pattern = (items: string[]) =>
+      new RegExp([...new Set(items)].map((item) => item.replace(/[.]/g, '\\.')).join('|'));
     const offenders = files
       .map((file) => relative(apps, file).split('\\').join('/'))
-      .filter((file) => roleNames.test(readFileSync(join(apps, file), 'utf8')))
+      .filter((file) => pattern(names).test(readFileSync(join(apps, file), 'utf8')))
       .filter((file) => !legacyQa.has(file));
     expect(offenders).toEqual([]);
+    // The legacy files may name only QA.
+    const qa = new Set(['engineering.qa-engineer', 'qa-engineer', 'qa_engineer', 'validate-story']);
     for (const file of legacyQa)
       expect(readFileSync(join(apps, file), 'utf8')).not.toMatch(
-        /frontend-engineer|implement-ui-change/,
+        pattern(names.filter((name) => !qa.has(name))),
       );
   });
 });

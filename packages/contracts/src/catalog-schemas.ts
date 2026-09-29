@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import type {
   AgentBlueprintVersionDefinition,
+  EvaluationSuiteDefinition,
   SkillDefinition,
   ToolDefinition,
   WorkflowDefinition,
@@ -74,6 +75,102 @@ const question = z
     (q) => (q.type === 'multiselect') === Boolean(q.options),
     'Only multiselect has options.',
   );
+
+const issueKey = z.string().regex(/^[A-Z][A-Z0-9]{1,9}-[1-9]\d{0,8}$/);
+
+export const evaluationSuiteSchema = z
+  .object({
+    id: slug,
+    blueprintId: z.string().regex(/^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/),
+    title: text(120),
+    world: z
+      .object({
+        issueProjects: z
+          .array(z.string().regex(/^[A-Z][A-Z0-9]{1,9}$/))
+          .max(20)
+          .refine(unique),
+        issues: z
+          .array(
+            z
+              .object({
+                key: issueKey,
+                type: z.enum(['Bug', 'Task', 'Story']),
+                summary: text(255),
+                description: text(5000),
+              })
+              .strict(),
+          )
+          .max(50),
+        repositories: z
+          .array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/))
+          .max(20)
+          .refine(unique),
+        repositoryFiles: z.record(
+          z.string().regex(/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/),
+          z.string().max(20_000),
+        ),
+      })
+      .strict(),
+    scenarios: z
+      .array(
+        z
+          .object({
+            id: slug,
+            title: text(200),
+            blueprintVersions: z.array(semver).min(1).max(20).refine(unique).optional(),
+            answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
+            task: z
+              .object({
+                objective: text(500),
+                workflow: slug,
+                workItemKey: issueKey.optional(),
+                inputs: z.record(z.string(), z.string().max(2000)).optional(),
+              })
+              .strict(),
+            steps: z
+              .array(
+                z
+                  .object({
+                    tool: slug,
+                    input: z.record(z.string(), z.unknown()),
+                    expect: z
+                      .object({
+                        outcome: z.enum(['SUCCEEDED', 'FAILED', 'NOT_AVAILABLE']),
+                        code: z
+                          .string()
+                          .regex(/^[A-Z][A-Z0-9_]*$/)
+                          .optional(),
+                        contains: text(500).optional(),
+                        approval: z
+                          .object({ action, decision: z.enum(['APPROVED', 'REJECTED']) })
+                          .strict()
+                          .optional(),
+                      })
+                      .strict()
+                      .refine(
+                        (e) => (e.outcome === 'FAILED') === Boolean(e.code),
+                        'A FAILED step names its error code, and only a FAILED step does.',
+                      ),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(30),
+            expect: z
+              .object({
+                offeredTools: z.array(slug).max(50).refine(unique),
+                runStatus: z.enum(['COMPLETED', 'CANCELLED', 'FAILED']),
+                executedActions: z.array(action).max(30),
+              })
+              .strict(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50)
+      .refine((items) => unique(items.map((item) => item.id)), 'Scenario ids must be unique.'),
+  })
+  .strict() satisfies z.ZodType<EvaluationSuiteDefinition>;
 
 export const blueprintVersionSchema = z
   .object({

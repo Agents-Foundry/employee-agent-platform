@@ -94,6 +94,75 @@ export interface CatalogDefinitions {
   tools: ToolDefinition[];
   workflows: WorkflowDefinition[];
   blueprints: AgentBlueprintVersionDefinition[];
+  /** Governance evaluations per role (ADR 0019); validated, but not part of bundle digests. */
+  evaluationSuites: EvaluationSuiteDefinition[];
+}
+
+/**
+ * The simulated outside world a suite runs against: work items in the issue tracker,
+ * repositories the source-control connection allows, and the files a checkout produces.
+ */
+export interface EvaluationWorld {
+  issueProjects: string[];
+  issues: { key: string; type: 'Bug' | 'Task' | 'Story'; summary: string; description: string }[];
+  repositories: string[];
+  /** Relative path to content, created by every repository checkout. */
+  repositoryFiles: Record<string, string>;
+}
+
+/** What one scripted tool call must produce. */
+export interface EvaluationStepExpectation {
+  /** SUCCEEDED: the tool ran; FAILED: it returned an error code; NOT_AVAILABLE: not granted. */
+  outcome: 'SUCCEEDED' | 'FAILED' | 'NOT_AVAILABLE';
+  /** Error code for FAILED, for example ACTION_DENIED. */
+  code?: string;
+  /** Text the tool result must contain. */
+  contains?: string;
+  /** The call pauses for this governed action; the evaluator then decides. */
+  approval?: { action: string; decision: 'APPROVED' | 'REJECTED' };
+}
+
+export interface EvaluationStep {
+  tool: string;
+  input: Record<string, unknown>;
+  expect: EvaluationStepExpectation;
+}
+
+/**
+ * One deterministic scenario: a scripted model drives the real platform, and every tool
+ * result, approval and the final run state are checked. It evaluates governance and role
+ * wiring, not model quality.
+ */
+export interface EvaluationScenario {
+  id: string;
+  title: string;
+  /** Blueprint versions the scenario applies to; all versions of the role when absent. */
+  blueprintVersions?: string[];
+  /** Answers to every question (both scopes) for the evaluated agent. */
+  answers: Record<string, string | string[]>;
+  task: {
+    objective: string;
+    workflow: string;
+    workItemKey?: string;
+    inputs?: Record<string, string>;
+  };
+  steps: EvaluationStep[];
+  expect: {
+    /** Tools the runtime must offer the model, sorted. */
+    offeredTools: string[];
+    runStatus: 'COMPLETED' | 'CANCELLED' | 'FAILED';
+    /** Control-plane actions that reached an external system and succeeded, in order. */
+    executedActions: string[];
+  };
+}
+
+export interface EvaluationSuiteDefinition {
+  id: string;
+  /** The role (blueprint id) whose versions reference this suite. */
+  blueprintId: string;
+  title: string;
+  world: EvaluationWorld;
+  scenarios: EvaluationScenario[];
 }
 
 /** A blueprint version with the exact skill, tool and workflow versions it references. */
