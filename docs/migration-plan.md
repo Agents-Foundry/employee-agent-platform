@@ -308,6 +308,25 @@ See [ADR 0022](adr/0022-model-prices-and-cost-limits.md).
 - The currency is fixed once the first price is set.
 - A denial for a missing price uses the `MODEL_BUDGET_EXCEEDED` code, with its own reason.
 
+## Model budget alerts — delivered
+
+See [ADR 0023](adr/0023-model-budget-alerts.md).
+
+- Migration 0004 adds `model_budget_alerts`, with row-level security, and alert thresholds to
+  `organization_model_budgets` (80% by default). Alerts are never deleted, and only an
+  acknowledgement may change one, once.
+- When the month's charged usage reaches a threshold of the monthly token or cost limit, one
+  alert is raised and audited. Reaching a limit, or being refused by one, always alerts.
+- Admins set thresholds with the budget, and list and acknowledge alerts in the console and
+  through `/api/organization/model-alerts`.
+
+### Limitations
+
+- Alerts appear only in the admin console and the audit log; nothing is emailed or posted.
+- Per-run limits do not alert.
+- Unsettled reservations count in full, so an alert can come before a call's final usage is
+  known.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -337,10 +356,12 @@ control plane now runs on PostgreSQL with row-level security
 evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)) and model-quality
 tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). Organizations limit model token
 use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)), and cost at their
-own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)). The
+own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)), with alerts to
+administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts.md)). The
 highest-value follow-ups are:
 
-- alerts to administrators before a token or cost limit is reached;
+- delivering alerts outside the product (email or signed webhooks), with outbound network
+  controls;
 - a scheduled live quality run that tracks scores per model over time;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
