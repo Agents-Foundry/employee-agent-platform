@@ -1,0 +1,129 @@
+name: Model quality
+
+# ADR 0025: a weekly live model-quality run (ADR 0020) that records each role's scores per
+# model over time and flags regressions. It spends real tokens, so it runs only on this
+# schedule or by hand, never on pull requests, and is skipped until the repository sets the
+# AF_QUALITY_MODEL variable.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: Trials per task (default AF_QUALITY_TRIALS, or 3)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  # Downloads the score history from the previous run's artifact.
+  actions: read
+
+concurrency:
+  group: model-quality
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    if: vars.AF_QUALITY_MODEL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:ci-only-password@127.0.0.1:5432/postgres
+      AF_QUALITY_PROVIDER: ${{ vars.AF_QUALITY_PROVIDER || 'anthropic' }}
+      AF_QUALITY_MODEL: ${{ vars.AF_QUALITY_MODEL }}
+      AF_QUALITY_JUDGE_MODEL: ${{ vars.AF_QUALITY_JUDGE_MODEL }}
+      # No default: the run's token budget is an explicit decision (ADR 0020).
+      AF_QUALITY_MAX_TOKENS: ${{ vars.AF_QUALITY_MAX_TOKENS }}
+      AF_QUALITY_TRIALS: ${{ inputs.trials || vars.AF_QUALITY_TRIALS || '3' }}
+      AF_MODEL_API_KEY_ANTHROPIC: ${{ secrets.AF_MODEL_API_KEY_ANTHROPIC }}
+      AF_QUALITY_REPORT_DIR: ${{ github.workspace }}/.quality/reports
+      QUALITY_HISTORY: ${{ github.workspace }}/.quality/history/quality-history.jsonl
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Restore the score history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$(dirname "$QUALITY_HISTORY")"
+          for id in $(gh run list --workflow quality.yml --limit 20 --json databaseId,status \
+              --jq '.[] | select(.status == "completed") | .databaseId'); do
+            if gh run download "$id" --name quality-history --dir "$(dirname "$QUALITY_HISTORY")" 2>/dev/null; then
+              echo "Restored the history from run $id."
+              exit 0
+            fi
+          done
+          echo "No earlier history; starting a new one."
+
+      - name: Optional pricing
+        if: vars.AF_QUALITY_PRICE_PER_MTOK != ''
+        env:
+          PRICE: ${{ vars.AF_QUALITY_PRICE_PER_MTOK }}
+        run: echo "AF_QUALITY_PRICE_PER_MTOK=$PRICE" >> "$GITHUB_ENV"
+
+      - name: Live evaluation
+        id: evaluate
+        continue-on-error: true
+        run: npm run eval:quality --workspace @agents-foundry/control-plane-api
+
+      - name: Record scores and compare with earlier runs
+        id: trend
+        continue-on-error: true
+        run: >-
+          npm run eval:quality:trend --workspace @agents-foundry/control-plane-api --
+          --history "$QUALITY_HISTORY" --reports "$AF_QUALITY_REPORT_DIR"
+          --summary "$GITHUB_STEP_SUMMARY" --fail-on-regression
+
+      - name: Keep the score history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-history
+          path: .quality/history/quality-history.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Keep this run's reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports-${{ github.run_id }}
+          path: .quality/reports
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Result
+        if: always()
+        env:
+          EVALUATION: ${{ steps.evaluate.outcome }}
+          TREND: ${{ steps.trend.outcome }}
+        run: |
+          if ! ls "$AF_QUALITY_REPORT_DIR"/quality-*.json >/dev/null 2>&1; then
+            echo "::error::The evaluation wrote no report; see the Live evaluation step."
+            exit 1
+          fi
+          if [ "$TREND" != "success" ]; then
+            echo "::error::Scores regressed, or the history could not be updated; see the summary."
+            exit 1
+          fi
+          if [ "$EVALUATION" != "success" ]; then
+            echo "::warning::Some tasks did not pass; see the summary and the reports artifact."
+          fi
