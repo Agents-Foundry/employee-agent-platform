@@ -12,6 +12,11 @@ if (auth.mode === 'google') {
   await syncIdentityDirectory(database, GOOGLE_ISSUER, directory);
 }
 
+// ADR 0024: alert webhooks are sent from this process when the operator enables them.
+const stopWebhooks = database.alertWebhooks.options.enabled
+  ? database.alertWebhooks.start(15_000)
+  : () => undefined;
+
 const port = Number(process.env['PORT'] ?? 4100);
 const server = createApp(database, auth).listen(port, '127.0.0.1', () => {
   console.log(`Agents Foundry control plane API listening on http://127.0.0.1:${port}`);
@@ -19,6 +24,7 @@ const server = createApp(database, auth).listen(port, '127.0.0.1', () => {
 
 function shutdown(signal: string): void {
   console.log(`Received ${signal}; stopping control plane API.`);
+  stopWebhooks();
   server.close((error) => {
     void database.close().finally(() => process.exit(error ? 1 : 0));
   });

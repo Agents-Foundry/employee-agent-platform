@@ -16,6 +16,7 @@ import { configureExecutionRoutes } from './execution/execution-routes.js';
 import { configureCatalogRoutes } from './catalog/catalog-routes.js';
 import { configureRuntimeRoutes } from './runtime/runtime-routes.js';
 import { configureSpendingRoutes } from './spending/spending-routes.js';
+import { configureWebhookRoutes } from './webhooks/webhook-routes.js';
 import { configureActionRoutes } from './actions/action-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
@@ -175,6 +176,7 @@ export function createApp(
   configureCatalogRoutes(app, database.catalog, database.installations, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
   configureSpendingRoutes(app, database.modelSpending, auth);
+  configureWebhookRoutes(app, database.alertWebhooks, auth);
 
   app.get('/api/bootstrap', async (_request, response) => {
     response.json(await database.getBootstrap(response.locals['actor'], auth.mode === 'demo'));

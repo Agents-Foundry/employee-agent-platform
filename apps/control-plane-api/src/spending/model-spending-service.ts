@@ -103,9 +103,10 @@ export class ModelSpendingService {
     private readonly db: PgStore,
     private readonly structure: OrganizationStructureService,
     private readonly audit: Audit,
+    onAlert?: ConstructorParameters<typeof ModelBudgetAlertService>[3],
   ) {
     this.prices = new ModelPriceService(db, structure);
-    this.alerts = new ModelBudgetAlertService(db, structure, audit);
+    this.alerts = new ModelBudgetAlertService(db, structure, audit, onAlert);
   }
 
   /**

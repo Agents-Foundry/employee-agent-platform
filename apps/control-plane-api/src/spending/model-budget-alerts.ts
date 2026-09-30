@@ -46,13 +46,19 @@ export interface AlertCheck {
 /**
  * Model budget alerts (ADR 0023). Whenever the month's charged usage changes, each monthly
  * limit is compared with the organization's thresholds; each threshold alerts once per month.
- * Alerts are shown to administrators and audited. They are not delivered outside the product.
+ * Alerts are shown to administrators and audited, and `onRaised` can deliver them further
+ * (alert webhooks, ADR 0024) within the same transaction.
  */
 export class ModelBudgetAlertService {
   constructor(
     private readonly db: PgStore,
     private readonly structure: OrganizationStructureService,
     private readonly audit: Audit,
+    private readonly onRaised?: (
+      organizationId: string,
+      alert: ModelBudgetAlert,
+      nowMs: number,
+    ) => Promise<void>,
   ) {}
 
   /** Raise the alerts the month's usage has reached. Must run in the tenant's scope. */
@@ -141,15 +147,20 @@ export class ModelBudgetAlertService {
       currency,
       new Date(input.nowMs).toISOString(),
     );
-    if (changes === 1)
-      await this.audit(
-        input.actorId,
-        'model.budget.alert',
-        'model_budget_alert',
-        id,
-        { period: input.period, scope, thresholdPercent: threshold, limit, charged, currency },
-        input.organizationId,
-      );
+    if (changes !== 1) return;
+    await this.audit(
+      input.actorId,
+      'model.budget.alert',
+      'model_budget_alert',
+      id,
+      { period: input.period, scope, thresholdPercent: threshold, limit, charged, currency },
+      input.organizationId,
+    );
+    await this.onRaised?.(
+      input.organizationId,
+      this.mapAlert((await this.row(input.organizationId, id))!),
+      input.nowMs,
+    );
   }
 
   private row(organizationId: string, id: string) {
