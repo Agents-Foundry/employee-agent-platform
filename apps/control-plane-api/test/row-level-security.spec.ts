@@ -252,7 +252,7 @@ describe('row-level security', () => {
       'SELECT * FROM account_link_invitations',
       'SELECT * FROM runtime_request_nonces',
       "INSERT INTO organizations (id, name, slug) VALUES ('x', 'x', 'x')",
-      "INSERT INTO users (id, email, display_name, created_at) VALUES ('x', 'x', 'x', 'x')",
+      "INSERT INTO users (id, email, display_name, created_at) VALUES ('x', 'x', 'x', '2026-01-01T00:00:00.000Z')",
       "UPDATE catalog_blueprint_versions SET digest='x'",
       "UPDATE schema_migrations SET checksum='x'",
     ])

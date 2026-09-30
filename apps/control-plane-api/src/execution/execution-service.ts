@@ -921,8 +921,8 @@ export class ExecutionService {
     const timestamp = now();
     await this.db.run(
       `UPDATE agent_runs SET status=?, status_reason=?, updated_at=?,
-       started_at=COALESCE(started_at, CASE WHEN ?::text='RUNNING' THEN ?::text END),
-       completed_at=CASE WHEN ?::text IN ('COMPLETED','FAILED','CANCELLED') THEN ?::text ELSE completed_at END
+       started_at=COALESCE(started_at, CASE WHEN ?::text='RUNNING' THEN ?::timestamptz END),
+       completed_at=CASE WHEN ?::text IN ('COMPLETED','FAILED','CANCELLED') THEN ?::timestamptz ELSE completed_at END
        WHERE id=? AND organization_id=?`,
       to,
       reason,
@@ -952,7 +952,7 @@ export class ExecutionService {
     const timestamp = now();
     await this.db.run(
       `UPDATE agent_run_steps SET status=?,
-       completed_at=CASE WHEN ?::text IN ('COMPLETED','FAILED','SKIPPED','CANCELLED') THEN ?::text ELSE completed_at END
+       completed_at=CASE WHEN ?::text IN ('COMPLETED','FAILED','SKIPPED','CANCELLED') THEN ?::timestamptz ELSE completed_at END
        WHERE id=? AND organization_id=?`,
       to,
       to,

@@ -8,6 +8,7 @@ import { modelBudgetAlertsSql } from './migrations/0004-model-budget-alerts.js';
 import { alertWebhooksSql } from './migrations/0005-alert-webhooks.js';
 import { modelQualityResultsSql } from './migrations/0006-model-quality-results.js';
 import { tenantDomainNotificationsSql } from './migrations/0007-tenant-domain-notifications.js';
+import { nativeColumnTypesSql } from './migrations/0008-native-column-types.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -18,6 +19,7 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 5, name: 'alert-webhooks', sql: alertWebhooksSql },
   { version: 6, name: 'model-quality-results', sql: modelQualityResultsSql },
   { version: 7, name: 'tenant-domain-notifications', sql: tenantDomainNotificationsSql },
+  { version: 8, name: 'native-column-types', sql: nativeColumnTypesSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;
@@ -29,9 +31,13 @@ function checksum(sql: string): string {
 
 /**
  * Applies pending migrations as the schema owner, one transaction each, under an advisory lock
- * so concurrent starts do not race. A changed released migration fails closed.
+ * so concurrent starts do not race. A changed released migration fails closed. `migrations`
+ * stops at an earlier release (upgrade tests).
  */
-export async function migrate(ownerUrl: string): Promise<number[]> {
+export async function migrate(
+  ownerUrl: string,
+  migrations: readonly { version: number; name: string; sql: string }[] = POSTGRES_MIGRATIONS,
+): Promise<number[]> {
   const client = new pg.Client({
     connectionString: ownerUrl,
     connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
@@ -48,7 +54,7 @@ export async function migrate(ownerUrl: string): Promise<number[]> {
       'SELECT version, checksum FROM schema_migrations',
     );
     const existing = new Map(rows.rows.map((row) => [Number(row.version), row.checksum]));
-    for (const migration of POSTGRES_MIGRATIONS) {
+    for (const migration of migrations) {
       const sum = checksum(migration.sql);
       const recorded = existing.get(migration.version);
       if (recorded !== undefined) {
@@ -65,7 +71,7 @@ export async function migrate(ownerUrl: string): Promise<number[]> {
       applied.push(migration.version);
     }
     for (const version of existing.keys())
-      if (!POSTGRES_MIGRATIONS.some((migration) => migration.version === version))
+      if (!migrations.some((migration) => migration.version === version))
         throw new Error('SCHEMA_NEWER_THAN_RELEASE');
     await client.query('COMMIT');
     return applied;

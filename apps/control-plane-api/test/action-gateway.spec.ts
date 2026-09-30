@@ -410,10 +410,14 @@ describe('Action Gateway', () => {
       const older = await runningStep(await createAgent('1.1.0'));
       expect(await decide(read(older, 'QA-1'))).toMatchObject({ decision: 'ALLOWED' });
       expect(
-        await raw()
-          .prepare("SELECT action, parameters FROM agent_action_requests WHERE decision='ALLOWED'")
-          .all(),
-      ).toEqual([{ action: 'jira.read', parameters: '{"issueKey":"QA-1"}' }]);
+        (
+          await raw()
+            .prepare(
+              "SELECT action, parameters FROM agent_action_requests WHERE decision='ALLOWED'",
+            )
+            .all()
+        ).map((row) => ({ ...row, parameters: JSON.parse(String(row['parameters'])) })),
+      ).toEqual([{ action: 'jira.read', parameters: { issueKey: 'QA-1' } }]);
     });
 
     it('pauses with a payload-bound expiring approval, then executes exactly once after approval', async () => {

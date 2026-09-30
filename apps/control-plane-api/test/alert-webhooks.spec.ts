@@ -456,7 +456,9 @@ describe('alert webhooks', () => {
     );
     await expect(
       sql
-        .prepare("UPDATE alert_webhook_deliveries SET status='PENDING', next_attempt_at='x'")
+        .prepare(
+          "UPDATE alert_webhook_deliveries SET status='PENDING', next_attempt_at='2026-01-01T00:00:00.000Z'",
+        )
         .run(),
     ).rejects.toThrow('ALERT_WEBHOOK_DELIVERY_IMMUTABLE');
     await expect(sql.prepare('DELETE FROM alert_webhook_deliveries').run()).rejects.toThrow(

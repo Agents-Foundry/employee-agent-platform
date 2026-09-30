@@ -83,11 +83,33 @@ function parseInt8(value: string): number {
   return parsed;
 }
 
+const parseTimestamp = pg.types.getTypeParser(pg.types.builtins.TIMESTAMPTZ, 'text');
+
+/**
+ * timestamptz as the ISO-8601 UTC strings the API writes (ADR 0028), such as
+ * `2026-09-30T17:46:53.123Z`. Refuses values JavaScript cannot represent, such as `infinity`.
+ */
+function parseTimestamptz(value: string): string {
+  const parsed = parseTimestamp(value) as Date;
+  if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime()))
+    throw new Error('TIMESTAMP_OUT_OF_RANGE');
+  return parsed.toISOString();
+}
+
+/** jsonb as its JSON text: callers parse it themselves, as they did text columns. */
+const jsonText = (value: string): string => value;
+
+const parsers: Record<number, (value: string) => unknown> = {
+  [pg.types.builtins.INT8]: parseInt8,
+  [pg.types.builtins.TIMESTAMPTZ]: parseTimestamptz,
+  [pg.types.builtins.JSONB]: jsonText,
+  [pg.types.builtins.JSON]: jsonText,
+};
+
 const types = {
   getTypeParser: ((oid: number, format?: 'text' | 'binary') =>
-    oid === 20 && format !== 'binary'
-      ? parseInt8
-      : pg.types.getTypeParser(oid, format as 'text')) as typeof pg.types.getTypeParser,
+    (format !== 'binary' && parsers[oid]) ||
+    pg.types.getTypeParser(oid, format as 'text')) as typeof pg.types.getTypeParser,
 };
 
 export interface PgStoreConfig {
