@@ -42,6 +42,7 @@ import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { InstallationService } from './catalog/installation-service.js';
 import { ModelSpendingService } from './spending/model-spending-service.js';
 import { AlertWebhookService } from './webhooks/alert-webhook-service.js';
+import { ModelQualityService } from './quality/quality-service.js';
 import type { WebhookSend } from './webhooks/webhook-transport.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
 import { builtInCatalog } from '../../../packages/catalog/src/index.js';
@@ -125,6 +126,7 @@ export class ControlPlaneDatabase {
   readonly runtimeTransport: RuntimeTransportService;
   readonly modelSpending: ModelSpendingService;
   readonly alertWebhooks: AlertWebhookService;
+  readonly quality: ModelQualityService;
   readonly connectors: ConnectorService;
   readonly actionPolicies: ActionPolicyService;
   readonly actions: ActionGateway;
@@ -217,6 +219,7 @@ export class ControlPlaneDatabase {
       signGrant: (payload) => this.signer.signExecutionGrant(payload),
       ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
     });
+    this.quality = new ModelQualityService(db);
     this.alertWebhooks = new AlertWebhookService(db, this.structure, this.signer, audit, {
       enabled: options.alertWebhooks ?? process.env['ALERT_WEBHOOKS_ENABLED'] === 'true',
       allowPrivateNetwork: options.allowPrivateWebhookUrls ?? false,

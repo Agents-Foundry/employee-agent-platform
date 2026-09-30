@@ -173,7 +173,7 @@ export function createApp(
     loadConversation: (conversationId, organizationId, employeeId) =>
       database.getConversation(conversationId, organizationId, employeeId),
   });
-  configureCatalogRoutes(app, database.catalog, database.installations, auth);
+  configureCatalogRoutes(app, database.catalog, database.installations, database.quality, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
   configureSpendingRoutes(app, database.modelSpending, auth);
   configureWebhookRoutes(app, database.alertWebhooks, auth);

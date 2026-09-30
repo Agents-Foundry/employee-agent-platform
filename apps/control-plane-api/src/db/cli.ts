@@ -5,13 +5,19 @@
  *                          (needs DATABASE_ADMIN_URL, a superuser)
  *   migrate                apply pending migrations as the schema owner
  *   import-sqlite <file>   copy an existing SQLite control-plane database into an empty one
+ *   import-quality <file>  import a model-quality history (the scheduled run's
+ *                          quality-history artifact, ADR 0026); runs already imported are skipped
  *
  * Connection URLs: DATABASE_MIGRATION_URL (schema owner), DATABASE_URL (tenant role),
  * DATABASE_PLATFORM_URL (platform role). Passwords are never printed.
  */
+import { readFileSync } from 'node:fs';
+import { parseHistory } from '../quality/quality-history.js';
+import { ModelQualityService } from '../quality/quality-service.js';
 import { bootstrapDatabase, type LoginRole } from './bootstrap.js';
 import { importSqlite } from './import-sqlite.js';
-import { migrate } from './migrate.js';
+import { assertSchemaCurrent, migrate } from './migrate.js';
+import { PgStore } from './pg-store.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -59,7 +65,30 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ imported: total, tables: result.tables }, null, 2));
     return;
   }
-  throw new Error('Usage: db <bootstrap|migrate|import-sqlite <file>>');
+  if (command === 'import-quality') {
+    if (!argument) throw new Error('Usage: import-quality <quality-history.jsonl>');
+    // Every line is validated before anything is written; a malformed line names its number.
+    const records = parseHistory(readFileSync(argument, 'utf8'));
+    const store = await PgStore.connect({
+      tenantUrl: required('DATABASE_URL'),
+      platformUrl: required('DATABASE_PLATFORM_URL'),
+    });
+    try {
+      await store.platform(() =>
+        assertSchemaCurrent(() =>
+          store.all<{ version: number; checksum: string }>(
+            'SELECT version, checksum FROM schema_migrations ORDER BY version',
+          ),
+        ),
+      );
+      const result = await new ModelQualityService(store).import(records);
+      console.log(`Imported ${result.imported} of ${result.received} quality results.`);
+    } finally {
+      await store.close();
+    }
+    return;
+  }
+  throw new Error('Usage: db <bootstrap|migrate|import-sqlite <file>|import-quality <file>>');
 }
 
 main().catch((error: unknown) => {

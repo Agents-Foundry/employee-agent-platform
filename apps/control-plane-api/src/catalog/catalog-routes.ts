@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AuthConfig } from '../auth.js';
 import type { CatalogService } from './catalog-service.js';
 import type { InstallationService } from './installation-service.js';
+import type { ModelQualityService } from '../quality/quality-service.js';
 
 /**
  * Catalog reads are available to any authenticated actor (blueprints hold no tenant data).
@@ -12,12 +13,17 @@ export function configureCatalogRoutes(
   app: Express,
   catalog: CatalogService,
   installations: InstallationService,
+  quality: ModelQualityService,
   config: AuthConfig,
 ): void {
   const catalogRouter = Router();
   catalogRouter.get('/blueprints', async (_req, res) => res.json(catalog.summaries()));
   catalogRouter.get('/blueprints/:id/versions/:version', async (req, res) =>
     res.json(catalog.bundle(String(req.params['id']), String(req.params['version']), 404)),
+  );
+  // Model-quality results describe catalog roles; admins read them to choose models (ADR 0026).
+  catalogRouter.get('/quality', async (req, res) =>
+    res.json(await quality.overview(res.locals['actor'], req.query)),
   );
   app.use('/api/catalog/v1', catalogRouter);
 

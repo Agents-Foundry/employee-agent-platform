@@ -8,6 +8,7 @@ export type * from './runtime/v1/protocol.js';
 export * from './runtime/v1/transport.js';
 export type * from './catalog.js';
 export type * from './model-spending.js';
+export type * from './model-quality.js';
 export * from './webhooks.js';
 export * from './actions.js';
 export * from './execution-runtime/v1/protocol.js';

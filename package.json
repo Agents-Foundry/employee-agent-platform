@@ -10,6 +10,7 @@
     "db:bootstrap": "npm run db --workspace @agents-foundry/control-plane-api -- bootstrap",
     "db:migrate": "npm run db --workspace @agents-foundry/control-plane-api -- migrate",
     "db:import-sqlite": "npm run db --workspace @agents-foundry/control-plane-api -- import-sqlite",
+    "db:import-quality": "npm run db --workspace @agents-foundry/control-plane-api -- import-quality",
     "start:admin": "ng serve control-plane-web --port 4200",
     "start:employee": "ng serve employee-desktop --port 4300",
     "tauri:dev": "tauri dev --config apps/employee-desktop/src-tauri/tauri.conf.json",
