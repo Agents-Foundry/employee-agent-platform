@@ -101,10 +101,12 @@ export interface PgStoreConfig {
 export class PgStore {
   private readonly current = new AsyncLocalStorage<Transaction>();
   private closed = false;
+  private readonly listeners = new Set<() => Promise<void>>();
 
   private constructor(
     private readonly tenantPool: pg.Pool,
     private readonly platformPool: pg.Pool,
+    private readonly listenerConfig: pg.ClientConfig,
   ) {}
 
   /**
@@ -112,16 +114,19 @@ export class PgStore {
    * security (superuser or BYPASSRLS).
    */
   static async connect(config: PgStoreConfig): Promise<PgStore> {
-    const options = (connectionString: string): pg.PoolConfig => ({
+    const options = (connectionString: string): pg.ClientConfig => ({
       connectionString,
       connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
-      max: config.maxConnections ?? 10,
+      // Detects dead connections, including a listener's, instead of waiting on them.
+      keepAlive: true,
       types,
       application_name: 'agents-foundry-control-plane',
     });
+    const max = config.maxConnections ?? 10;
     const store = new PgStore(
-      new pg.Pool(options(config.tenantUrl)),
-      new pg.Pool(options(config.platformUrl)),
+      new pg.Pool({ ...options(config.tenantUrl), max }),
+      new pg.Pool({ ...options(config.platformUrl), max }),
+      options(config.platformUrl),
     );
     try {
       const role = await store.tenantPool.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
@@ -170,10 +175,57 @@ export class PgStore {
     return { changes: (await this.query(sql, params)).rowCount ?? 0 };
   }
 
+  /**
+   * Opens a dedicated platform connection, outside the pools, listening on `channel`.
+   * `onNotify` runs for each notification. `onLost` runs once when the connection fails or the
+   * store closes; the returned function stops listening without calling it.
+   */
+  async listen(channel: string, onNotify: () => void, onLost: () => void): Promise<() => void> {
+    if (!/^[a-z_]{1,63}$/.test(channel)) throw new DatabaseScopeError('INVALID_CHANNEL');
+    if (this.closed) throw new DatabaseScopeError('DATABASE_CLOSED');
+    const client = new pg.Client(this.listenerConfig);
+    let active = true,
+      ending: Promise<void> | undefined;
+    // Stays listed until the connection has closed, so closing the store waits for it.
+    const end = (lost: boolean) =>
+      (ending ??= (async () => {
+        active = false;
+        if (lost) onLost();
+        await client.end().catch(() => {
+          // Already closed.
+        });
+        this.listeners.delete(lose);
+      })());
+    const lose = () => end(true);
+    client.on('notification', (message) => {
+      if (active && message.channel === channel) onNotify();
+    });
+    client.on('error', lose);
+    client.on('end', lose);
+    try {
+      await client.connect();
+      await client.query(`LISTEN ${channel}`);
+    } catch (error) {
+      active = false;
+      await client.end().catch(() => {});
+      throw error;
+    }
+    if (this.closed) {
+      await end(false);
+      throw new DatabaseScopeError('DATABASE_CLOSED');
+    }
+    this.listeners.add(lose);
+    return () => void end(false);
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await Promise.all([this.tenantPool.end(), this.platformPool.end()]);
+    await Promise.all([
+      ...[...this.listeners].map((lose) => lose()),
+      this.tenantPool.end(),
+      this.platformPool.end(),
+    ]);
   }
 
   private query<T extends Row>(sql: string, params: SqlParam[]): Promise<pg.QueryResult<T>> {

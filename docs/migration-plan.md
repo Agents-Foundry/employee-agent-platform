@@ -349,6 +349,23 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Tenant domain cache — delivered
+
+See [ADR 0027](adr/0027-tenant-domain-cache.md).
+
+- Each API instance remembers which organization a verified host belongs to, and concurrent
+  requests share one lookup. Unrecognized hosts are remembered briefly; errors never are.
+- Migration 0007 notifies every instance when a domain or organization changes, including
+  outside the API, and each instance then forgets everything.
+- Answers are used only while the notification listener is connected; otherwise every lookup
+  goes to the database.
+
+### Limitations
+
+- A change could go unseen for up to 60 seconds if notifications stopped arriving without the
+  connection failing.
+- Each instance holds one extra database connection for the listener.
+
 ## Model quality in the control plane — delivered
 
 See [ADR 0026](adr/0026-model-quality-view.md).
@@ -416,8 +433,7 @@ administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts
 delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md)). A weekly
 live quality run records scores per model and flags regressions
 ([ADR 0025](adr/0025-scheduled-quality-runs.md)), which administrators see in the console
-once imported ([ADR 0026](adr/0026-model-quality-view.md)). The highest-value follow-ups are:
-
-- caching verified tenant domains, which each request now looks up in the database;
-- native timestamp and JSON column types, which stay text for now so digests and ordering do
-  not change.
+once imported ([ADR 0026](adr/0026-model-quality-view.md)). Verified tenant domains are
+remembered per instance and forgotten on change ([ADR 0027](adr/0027-tenant-domain-cache.md)).
+The highest-value follow-up is native timestamp and JSON column types, which stay text for now
+so digests and ordering do not change.

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Actor } from '@agents-foundry/contracts';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { createApp } from '../src/app.js';
@@ -260,7 +260,10 @@ describe('tenant profile, account separation, membership and positions', () => {
       .prepare("UPDATE organizations SET status='suspended' WHERE id=?")
       .run(admin.organizationId);
     expect(await db.findIdentity(LOCAL_ISSUER, admin.id)).toBeUndefined();
-    expect(await db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull();
+    // The remembered resolution is dropped when the change's notification arrives.
+    await vi.waitFor(async () =>
+      expect(await db.tenancy.resolveVerifiedDomain(domain.domain)).toBeNull(),
+    );
   });
   it('creates employees without login, assigns a tenant position, retains history and invites separately', async () => {
     const position = await positionContext(db, admin);

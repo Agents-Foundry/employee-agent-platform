@@ -19,6 +19,7 @@ import {
   OrganizationStructureService,
   contains,
 } from './structure-service.js';
+import { TenantDomainCache, type TenantDomainCacheOptions } from './tenant-domain-cache.js';
 
 const id = z.string().uuid();
 const text = (max: number) => z.string().trim().max(max);
@@ -104,10 +105,14 @@ function hostname(value: string): string {
 }
 
 export class TenancyService {
+  readonly domains: TenantDomainCache;
   constructor(
     private readonly db: PgStore,
     private readonly security: OrganizationStructureService,
-  ) {}
+    domainCache: TenantDomainCacheOptions = {},
+  ) {
+    this.domains = new TenantDomainCache(db, domainCache);
+  }
   private asAdmin<T>(actor: Actor, work: () => Promise<T>): Promise<T> {
     return this.db.tenant(actor.organizationId, async () => {
       await this.security.authorize(actor);
@@ -330,7 +335,7 @@ export class TenancyService {
     }
     if (!records.some((parts) => parts.join('') === current['verification_token']))
       throw new OrganizationDomainError(409, 'DOMAIN_PROOF_NOT_FOUND');
-    return this.transaction(actor, async () => {
+    const verified = await this.transaction(actor, async () => {
       const fresh = await this.db.get(
         'SELECT version,verification_token,verification_status FROM organization_domains WHERE organization_id=? AND id=?',
         actor.organizationId,
@@ -361,6 +366,9 @@ export class TenancyService {
       );
       return (await this.listDomains(actor)).find((item) => item.id === domainId)!;
     });
+    // This instance may remember the host as unrecognized; the notification reaches the others.
+    this.domains.invalidate();
+    return verified;
   }
   async setPrimaryDomain(actor: Actor, domainId: string): Promise<TenantDomain> {
     id.parse(domainId);
@@ -389,7 +397,10 @@ export class TenancyService {
       return (await this.listDomains(actor)).find((item) => item.id === domainId)!;
     });
   }
-  /** Which organization a verified host belongs to: cross-tenant by nature (platform scope). */
+  /**
+   * Which organization a verified host belongs to: cross-tenant by nature (platform scope).
+   * Remembered per instance while change notifications are connected (ADR 0027).
+   */
   async resolveVerifiedDomain(host: string): Promise<string | null> {
     let domain: string;
     try {
@@ -397,13 +408,15 @@ export class TenancyService {
     } catch {
       return null;
     }
-    const row = await this.db.platform(() =>
-      this.db.get(
-        "SELECT d.organization_id FROM organization_domains d JOIN organizations o ON o.id=d.organization_id AND o.status='active' WHERE lower(d.domain)=lower(?) AND d.verification_status='verified'",
-        domain,
-      ),
-    );
-    return row ? String(row['organization_id']) : null;
+    return this.domains.resolve(domain, async () => {
+      const row = await this.db.platform(() =>
+        this.db.get(
+          "SELECT d.organization_id FROM organization_domains d JOIN organizations o ON o.id=d.organization_id AND o.status='active' WHERE lower(d.domain)=lower(?) AND d.verification_status='verified'",
+          domain,
+        ),
+      );
+      return row ? String(row['organization_id']) : null;
+    });
   }
   listEmployees(actor: Actor, raw: unknown): Promise<Page<EmploymentRecord>> {
     return this.asAdmin(actor, async () => {
