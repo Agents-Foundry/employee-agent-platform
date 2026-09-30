@@ -9,6 +9,7 @@ import { AgentInstallations } from './agent-installations';
 import { ActionGovernance } from './action-governance';
 import { ModelSpending } from './model-spending';
 import { AlertWebhooks } from './alert-webhooks';
+import { ModelQuality } from './model-quality';
 import { StructureAdmin } from './organization/structure-admin';
 import { JobAdmin } from './organization/job-admin';
 import { TenantAdmin } from './organization/tenant-admin';
@@ -31,6 +32,7 @@ import type {
     ActionGovernance,
     ModelSpending,
     AlertWebhooks,
+    ModelQuality,
     StructureAdmin,
     JobAdmin,
     TenantAdmin,
