@@ -22,6 +22,7 @@ import {
   isSupportedManifestVersion,
 } from '../../../packages/contracts/src/manifest.js';
 import { executionGrantSigningInput } from '../../../packages/contracts/src/execution-runtime/v1/protocol.js';
+import { webhookSigningInput } from '../../../packages/contracts/src/webhooks.js';
 
 export class ManifestSigner {
   private readonly privateKey: KeyObject;
@@ -87,6 +88,15 @@ export class ManifestSigner {
         this.privateKey,
       ).toString('base64'),
     };
+  }
+
+  /** Webhook deliveries share the key but sign a domain-separated input (ADR 0024). */
+  signWebhook(deliveryId: string, timestamp: number, body: string): string {
+    return sign(
+      null,
+      Buffer.from(webhookSigningInput(deliveryId, timestamp, body)),
+      this.privateKey,
+    ).toString('base64');
   }
 
   verify(manifest: AnySignedAgentManifest): boolean {

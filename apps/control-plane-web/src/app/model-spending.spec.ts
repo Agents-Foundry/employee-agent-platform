@@ -18,6 +18,7 @@ describe('model spending', () => {
     currency: 'USD',
     monthlyCostLimitMicros: 250_000_000,
     runCostLimitMicros: null,
+    alertThresholdsPercent: [80],
     version: 3,
     updatedBy: 'employee-1',
     updatedAt: '2026-09-01T00:00:00.000Z',
@@ -46,6 +47,18 @@ describe('model spending', () => {
     setBy: 'employee-1',
     setAt: '2026-09-01T00:00:00.000Z',
   };
+  const alert = {
+    id: '0d9f7a3e-6f55-4a1f-8a0e-2a4b7c9d1e22',
+    period: '2026-09',
+    scope: 'MONTHLY_COST',
+    thresholdPercent: 80,
+    limit: 250_000_000,
+    charged: 200_000_000,
+    currency: 'USD',
+    createdAt: '2026-09-20T00:00:00.000Z',
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+  };
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   function open() {
@@ -59,9 +72,11 @@ describe('model spending', () => {
     http: HttpTestingController,
     usage: object = report,
     prices: object[] = [price],
+    alerts: object[] = [],
   ) {
     http.expectOne(`${API_URL}/organization/model-usage`).flush(usage);
     http.expectOne(`${API_URL}/organization/model-prices`).flush({ currency: 'USD', prices });
+    http.expectOne(`${API_URL}/organization/model-alerts`).flush({ period: '2026-09', alerts });
     await settle();
   }
 
@@ -85,6 +100,8 @@ describe('model spending', () => {
     component.monthly = 2_000_000.7;
     component.perRun = 50_000;
     component.perRunCost = 2.5;
+    expect(component.thresholds).toBe('80');
+    component.thresholds = ' 50, 95 ';
     const saving = component.save();
     const put = http.expectOne(`${API_URL}/organization/model-budget`);
     expect(put.request.method).toBe('PUT');
@@ -94,6 +111,7 @@ describe('model spending', () => {
       currency: 'USD',
       monthlyCostLimitMicros: 250_000_000,
       runCostLimitMicros: 2_500_000,
+      alertThresholdsPercent: [50, 95],
       version: 3,
     });
     const saved = { ...budget, monthlyTokenLimit: 2_000_000, runTokenLimit: 50_000, version: 4 };
@@ -163,6 +181,44 @@ describe('model spending', () => {
     await removing;
     expect(component.notice()).toBe('Price for claude removed.');
     expect(component.prices()).toEqual([]);
+  });
+
+  it('shows alerts and acknowledges them', async () => {
+    const { fixture, http, component } = open();
+    const reached = {
+      ...alert,
+      id: '5b0c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d',
+      scope: 'MONTHLY_TOKENS',
+      thresholdPercent: 100,
+      limit: 1_000_000,
+      charged: 1_000_000,
+      currency: null,
+      acknowledgedBy: 'employee-1',
+      acknowledgedAt: '2026-09-21T00:00:00.000Z',
+    };
+    await load(http, report, [price], [alert, reached]);
+    fixture.detectChanges();
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).toContain(
+      '80% of the monthly model cost limit is used ($200.00 of $250.00, 2026-09).',
+    );
+    expect(text).toContain(
+      'The monthly model token limit is reached (1,000,000 tokens of 1,000,000 tokens, 2026-09).',
+    );
+    expect(fixture.nativeElement.querySelectorAll('.alert button')).toHaveLength(1);
+
+    const acknowledging = component.acknowledge(alert as never);
+    const post = http.expectOne(`${API_URL}/organization/model-alerts/${alert.id}/acknowledge`);
+    expect(post.request.method).toBe('POST');
+    post.flush({
+      ...alert,
+      acknowledgedBy: 'employee-1',
+      acknowledgedAt: '2026-09-22T00:00:00.000Z',
+    });
+    await settle();
+    await load(http, report, [price], []);
+    await acknowledging;
+    expect(component.notice()).toBe('Alert acknowledged.');
   });
 
   it('shows nothing and loads nothing outside password mode', () => {

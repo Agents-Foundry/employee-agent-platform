@@ -4,12 +4,16 @@ import { CONNECT_TIMEOUT_MS } from './pg-store.js';
 import { baselineSql } from './migrations/0001-baseline.js';
 import { modelSpendingSql } from './migrations/0002-model-spending.js';
 import { modelPricesSql } from './migrations/0003-model-prices.js';
+import { modelBudgetAlertsSql } from './migrations/0004-model-budget-alerts.js';
+import { alertWebhooksSql } from './migrations/0005-alert-webhooks.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
   { version: 1, name: 'baseline', sql: baselineSql },
   { version: 2, name: 'model-spending', sql: modelSpendingSql },
   { version: 3, name: 'model-prices', sql: modelPricesSql },
+  { version: 4, name: 'model-budget-alerts', sql: modelBudgetAlertsSql },
+  { version: 5, name: 'alert-webhooks', sql: alertWebhooksSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

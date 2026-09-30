@@ -3,8 +3,8 @@ import type { AuthConfig } from '../auth.js';
 import type { ModelSpendingService } from './model-spending-service.js';
 
 /**
- * Model spending administration (ADRs 0021 and 0022): the organization's limits, its model
- * prices and its usage.
+ * Model spending administration (ADRs 0021 to 0023): the organization's limits, its model
+ * prices, its usage and its alerts.
  * Tenant administration, so password-mode organization admins only; the tenant always comes
  * from the session.
  */
@@ -40,5 +40,11 @@ export function configureSpendingRoutes(
     await spending.prices.remove(res.locals['actor'], req.body);
     res.status(204).end();
   });
+  router.get('/model-alerts', async (req, res) =>
+    res.json(await spending.alerts.list(res.locals['actor'], req.query)),
+  );
+  router.post('/model-alerts/:alertId/acknowledge', async (req, res) =>
+    res.json(await spending.alerts.acknowledge(res.locals['actor'], req.params['alertId'])),
+  );
   app.use('/api/organization', router);
 }

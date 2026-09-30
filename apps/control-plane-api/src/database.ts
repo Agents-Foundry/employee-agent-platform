@@ -41,6 +41,8 @@ import { FileSecretStore, type SecretResolver } from './actions/secrets.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { InstallationService } from './catalog/installation-service.js';
 import { ModelSpendingService } from './spending/model-spending-service.js';
+import { AlertWebhookService } from './webhooks/alert-webhook-service.js';
+import type { WebhookSend } from './webhooks/webhook-transport.js';
 import { OrganizationDomainError } from './organization/structure-service.js';
 import { builtInCatalog } from '../../../packages/catalog/src/index.js';
 import { buildManifestPayload, type ManifestIssue } from './agents/manifest-v2.js';
@@ -88,6 +90,12 @@ export interface ControlPlaneDatabaseOptions {
   connectorFetch?: typeof fetch;
   /** Allow http and private hosts for connector URLs (local testing only). */
   allowPrivateConnectorUrls?: boolean;
+  /** ADR 0024: deliver budget alerts to organization webhooks (`ALERT_WEBHOOKS_ENABLED`). */
+  alertWebhooks?: boolean;
+  /** Allow http and private hosts for alert webhooks (local testing only). */
+  allowPrivateWebhookUrls?: boolean;
+  /** Webhook HTTP client (tests). */
+  webhookSend?: WebhookSend;
 }
 
 /** PostgreSQL connection settings from the environment (ADR 0018). */
@@ -116,6 +124,7 @@ export class ControlPlaneDatabase {
   readonly runtimeIdentities: RuntimeIdentityRegistry;
   readonly runtimeTransport: RuntimeTransportService;
   readonly modelSpending: ModelSpendingService;
+  readonly alertWebhooks: AlertWebhookService;
   readonly connectors: ConnectorService;
   readonly actionPolicies: ActionPolicyService;
   readonly actions: ActionGateway;
@@ -208,7 +217,14 @@ export class ControlPlaneDatabase {
       signGrant: (payload) => this.signer.signExecutionGrant(payload),
       ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
     });
-    this.modelSpending = new ModelSpendingService(db, this.structure, audit);
+    this.alertWebhooks = new AlertWebhookService(db, this.structure, this.signer, audit, {
+      enabled: options.alertWebhooks ?? process.env['ALERT_WEBHOOKS_ENABLED'] === 'true',
+      allowPrivateNetwork: options.allowPrivateWebhookUrls ?? false,
+      ...(options.webhookSend ? { send: options.webhookSend } : {}),
+    });
+    this.modelSpending = new ModelSpendingService(db, this.structure, audit, (org, alert, nowMs) =>
+      this.alertWebhooks.enqueueAlert(org, alert, nowMs),
+    );
     this.runtimeTransport = new RuntimeTransportService(db, this.execution, {
       gateway: this.actions,
       audit,

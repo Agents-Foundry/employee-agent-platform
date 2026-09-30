@@ -27,9 +27,14 @@ import {
   recordChange,
   type Price,
 } from './model-prices.js';
+import { ModelBudgetAlertService, periodOf, type AlertScope } from './model-budget-alerts.js';
+
+export { periodOf };
 
 /** A call granted less output than this is not worth making: the reservation is denied. */
 export const MIN_OUTPUT_TOKENS = 256;
+/** Alert thresholds before an organization chooses its own; the migration's column default. */
+export const DEFAULT_ALERT_THRESHOLDS = [80] as const;
 const MAX_LIMIT = 1_000_000_000_000;
 /** One billion units of any currency, in micros. */
 const MAX_COST_LIMIT = 1_000_000_000_000_000;
@@ -46,6 +51,11 @@ const budgetInput = z
       .optional(),
     monthlyCostLimitMicros: costLimit.optional(),
     runCostLimitMicros: costLimit.optional(),
+    alertThresholdsPercent: z
+      .array(z.number().int().min(1).max(99))
+      .max(5)
+      .refine((values) => new Set(values).size === values.length, 'duplicate threshold')
+      .optional(),
     version: z.number().int().min(0),
   })
   .strict();
@@ -74,7 +84,10 @@ const REASONS: Record<Scope | 'PRICE', string> = {
   PRICE: 'The organization limits model cost, and this model has no price.',
 };
 
-export const periodOf = (nowMs: number) => new Date(nowMs).toISOString().slice(0, 7);
+const MONTHLY_ALERTS: Partial<Record<Scope, AlertScope>> = {
+  MONTHLY: 'MONTHLY_TOKENS',
+  MONTHLY_COST: 'MONTHLY_COST',
+};
 
 /**
  * Organization model spending limits (ADR 0021) in tokens and, from per-model prices, in cost
@@ -84,13 +97,16 @@ export const periodOf = (nowMs: number) => new Date(nowMs).toISOString().slice(0
  */
 export class ModelSpendingService {
   readonly prices: ModelPriceService;
+  readonly alerts: ModelBudgetAlertService;
 
   constructor(
     private readonly db: PgStore,
     private readonly structure: OrganizationStructureService,
     private readonly audit: Audit,
+    onAlert?: ConstructorParameters<typeof ModelBudgetAlertService>[3],
   ) {
     this.prices = new ModelPriceService(db, structure);
+    this.alerts = new ModelBudgetAlertService(db, structure, audit, onAlert);
   }
 
   /**
@@ -180,8 +196,22 @@ export class ModelSpendingService {
     cost('RUN_COST', budget.runCostLimitMicros, thisRun.cost);
     const tightest = fits.sort((a, b) => a.output - b.output)[0];
     const granted = Math.min(request.maxOutputTokens, tightest?.output ?? Number.POSITIVE_INFINITY);
-    if (tightest && granted < Math.min(MIN_OUTPUT_TOKENS, request.maxOutputTokens))
-      return deny(tightest.scope, tightest.remaining);
+    if (tightest && granted < Math.min(MIN_OUTPUT_TOKENS, request.maxOutputTokens)) {
+      const denial = await deny(tightest.scope, tightest.remaining);
+      // A monthly limit that refuses a call is reached, even with a little of it left.
+      const reached = MONTHLY_ALERTS[tightest.scope];
+      if (reached)
+        await this.alerts.check({
+          organizationId,
+          actorId: runtimeId,
+          period,
+          budget,
+          charged: month,
+          reached,
+          nowMs,
+        });
+      return denial;
+    }
 
     await this.db.run(
       `INSERT INTO model_usage_reservations (id,organization_id,run_id,employee_id,agent_id,runtime_id,provider,model,
@@ -204,6 +234,7 @@ export class ModelSpendingService {
       price?.currency ?? null,
       price ? costMicros(price, request.estimatedInputTokens, granted) : null,
     );
+    await this.checkAlerts(organizationId, runtimeId, period, budget, nowMs);
     return { reservationId: request.reservationId, decision: 'ALLOWED', maxOutputTokens: granted };
   }
 
@@ -243,6 +274,14 @@ export class ModelSpendingService {
       request.reservationId,
       organizationId,
     );
+    // Reported usage above the reservation can cross a threshold.
+    await this.checkAlerts(
+      organizationId,
+      runtimeId,
+      String(row['period']),
+      this.mapBudget(await this.budgetRow(organizationId)),
+      nowMs,
+    );
     return { reservationId: request.reservationId, status: 'SETTLED' };
   }
 
@@ -254,7 +293,7 @@ export class ModelSpendingService {
 
   /**
    * Set or clear the limits. `version` is the current version (0 before the first budget).
-   * Omitted currency and cost fields keep their values. The currency is fixed once the
+   * Omitted optional fields keep their values. The currency is fixed once the
    * organization has set a price, so recorded costs never mix currencies.
    */
   setBudget(actor: Actor, raw: unknown): Promise<OrganizationModelBudget> {
@@ -277,12 +316,14 @@ export class ModelSpendingService {
         input.runCostLimitMicros === undefined
           ? before.runCostLimitMicros
           : input.runCostLimitMicros,
+        `{${(input.alertThresholdsPercent ?? before.alertThresholdsPercent).join(',')}}`,
       ];
       const now = new Date().toISOString();
       if (before.version === 0)
         await this.db.run(
           `INSERT INTO organization_model_budgets (organization_id,monthly_token_limit,run_token_limit,currency,
-           monthly_cost_limit_micros,run_cost_limit_micros,version,updated_by,updated_at) VALUES (?,?,?,?,?,?,1,?,?)`,
+           monthly_cost_limit_micros,run_cost_limit_micros,alert_thresholds,version,updated_by,updated_at)
+           VALUES (?,?,?,?,?,?,?::smallint[],1,?,?)`,
           actor.organizationId,
           ...values,
           actor.id,
@@ -291,7 +332,7 @@ export class ModelSpendingService {
       else
         await this.db.run(
           `UPDATE organization_model_budgets SET monthly_token_limit=?, run_token_limit=?, currency=?,
-           monthly_cost_limit_micros=?, run_cost_limit_micros=?, version=version+1, updated_by=?, updated_at=?
+           monthly_cost_limit_micros=?, run_cost_limit_micros=?, alert_thresholds=?::smallint[], version=version+1, updated_by=?, updated_at=?
            WHERE organization_id=? AND version=?`,
           ...values,
           actor.id,
@@ -309,6 +350,14 @@ export class ModelSpendingService {
         before.version === 0 ? null : before,
         after,
         now,
+      );
+      // A lowered limit or threshold can already be reached.
+      await this.checkAlerts(
+        actor.organizationId,
+        actor.id,
+        periodOf(Date.now()),
+        after,
+        Date.now(),
       );
       return after;
     });
@@ -369,6 +418,18 @@ export class ModelSpendingService {
     });
   }
 
+  private async checkAlerts(
+    organizationId: string,
+    actorId: string,
+    period: string,
+    budget: OrganizationModelBudget,
+    nowMs: number,
+  ) {
+    if (budget.monthlyTokenLimit === null && budget.monthlyCostLimitMicros === null) return;
+    const charged = await this.charged('period=?', organizationId, period);
+    await this.alerts.check({ organizationId, actorId, period, budget, charged, nowMs });
+  }
+
   private async charged(where: string, organizationId: string, value: string) {
     const row = await this.db.get(
       `SELECT ${CHARGED} AS charged, ${CHARGED_COST} AS charged_cost FROM model_usage_reservations
@@ -411,6 +472,7 @@ export class ModelSpendingService {
       currency: string;
       monthly_cost_limit_micros: string | null;
       run_cost_limit_micros: string | null;
+      alert_thresholds: (string | number)[];
       version: string;
       updated_by: string;
       updated_at: string;
@@ -427,6 +489,9 @@ export class ModelSpendingService {
       currency: row?.currency ?? DEFAULT_CURRENCY,
       monthlyCostLimitMicros: optional(row?.monthly_cost_limit_micros),
       runCostLimitMicros: optional(row?.run_cost_limit_micros),
+      alertThresholdsPercent: row
+        ? row.alert_thresholds.map(Number)
+        : [...DEFAULT_ALERT_THRESHOLDS],
       version: row ? Number(row.version) : 0,
       updatedBy: row?.updated_by ?? null,
       updatedAt: row?.updated_at ?? null,
