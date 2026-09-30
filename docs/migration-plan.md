@@ -327,6 +327,28 @@ See [ADR 0023](adr/0023-model-budget-alerts.md).
 - Unsettled reservations count in full, so an alert can come before a call's final usage is
   known.
 
+## Alert webhooks — delivered
+
+See [ADR 0024](adr/0024-alert-webhooks.md).
+
+- Migration 0005 adds `organization_alert_webhooks` and the `alert_webhook_deliveries`
+  outbox, with row-level security. Endpoint URLs and delivery bodies never change, and neither
+  table allows deletes.
+- Each budget alert is queued, in the transaction that raises it, for every active endpoint.
+  The API process sends due deliveries every 15 seconds, signed with the control plane's
+  Ed25519 key, and retries failures up to six attempts.
+- Outbound requests go only to HTTPS public hosts on the default port. Every resolved address
+  is checked at connect time, redirects are not followed, and a 10-second deadline applies.
+- Admins add, disable, enable and test endpoints in the console and through
+  `/api/organization/alert-webhooks`. Full URLs are never shown again once saved.
+- Off unless the operator sets `ALERT_WEBHOOKS_ENABLED=true`.
+
+### Limitations
+
+- Only budget alerts and test deliveries are sent; there is no email or chat integration.
+- Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
+- Endpoints can't be edited or removed, only disabled.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -340,6 +362,7 @@ See [ADR 0023](adr/0023-model-budget-alerts.md).
 | `EXECUTION_PROVIDER`                  | `local` | `container` runs repository code in locked-down containers (sandboxed isolation)               |
 | `EXECUTION_EGRESS_PROXY`              | `true`  | Container provider enforces grant host allow-lists through a per-operation egress proxy        |
 | `EXECUTION_ALLOW_UNRESTRICTED_EGRESS` | `false` | Without the proxy: network-needing grants run with no allow-list (development only)            |
+| `ALERT_WEBHOOKS_ENABLED`              | `false` | Admins register webhook endpoints, and the API sends signed budget alerts to them              |
 
 Flags never weaken security. Disabling a flag restores the previous behaviour; it never turns a
 deny into an allow.
@@ -357,11 +380,10 @@ evaluation suites ([ADR 0019](adr/0019-role-evaluation-suites.md)) and model-qua
 tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). Organizations limit model token
 use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)), and cost at their
 own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)), with alerts to
-administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts.md)). The
+administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts.md)),
+delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md)). The
 highest-value follow-ups are:
 
-- delivering alerts outside the product (email or signed webhooks), with outbound network
-  controls;
 - a scheduled live quality run that tracks scores per model over time;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
