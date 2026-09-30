@@ -201,5 +201,17 @@ series regresses. To do the same locally:
 npm run eval:quality:trend --workspace @agents-foundry/control-plane-api -- --history .data/quality-history.jsonl --reports .data/quality-reports
 ```
 
+To show the results to administrators (ADR 0026), download the latest `quality-history`
+artifact and import it into the control plane. Runs already imported are skipped, so the same
+growing file can be imported after every run:
+
+```bash
+npm run db:import-quality -- /absolute/path/to/quality-history.jsonl
+```
+
+It needs `DATABASE_URL` and `DATABASE_PLATFORM_URL`. The admin console's **Model quality**
+panel then shows each model's trend per role task, and `GET /api/catalog/v1/quality` returns
+the same data.
+
 A new governed action still needs a policy-engine decision, and a new capability (a connector
 or an execution operation) needs platform support first, by design.

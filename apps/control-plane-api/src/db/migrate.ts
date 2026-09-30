@@ -6,6 +6,7 @@ import { modelSpendingSql } from './migrations/0002-model-spending.js';
 import { modelPricesSql } from './migrations/0003-model-prices.js';
 import { modelBudgetAlertsSql } from './migrations/0004-model-budget-alerts.js';
 import { alertWebhooksSql } from './migrations/0005-alert-webhooks.js';
+import { modelQualityResultsSql } from './migrations/0006-model-quality-results.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -14,6 +15,7 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 3, name: 'model-prices', sql: modelPricesSql },
   { version: 4, name: 'model-budget-alerts', sql: modelBudgetAlertsSql },
   { version: 5, name: 'alert-webhooks', sql: alertWebhooksSql },
+  { version: 6, name: 'model-quality-results', sql: modelQualityResultsSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

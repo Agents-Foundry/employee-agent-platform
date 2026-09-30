@@ -133,7 +133,8 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [0022](docs/adr/0022-model-prices-and-cost-limits.md),
   [0023](docs/adr/0023-model-budget-alerts.md),
   [0024](docs/adr/0024-alert-webhooks.md),
-  [0025](docs/adr/0025-scheduled-quality-runs.md)
+  [0025](docs/adr/0025-scheduled-quality-runs.md),
+  [0026](docs/adr/0026-model-quality-view.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)
