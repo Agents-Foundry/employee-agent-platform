@@ -349,6 +349,22 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Scheduled quality runs — delivered
+
+See [ADR 0025](adr/0025-scheduled-quality-runs.md).
+
+- The **Model quality** workflow runs the live evaluation weekly, and on demand, once the
+  repository sets its model variables and credential secret. It never runs on pull requests.
+- Each trial's scores and outcomes are appended to a history carried between runs as an
+  artifact, with nothing the model wrote kept.
+- Each series (model, grader, role version, task) is compared with its previous three runs.
+  A regression fails the workflow, and the job summary shows the trend.
+
+### Limitations
+
+- The history lives in workflow artifacts, kept 90 days after the last run.
+- The workflow itself can be exercised only on GitHub.
+
 ## Feature flags
 
 | Flag                                  | Default | Effect                                                                                         |
@@ -381,10 +397,11 @@ tasks ([ADR 0020](adr/0020-model-quality-evaluations.md)). Organizations limit m
 use per month and per run ([ADR 0021](adr/0021-model-spending-limits.md)), and cost at their
 own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)), with alerts to
 administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts.md)),
-delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md)). The
-highest-value follow-ups are:
+delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md)). A weekly
+live quality run records scores per model and flags regressions
+([ADR 0025](adr/0025-scheduled-quality-runs.md)). The highest-value follow-ups are:
 
-- a scheduled live quality run that tracks scores per model over time;
+- a view of the quality history in the admin console, so model choices can be made from it;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
   not change.

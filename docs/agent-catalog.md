@@ -181,5 +181,25 @@ and stops calling models once the budget is spent. It writes JSON and Markdown r
 fails if a task does not pass. It never runs in `npm run check`; offline tests cover the
 runner with scripted models.
 
+#### Scores over time
+
+The **Model quality** workflow (`.github/workflows/quality.yml`, ADR 0025) runs the live
+evaluation every Monday at 06:00 UTC, and on demand with a chosen number of trials. It is
+skipped until the repository is configured:
+
+- variables `AF_QUALITY_MODEL`, `AF_QUALITY_JUDGE_MODEL` and `AF_QUALITY_MAX_TOKENS`, and
+  optionally `AF_QUALITY_TRIALS` (default 3), `AF_QUALITY_PROVIDER` and
+  `AF_QUALITY_PRICE_PER_MTOK`;
+- the secret `AF_MODEL_API_KEY_ANTHROPIC`.
+
+Each run adds its scores to a history carried from run to run as the `quality-history`
+artifact. It then compares every series (model, grader, role version and task) with its
+previous three runs. The job summary shows a trend table, and the workflow fails when a
+series regresses. To do the same locally:
+
+```bash
+npm run eval:quality:trend --workspace @agents-foundry/control-plane-api -- --history .data/quality-history.jsonl --reports .data/quality-reports
+```
+
 A new governed action still needs a policy-engine decision, and a new capability (a connector
 or an execution operation) needs platform support first, by design.
