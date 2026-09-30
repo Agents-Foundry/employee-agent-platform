@@ -125,7 +125,8 @@ activation remains a separate password setup path.
 Domains are globally unique and normalized to ASCII. To verify ownership, the admin adds a
 TXT record at `_agents-foundry-verification.<domain>` matching the generated challenge.
 Only verified domains resolve to tenants; login and session checks on their hostnames are
-restricted to that tenant. Deployment must supply DNS address records, HTTPS certificates and
+restricted to that tenant. Each API instance remembers resolutions and forgets them as soon as
+a domain or organization changes ([ADR 0027](adr/0027-tenant-domain-cache.md)). Deployment must supply DNS address records, HTTPS certificates and
 reverse-proxy routing. Domain registration does not configure those services.
 
 Circular unit and position hierarchies are rejected by database triggers. A job role's discipline
