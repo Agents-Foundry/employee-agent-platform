@@ -7,6 +7,7 @@ import { modelPricesSql } from './migrations/0003-model-prices.js';
 import { modelBudgetAlertsSql } from './migrations/0004-model-budget-alerts.js';
 import { alertWebhooksSql } from './migrations/0005-alert-webhooks.js';
 import { modelQualityResultsSql } from './migrations/0006-model-quality-results.js';
+import { tenantDomainNotificationsSql } from './migrations/0007-tenant-domain-notifications.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -16,6 +17,7 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 4, name: 'model-budget-alerts', sql: modelBudgetAlertsSql },
   { version: 5, name: 'alert-webhooks', sql: alertWebhooksSql },
   { version: 6, name: 'model-quality-results', sql: modelQualityResultsSql },
+  { version: 7, name: 'tenant-domain-notifications', sql: tenantDomainNotificationsSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

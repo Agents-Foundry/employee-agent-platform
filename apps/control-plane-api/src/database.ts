@@ -31,6 +31,7 @@ import { ManifestSigner } from './manifest-signing.js';
 import { OrganizationStructureService } from './organization/structure-service.js';
 import { JobArchitectureService } from './organization/job-service.js';
 import { TenancyService } from './organization/tenancy-service.js';
+import type { TenantDomainCacheOptions } from './organization/tenant-domain-cache.js';
 import { ExecutionService } from './execution/execution-service.js';
 import { RuntimeIdentityRegistry, type RuntimeIdentityConfig } from './runtime/runtime-identity.js';
 import { RuntimeTransportService } from './runtime/runtime-transport-service.js';
@@ -97,6 +98,8 @@ export interface ControlPlaneDatabaseOptions {
   allowPrivateWebhookUrls?: boolean;
   /** Webhook HTTP client (tests). */
   webhookSend?: WebhookSend;
+  /** ADR 0027: remembering which organization each verified host belongs to (tests). */
+  domainCache?: TenantDomainCacheOptions;
 }
 
 /** PostgreSQL connection settings from the environment (ADR 0018). */
@@ -158,6 +161,7 @@ export class ControlPlaneDatabase {
         );
       const database = new ControlPlaneDatabase(store, catalog, signer, options);
       if (options.seedDemo) await database.seed();
+      await database.tenancy.domains.start();
       return database;
     } catch (error) {
       if (!options.store) await store.close();
@@ -183,7 +187,7 @@ export class ControlPlaneDatabase {
       options.manifestV2Issuance ?? process.env['AGENT_MANIFEST_V2_ISSUANCE_ENABLED'] === 'true';
     this.structure = new OrganizationStructureService(db);
     this.jobs = new JobArchitectureService(db, this.structure);
-    this.tenancy = new TenancyService(db, this.structure);
+    this.tenancy = new TenancyService(db, this.structure, options.domainCache);
     this.installations = new InstallationService(db, this.catalog, this.structure);
     this.execution = new ExecutionService(
       db,
@@ -1458,6 +1462,7 @@ export class ControlPlaneDatabase {
   }
 
   close(): Promise<void> {
+    this.tenancy.domains.stop();
     return this.store.close();
   }
 
