@@ -349,6 +349,22 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Model quality in the control plane — delivered
+
+See [ADR 0026](adr/0026-model-quality-view.md).
+
+- Migration 0006 adds `model_quality_results`, a platform table every organization reads and
+  only the platform role writes; triggers keep results unchanged.
+- Operators import the scheduled run's history with `npm run db:import-quality`, validated
+  line by line, in one transaction, skipping results already imported.
+- `GET /api/catalog/v1/quality` and the admin console's Model quality panel show each model's
+  trend per role task, for admins.
+
+### Limitations
+
+- Results arrive only by operator import; there is no push from CI.
+- Results are the same for every organization.
+
 ## Scheduled quality runs — delivered
 
 See [ADR 0025](adr/0025-scheduled-quality-runs.md).
@@ -399,9 +415,9 @@ own per-model prices ([ADR 0022](adr/0022-model-prices-and-cost-limits.md)), wit
 administrators as limits are approached ([ADR 0023](adr/0023-model-budget-alerts.md)),
 delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md)). A weekly
 live quality run records scores per model and flags regressions
-([ADR 0025](adr/0025-scheduled-quality-runs.md)). The highest-value follow-ups are:
+([ADR 0025](adr/0025-scheduled-quality-runs.md)), which administrators see in the console
+once imported ([ADR 0026](adr/0026-model-quality-view.md)). The highest-value follow-ups are:
 
-- a view of the quality history in the admin console, so model choices can be made from it;
 - caching verified tenant domains, which each request now looks up in the database;
 - native timestamp and JSON column types, which stay text for now so digests and ordering do
   not change.
