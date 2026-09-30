@@ -251,16 +251,26 @@ export function summarize(reports: readonly QualityReport[], spentTokens: number
   return `${lines.join('\n')}\n`;
 }
 
+/** What a report file records about its run, for the score history (ADR 0025). */
+export interface QualityRunInfo {
+  runId: string;
+  runAt: string;
+  /** The commit evaluated, when known (`GITHUB_SHA` in scheduled runs). */
+  commit: string | null;
+  judge: { provider: string; model: string };
+}
+
 /** Writes the JSON and Markdown reports; returns the JSON path. */
 export function writeQualityReports(
   directory: string,
   reports: readonly QualityReport[],
   spentTokens: number,
+  run: QualityRunInfo,
 ): string {
   mkdirSync(directory, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const stamp = run.runAt.replace(/[:.]/g, '-');
   const path = join(directory, `quality-${stamp}.json`);
-  writeFileSync(path, `${JSON.stringify({ spentTokens, reports }, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify({ ...run, spentTokens, reports }, null, 2)}\n`);
   writeFileSync(join(directory, `quality-${stamp}.md`), summarize(reports, spentTokens));
   return path;
 }

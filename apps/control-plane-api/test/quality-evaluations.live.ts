@@ -9,6 +9,7 @@
  * AF_QUALITY_TRIALS, AF_QUALITY_JUDGE_MAX_TOKENS, AF_QUALITY_PRICE_PER_MTOK,
  * AF_QUALITY_REPORT_DIR, and the filters AF_EVALUATION_ROLE and AF_QUALITY_TASK.
  */
+import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
 import { builtInCatalog } from '../../../packages/catalog/src/index.js';
 import { isKnownAction } from '../../../packages/policy-engine/src/index.js';
@@ -37,6 +38,7 @@ if (!provider) throw new Error(`QUALITY_CONFIG_INVALID: unknown provider ${confi
 const credentials = new EnvironmentCredentialBroker();
 const ledger = new TokenLedger(config.maxTokens);
 const reports: QualityReport[] = [];
+const startedAt = new Date().toISOString();
 
 const cases = builtInCatalog.blueprints
   .filter((blueprint) => !config.role || blueprint.id === config.role)
@@ -63,7 +65,14 @@ const cases = builtInCatalog.blueprints
 describe('model-quality evaluations', () => {
   afterAll(() => {
     if (!reports.length) return;
-    const path = writeQualityReports(config.reportDir, reports, ledger.spent);
+    const path = writeQualityReports(config.reportDir, reports, ledger.spent, {
+      runId: randomUUID(),
+      runAt: startedAt,
+      commit: /^[0-9a-f]{7,64}$/.test(process.env['GITHUB_SHA'] ?? '')
+        ? process.env['GITHUB_SHA']!
+        : null,
+      judge: { provider: config.provider, model: config.judgeModel },
+    });
     console.log(`Quality report: ${path} (${ledger.spent} of ${ledger.limit} tokens)`);
   });
 
