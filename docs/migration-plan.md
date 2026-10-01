@@ -219,10 +219,12 @@ See [ADR 0018](adr/0018-postgresql-row-level-security.md).
 - The platform role bypasses row-level security. Its flows keep explicit organization filters.
 - Unique constraints are global, so they can reveal that a value (for example, an email
   address) exists in another tenant.
-- Verified tenant domains are looked up per request, without a cache.
+- Verified tenant domains are looked up per request, without a cache (cached since
+  [ADR 0027](adr/0027-tenant-domain-cache.md)).
 - The catalog is loaded at startup. A version registered later by another instance fails
   closed until restart.
-- Timestamps and JSON stay text columns.
+- Timestamps and JSON stay text columns (native since
+  [ADR 0028](adr/0028-native-column-types.md)).
 
 ## Roles as catalog data, with evaluation suites — delivered
 
@@ -349,6 +351,23 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Native column types — delivered
+
+See [ADR 0028](adr/0028-native-column-types.md).
+
+- Migration 0008 turns 78 ISO-8601 text timestamps into `timestamptz` and 15 JSON text
+  columns into `jsonb`. Times without an offset are read as UTC.
+- Signed or digest-pinned text stays `text`: manifests, execution grants, webhook bodies and
+  catalog content.
+- The API reads timestamps as the same ISO-8601 millisecond UTC strings it writes, and JSON as
+  text, so responses and contracts do not change.
+
+### Limitations
+
+- Expiries kept as epoch milliseconds (`bigint`) are unchanged.
+- `jsonb` does not keep key order or spacing; nothing reads either.
+- A stored value that is not a valid timestamp or JSON stops the upgrade until it is fixed.
+
 ## Tenant domain cache — delivered
 
 See [ADR 0027](adr/0027-tenant-domain-cache.md).
@@ -434,6 +453,7 @@ delivered to signed webhooks when enabled ([ADR 0024](adr/0024-alert-webhooks.md
 live quality run records scores per model and flags regressions
 ([ADR 0025](adr/0025-scheduled-quality-runs.md)), which administrators see in the console
 once imported ([ADR 0026](adr/0026-model-quality-view.md)). Verified tenant domains are
-remembered per instance and forgotten on change ([ADR 0027](adr/0027-tenant-domain-cache.md)).
-The highest-value follow-up is native timestamp and JSON column types, which stay text for now
-so digests and ordering do not change.
+remembered per instance and forgotten on change ([ADR 0027](adr/0027-tenant-domain-cache.md)),
+and timestamps and JSON use native column types ([ADR 0028](adr/0028-native-column-types.md)).
+The highest-value follow-up is reloading catalog versions registered by another instance,
+which now fail closed until restart, using the same change notifications as tenant domains.

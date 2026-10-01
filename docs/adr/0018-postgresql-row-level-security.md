@@ -87,8 +87,9 @@ organization's data, and SQLite allows only one writer, which limits event volum
 - The catalog of record is loaded at startup and served from memory. A version registered
   later by another instance is unknown to this one until it restarts, and fails closed.
 - Each HTTP request resolves verified tenant domains with a database round trip. There is
-  no cache yet.
+  no cache yet. (Cached since [ADR 0027](0027-tenant-domain-cache.md).)
 - Timestamps stay ISO-8601 text and JSON stays text, as in SQLite, so digests and ordering
-  are unchanged. Moving them to native types is separate work.
+  are unchanged. Moving them to native types is separate work. (Done in
+  [ADR 0028](0028-native-column-types.md).)
 - The execution runtime keeps its own local SQLite state for workspaces and operations. It
   holds no multi-tenant control-plane data.

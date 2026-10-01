@@ -99,7 +99,7 @@ describe('model-quality results', () => {
         db.store.run(
           `INSERT INTO model_quality_results (run_id,run_at,provider,model,judge_model,blueprint,suite,task,trial,passed,
            score,pass_threshold,failed_gates,run_status,tokens,imported_at)
-           VALUES ('x','2026-09-01T00:00:00.000Z','p','m','j','b@1','s','t',1,true,1,1,'[]','COMPLETED',0,'x')`,
+           VALUES ('x','2026-09-01T00:00:00.000Z','p','m','j','b@1','s','t',1,true,1,1,'[]','COMPLETED',0,'2026-09-01T00:00:00.000Z')`,
         ),
       ),
     ).rejects.toThrow(/permission denied/);
