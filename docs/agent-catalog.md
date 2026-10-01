@@ -86,6 +86,10 @@ blocked by triggers).
 - Registered versions stay resolvable after they stop shipping, so installations and agents
   that reference them keep working.
 - Installations and v2 manifests record the digest (`metadata.blueprint.digest`).
+- A version registered by another instance is loaded when its registration is notified, and
+  read from the database if it is needed first. Versions whose content no longer matches their
+  digest, or that declare actions this release does not know, are never served
+  (`BLUEPRINT_VERSION_UNSUPPORTED`). See [ADR 0029](adr/0029-catalog-version-reload.md).
 
 ## Installations
 

@@ -86,6 +86,7 @@ organization's data, and SQLite allows only one writer, which limits event volum
 
 - The catalog of record is loaded at startup and served from memory. A version registered
   later by another instance is unknown to this one until it restarts, and fails closed.
+  (Loaded without a restart since [ADR 0029](0029-catalog-version-reload.md).)
 - Each HTTP request resolves verified tenant domains with a database round trip. There is
   no cache yet. (Cached since [ADR 0027](0027-tenant-domain-cache.md).)
 - Timestamps stay ISO-8601 text and JSON stays text, as in SQLite, so digests and ordering
