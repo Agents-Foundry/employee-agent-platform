@@ -40,6 +40,13 @@ import { ActionPolicyService } from './actions/action-policy-service.js';
 import { ConnectorService } from './actions/connector-service.js';
 import { FileSecretStore, type SecretResolver } from './actions/secrets.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
+import { CredentialBroker, type CredentialBrokerOptions } from './credentials/credential-broker.js';
+import { SourceControlConnectionService } from './credentials/source-control-connections.js';
+import {
+  SecretBroker,
+  secretProviderFromEnvironment,
+  type SecretProvider,
+} from './secrets/secret-broker.js';
 import { InstallationService } from './catalog/installation-service.js';
 import { ModelSpendingService } from './spending/model-spending-service.js';
 import { AlertWebhookService } from './webhooks/alert-webhook-service.js';
@@ -100,6 +107,13 @@ export interface ControlPlaneDatabaseOptions {
   webhookSend?: WebhookSend;
   /** ADR 0027: remembering which organization each verified host belongs to (tests). */
   domainCache?: TenantDomainCacheOptions;
+  /**
+   * ADR 0031: where secret values are read; defaults to `SECRET_PROVIDER` (Vault, or the
+   * development store built on `secrets`).
+   */
+  secretProvider?: SecretProvider;
+  /** ADR 0031: repository credential lease options (tests). */
+  credentialBroker?: CredentialBrokerOptions;
 }
 
 /** PostgreSQL connection settings from the environment (ADR 0018). */
@@ -133,6 +147,9 @@ export class ControlPlaneDatabase {
   readonly connectors: ConnectorService;
   readonly actionPolicies: ActionPolicyService;
   readonly actions: ActionGateway;
+  readonly secretBroker: SecretBroker;
+  readonly sourceControl: SourceControlConnectionService;
+  readonly credentials: CredentialBroker;
 
   /**
    * Connects to PostgreSQL, checks (or applies) the schema, registers the catalog and seeds
@@ -196,6 +213,9 @@ export class ControlPlaneDatabase {
         this.getManifest(agentId, organizationId, employeeId),
       {
         resolveWorkflow: (manifest, workflowId) => this.pinnedWorkflow(manifest, workflowId),
+        onRunStopped: async (organizationId, runId, status) => {
+          await this.credentials.revokeForRun(organizationId, runId, `RUN_${status}`);
+        },
         conversationMessage: async (organizationId, conversationId, content) => {
           await this.addMessage(conversationId, 'AGENT', content, organizationId);
         },
@@ -213,6 +233,22 @@ export class ControlPlaneDatabase {
       allowPrivateNetwork: options.allowPrivateConnectorUrls ?? false,
     });
     this.actionPolicies = new ActionPolicyService(db, this.structure, audit);
+    const developmentSecrets = options.secrets ?? new FileSecretStore();
+    this.secretBroker = new SecretBroker(
+      options.secretProvider ?? secretProviderFromEnvironment(developmentSecrets),
+    );
+    this.sourceControl = new SourceControlConnectionService(db, this.structure, audit, {
+      allowPrivateNetwork: options.allowPrivateConnectorUrls ?? false,
+    });
+    this.credentials = new CredentialBroker(
+      db,
+      this.secretBroker,
+      this.sourceControl,
+      this.structure,
+      (grant) => this.signer.verifyExecutionGrant(grant),
+      audit,
+      options.credentialBroker,
+    );
     this.actions = new ActionGateway(db, this.execution, {
       loadManifest: (agentId, organizationId, employeeId) =>
         this.getManifest(agentId, organizationId, employeeId),
@@ -220,7 +256,8 @@ export class ControlPlaneDatabase {
       audit,
       connectors: this.connectors,
       policies: this.actionPolicies,
-      secrets: options.secrets ?? new FileSecretStore(),
+      secrets: this.secretBroker,
+      credentials: this.credentials,
       signGrant: (payload) => this.signer.signExecutionGrant(payload),
       ...(options.connectorFetch ? { fetch: options.connectorFetch } : {}),
     });

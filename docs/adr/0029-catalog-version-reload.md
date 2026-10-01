@@ -60,4 +60,6 @@ thing that can be stale is the set of versions it knows.
   authentication and read one row by primary key.
 - Content is not checked against the catalog schemas when loaded, because older versions
   were registered under older schemas. It is checked against its digest instead, which was
-  computed from content validated by the release that registered it.
+  computed from content validated by the release that registered it. (Superseded: stored
+  bundles are validated against the current strict schemas since
+  [ADR 0030](0030-catalog-bundle-compatibility.md).)

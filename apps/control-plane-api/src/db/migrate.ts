@@ -10,6 +10,8 @@ import { modelQualityResultsSql } from './migrations/0006-model-quality-results.
 import { tenantDomainNotificationsSql } from './migrations/0007-tenant-domain-notifications.js';
 import { nativeColumnTypesSql } from './migrations/0008-native-column-types.js';
 import { catalogVersionNotificationsSql } from './migrations/0009-catalog-version-notifications.js';
+import { catalogBundleSchemaSql } from './migrations/0010-catalog-bundle-schema.js';
+import { repositoryCredentialsSql } from './migrations/0011-repository-credentials.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -22,6 +24,8 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 7, name: 'tenant-domain-notifications', sql: tenantDomainNotificationsSql },
   { version: 8, name: 'native-column-types', sql: nativeColumnTypesSql },
   { version: 9, name: 'catalog-version-notifications', sql: catalogVersionNotificationsSql },
+  { version: 10, name: 'catalog-bundle-schema', sql: catalogBundleSchemaSql },
+  { version: 11, name: 'repository-credentials', sql: repositoryCredentialsSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

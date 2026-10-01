@@ -87,9 +87,13 @@ blocked by triggers).
   that reference them keep working.
 - Installations and v2 manifests record the digest (`metadata.blueprint.digest`).
 - A version registered by another instance is loaded when its registration is notified, and
-  read from the database if it is needed first. Versions whose content no longer matches their
-  digest, or that declare actions this release does not know, are never served
-  (`BLUEPRINT_VERSION_UNSUPPORTED`). See [ADR 0029](adr/0029-catalog-version-reload.md).
+  read from the database if it is needed first. See
+  [ADR 0029](adr/0029-catalog-version-reload.md).
+- Every stored bundle records its structure (`bundle_schema`, currently
+  `agents-foundry.catalog-bundle/v1`) and is served only if this release implements that
+  schema and the bundle passes the current strict schemas, its digest, its stored id and
+  version, exact pinning and the consistency rules. Otherwise it fails with
+  `BLUEPRINT_VERSION_UNSUPPORTED`. See [ADR 0030](adr/0030-catalog-bundle-compatibility.md).
 
 ## Installations
 

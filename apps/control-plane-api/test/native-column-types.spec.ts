@@ -130,7 +130,7 @@ describe('native column types (migration 0008)', () => {
         .filter((item) => item.column_name.endsWith('_at') && item.data_type === 'text')
         .map((item) => `${item.table_name}.${item.column_name}`),
     ).toEqual(['schema_migrations.applied_at']);
-    expect(columns.filter((item) => item.data_type === 'timestamp with time zone').length).toBe(78);
+    expect(columns.filter((item) => item.data_type === 'timestamp with time zone').length).toBe(85);
     for (const [table, column] of [
       ['agent_runs', 'task'],
       ['agent_events', 'payload'],
@@ -140,7 +140,7 @@ describe('native column types (migration 0008)', () => {
       ['model_quality_results', 'failed_gates'],
     ] as const)
       expect(type(table, column)).toBe('jsonb');
-    expect(columns.filter((item) => item.data_type === 'jsonb').length).toBe(15);
+    expect(columns.filter((item) => item.data_type === 'jsonb').length).toBe(16);
     for (const [table, column] of [
       ['agent_manifests', 'body'],
       ['agent_execution_grants', 'signed_grant'],

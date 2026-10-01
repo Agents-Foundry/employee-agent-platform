@@ -90,6 +90,24 @@ export class ManifestSigner {
     };
   }
 
+  /** Whether this signer issued `grant` unchanged (credential redemption, ADR 0031). */
+  verifyExecutionGrant(grant: SignedExecutionGrant): boolean {
+    try {
+      return (
+        grant.algorithm === 'Ed25519' &&
+        grant.keyId === this.verificationKey.keyId &&
+        verify(
+          null,
+          Buffer.from(executionGrantSigningInput(grant.payload)),
+          this.publicKey,
+          Buffer.from(grant.signature, 'base64'),
+        )
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Webhook deliveries share the key but sign a domain-separated input (ADR 0024). */
   signWebhook(deliveryId: string, timestamp: number, body: string): string {
     return sign(

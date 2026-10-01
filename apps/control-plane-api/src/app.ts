@@ -18,8 +18,10 @@ import { configureRuntimeRoutes } from './runtime/runtime-routes.js';
 import { configureSpendingRoutes } from './spending/spending-routes.js';
 import { configureWebhookRoutes } from './webhooks/webhook-routes.js';
 import { configureActionRoutes } from './actions/action-routes.js';
+import { configureCredentialRoutes } from './credentials/credential-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
+import { ExecutionProtocolError } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 
 const provisioningSchema = z
   .object({
@@ -135,7 +137,12 @@ export function createApp(
     }),
   );
   // Signed runtime transport: its own body parser, limits and authentication (ADR 0011).
-  configureRuntimeRoutes(app, database.runtimeIdentities, database.runtimeTransport);
+  configureRuntimeRoutes(
+    app,
+    database.runtimeIdentities,
+    database.runtimeTransport,
+    database.credentials,
+  );
   app.use(express.json({ limit: '64kb' }));
   app.use(
     rateLimit({
@@ -175,6 +182,7 @@ export function createApp(
   });
   configureCatalogRoutes(app, database.catalog, database.installations, database.quality, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
+  configureCredentialRoutes(app, database.sourceControl, database.credentials, auth);
   configureSpendingRoutes(app, database.modelSpending, auth);
   configureWebhookRoutes(app, database.alertWebhooks, auth);
 
@@ -406,6 +414,8 @@ export function createApp(
       return response.status(error.status).json({ error: error.message });
     if (error instanceof RuntimeProtocolError)
       return response.status(400).json({ error: error.code, details: error.issues });
+    if (error instanceof ExecutionProtocolError)
+      return response.status(400).json({ error: error.code });
     if (error instanceof Error && error.message.endsWith('_FORBIDDEN')) {
       return response.status(403).json({ error: error.message });
     }

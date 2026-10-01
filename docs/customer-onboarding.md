@@ -17,7 +17,11 @@ Create an ignored `.data/new-customer.json` in the repository root:
 ```json
 {
   "organization": { "name": "Example Company", "slug": "example-company" },
-  "admin": { "displayName": "Customer Administrator", "email": "admin@example.com", "team": "Administration" }
+  "admin": {
+    "displayName": "Customer Administrator",
+    "email": "admin@example.com",
+    "team": "Administration"
+  }
 }
 ```
 

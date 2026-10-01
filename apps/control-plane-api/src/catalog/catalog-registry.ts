@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type {
   AgentBlueprintVersionDefinition,
   CatalogDefinitions,
@@ -94,49 +94,133 @@ export function resolveCatalog(
       tools: resolve('tool', blueprint.tools, tools),
       workflows: resolve('workflow', blueprint.workflows, workflows),
     };
-    const toolIds = new Set(blueprint.tools.map((tool) => tool.id));
-    const skillIds = new Set(blueprint.skills.map((skill) => skill.id));
-    const connectorCapabilities = new Set(blueprint.connectors.flatMap((c) => c.capabilities));
-    const actions = new Set(blueprint.policy.actions);
-    const questions = new Map(blueprint.questionnaire.map((q) => [q.id, q]));
-    for (const action of actions)
-      if (!isKnownAction(action)) problems.push(`${at}: policy action ${action} is unknown`);
-    for (const skill of content.skills) {
-      for (const tool of skill.requires.tools)
-        if (!toolIds.has(tool)) problems.push(`${at}: skill ${skill.id} requires tool ${tool}`);
-      for (const capability of skill.requires.connectorCapabilities)
-        if (!connectorCapabilities.has(capability))
-          problems.push(`${at}: skill ${skill.id} requires connector capability ${capability}`);
-    }
-    for (const workflow of content.workflows)
-      for (const step of workflow.steps) {
-        if (!skillIds.has(step.skill))
-          problems.push(`${at}: workflow ${workflow.id} step ${step.id} uses skill ${step.skill}`);
-        if (step.action && !actions.has(step.action))
-          problems.push(`${at}: workflow ${workflow.id} step ${step.id} action ${step.action}`);
-      }
-    for (const connector of blueprint.connectors) {
-      const question = questions.get(connector.selection.questionId);
-      const options = [...(question?.options ?? [])].sort();
-      if (question?.type !== 'multiselect')
-        problems.push(`${at}: connector ${connector.capability} needs a multiselect question`);
-      else if (
-        canonicalManifest(options) !==
-        canonicalManifest(Object.keys(connector.selection.providers).sort())
-      )
-        problems.push(`${at}: connector ${connector.capability} must map every option`);
-    }
-    for (const mcp of blueprint.mcp) {
-      if (!mcp.whenAnswer) continue;
-      const question = questions.get(mcp.whenAnswer.questionId);
-      if (question?.type !== 'multiselect' || !question.options?.includes(mcp.whenAnswer.includes))
-        problems.push(`${at}: mcp ${mcp.id} condition references an unknown option`);
-    }
+    checkBundle(content, at, isKnownAction, problems);
     bundles.push({ content, digest: bundleDigest(content) });
   }
   validateEvaluations(definitions, [...blueprints.values()], tools, isKnownAction, problems);
   if (problems.length) throw new CatalogError(problems);
   return bundles;
+}
+
+/** The structure of every bundle this release can interpret; see `storedBundleProblems`. */
+export const CATALOG_BUNDLE_SCHEMA = 'agents-foundry.catalog-bundle/v1';
+
+const bundleSchema = z
+  .object({
+    blueprint: blueprintVersionSchema,
+    skills: z.array(skillDefinitionSchema),
+    tools: z.array(toolDefinitionSchema),
+    workflows: z.array(workflowDefinitionSchema),
+  })
+  .strict();
+
+export interface StoredBundle {
+  blueprintId: string;
+  version: string;
+  digest: string;
+  schema: string;
+  content: string;
+}
+
+/**
+ * Why this release cannot serve a bundle read from the catalog of record, possibly
+ * registered by another release (ADR 0030); empty when it can. A bundle must:
+ * - declare a bundle schema this release implements;
+ * - pass the current strict schemas, so unknown fields are refused rather than ignored;
+ * - be the blueprint and version it is stored as, and still match its digest;
+ * - contain exactly the skills, tools and workflows its blueprint pins, consistently, and
+ *   declare only actions the current policy engine knows.
+ */
+export function storedBundleProblems(
+  stored: StoredBundle,
+  isKnownAction: (action: string) => boolean,
+): string[] {
+  if (stored.schema !== CATALOG_BUNDLE_SCHEMA)
+    return [`bundle schema ${stored.schema} is not supported`];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stored.content);
+  } catch {
+    return ['content is not JSON'];
+  }
+  const parsed = bundleSchema.safeParse(raw);
+  if (!parsed.success)
+    return parsed.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`);
+  const content = raw as BlueprintBundleContent;
+  const { blueprint } = content;
+  const problems: string[] = [];
+  if (blueprint.id !== stored.blueprintId || blueprint.version !== stored.version)
+    problems.push(`content is ${key(blueprint.id, blueprint.version)}`);
+  if (bundleDigest(content) !== stored.digest) problems.push('content does not match its digest');
+  const pinned = (
+    kind: string,
+    refs: { id: string; version: string }[],
+    items: { id: string; version: string }[],
+  ) => {
+    if (
+      refs.length !== items.length ||
+      refs.some((ref, i) => key(ref.id, ref.version) !== key(items[i]!.id, items[i]!.version))
+    )
+      problems.push(`${kind}s are not exactly the pinned ${kind}s`);
+  };
+  pinned('skill', blueprint.skills, content.skills);
+  pinned('tool', blueprint.tools, content.tools);
+  pinned('workflow', blueprint.workflows, content.workflows);
+  checkBundle(
+    content,
+    `blueprint ${key(blueprint.id, blueprint.version)}`,
+    isKnownAction,
+    problems,
+  );
+  return problems;
+}
+
+/** Consistency rules every resolved bundle must satisfy. */
+function checkBundle(
+  content: BlueprintBundleContent,
+  at: string,
+  isKnownAction: (action: string) => boolean,
+  problems: string[],
+): void {
+  const { blueprint } = content;
+  const toolIds = new Set(blueprint.tools.map((tool) => tool.id));
+  const skillIds = new Set(blueprint.skills.map((skill) => skill.id));
+  const connectorCapabilities = new Set(blueprint.connectors.flatMap((c) => c.capabilities));
+  const actions = new Set(blueprint.policy.actions);
+  const questions = new Map(blueprint.questionnaire.map((q) => [q.id, q]));
+  for (const action of actions)
+    if (!isKnownAction(action)) problems.push(`${at}: policy action ${action} is unknown`);
+  for (const skill of content.skills) {
+    for (const tool of skill.requires.tools)
+      if (!toolIds.has(tool)) problems.push(`${at}: skill ${skill.id} requires tool ${tool}`);
+    for (const capability of skill.requires.connectorCapabilities)
+      if (!connectorCapabilities.has(capability))
+        problems.push(`${at}: skill ${skill.id} requires connector capability ${capability}`);
+  }
+  for (const workflow of content.workflows)
+    for (const step of workflow.steps) {
+      if (!skillIds.has(step.skill))
+        problems.push(`${at}: workflow ${workflow.id} step ${step.id} uses skill ${step.skill}`);
+      if (step.action && !actions.has(step.action))
+        problems.push(`${at}: workflow ${workflow.id} step ${step.id} action ${step.action}`);
+    }
+  for (const connector of blueprint.connectors) {
+    const question = questions.get(connector.selection.questionId);
+    const options = [...(question?.options ?? [])].sort();
+    if (question?.type !== 'multiselect')
+      problems.push(`${at}: connector ${connector.capability} needs a multiselect question`);
+    else if (
+      canonicalManifest(options) !==
+      canonicalManifest(Object.keys(connector.selection.providers).sort())
+    )
+      problems.push(`${at}: connector ${connector.capability} must map every option`);
+  }
+  for (const mcp of blueprint.mcp) {
+    if (!mcp.whenAnswer) continue;
+    const question = questions.get(mcp.whenAnswer.questionId);
+    if (question?.type !== 'multiselect' || !question.options?.includes(mcp.whenAnswer.includes))
+      problems.push(`${at}: mcp ${mcp.id} condition references an unknown option`);
+  }
 }
 
 /**

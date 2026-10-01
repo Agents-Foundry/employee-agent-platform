@@ -81,6 +81,7 @@ class Refusal extends Error {
  *   log?: (entry: Record<string, unknown>) => void;
  *   lookup?: (host: string) => Promise<string[]>;
  *   isBlocked?: (address: string) => boolean;
+ *   portFor?: (host: string, port: number) => number;
  * }} options
  */
 export function createEgressProxy(options) {
@@ -90,6 +91,8 @@ export function createEgressProxy(options) {
     options.lookup ??
     (async (host) => (await dnsLookup(host, { all: true, verbatim: true })).map((a) => a.address));
   const isBlocked = options.isBlocked ?? isBlockedAddress;
+  // Tests only: the local port standing in for an allowed host's port.
+  const portFor = options.portFor ?? ((_host, port) => port);
 
   /** The address to connect to, or a refusal. Every resolved address must be acceptable. */
   async function resolve(host, port) {
@@ -154,7 +157,7 @@ export function createEgressProxy(options) {
     const upstream = http.request(
       {
         host: address,
-        port,
+        port: portFor(normalizeHost(target.hostname), port),
         method: request.method,
         path: `${target.pathname}${target.search}`,
         headers,
@@ -196,7 +199,7 @@ export function createEgressProxy(options) {
       return;
     }
     record('CONNECT', host, port, 'ALLOW');
-    const upstream = connect({ host: address, port }, () => {
+    const upstream = connect({ host: address, port: portFor(normalizeHost(host), port) }, () => {
       client.write('HTTP/1.1 200 Connection established\r\n\r\n');
       if (head.length) upstream.write(head);
       upstream.pipe(client);

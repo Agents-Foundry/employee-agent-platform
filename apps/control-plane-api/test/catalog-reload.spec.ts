@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bundleDigest, type BlueprintBundleContent } from '../src/catalog/catalog-registry.js';
+import {
+  CATALOG_BUNDLE_SCHEMA,
+  bundleDigest,
+  type BlueprintBundleContent,
+} from '../src/catalog/catalog-registry.js';
 import { CATALOG_VERSION_CHANNEL, CatalogService } from '../src/catalog/catalog-service.js';
 import type { ChangeFeed } from '../src/db/change-listener.js';
 import { ControlPlaneDatabase } from '../src/database.js';
@@ -21,13 +25,14 @@ const silentFeed = (connects = true): ChangeFeed => ({
 
 /**
  * Registers a QA version the way another release's instance would: a copy of a shipped
- * version under a new number, stored with its digest unless `digest` overrides it.
+ * version under a new number, stored with its digest and the current bundle schema unless
+ * `stored` overrides them.
  */
 async function register(
   store: PgStore,
   version: string,
   change: (content: BlueprintBundleContent) => void = () => {},
-  digest?: string,
+  stored: { digest?: string; schema?: string } = {},
 ): Promise<void> {
   const raw = new RawSql(store);
   const row = await raw
@@ -39,12 +44,13 @@ async function register(
   change(content);
   await raw
     .prepare(
-      'INSERT INTO catalog_blueprint_versions (blueprint_id,version,digest,content,registered_at) VALUES (?,?,?,?,?)',
+      'INSERT INTO catalog_blueprint_versions (blueprint_id,version,digest,bundle_schema,content,registered_at) VALUES (?,?,?,?,?,?)',
     )
     .run(
       qa.id,
       version,
-      digest ?? bundleDigest(content),
+      stored.digest ?? bundleDigest(content),
+      stored.schema ?? CATALOG_BUNDLE_SCHEMA,
       JSON.stringify(content),
       new Date().toISOString(),
     );
@@ -159,7 +165,7 @@ describe('catalog versions registered by another instance', () => {
     const catalog = await open({ feed: silentFeed() });
     const store = fixture!.store;
     // Content that no longer matches its digest.
-    await register(store, '1.3.0', () => {}, '0'.repeat(64));
+    await register(store, '1.3.0', () => {}, { digest: '0'.repeat(64) });
     // A version declaring an action this release's policy engine does not know.
     await register(store, '1.4.0', (content) =>
       content.blueprint.policy.actions.push('reactor.melt'),
@@ -176,5 +182,42 @@ describe('catalog versions registered by another instance', () => {
       ['1.2.0', true],
       ['1.1.0', false],
     ]);
+  });
+
+  it('refuses bundles this release cannot interpret, even with a matching digest', async () => {
+    const catalog = await open({ feed: silentFeed() });
+    const store = fixture!.store;
+    const refused: [string, (content: BlueprintBundleContent) => void, string?][] = [
+      // Written in a bundle structure a newer release introduced.
+      ['2.0.0', () => {}, 'agents-foundry.catalog-bundle/v2'],
+      // A field the current schemas do not know is refused, not ignored.
+      ['2.1.0', (content) => Object.assign(content.blueprint, { sandboxEscape: true })],
+      ['2.2.0', (content) => Object.assign(content.tools[0]!, { scopes: ['*'] })],
+      // A field of the wrong shape.
+      ['2.3.0', (content) => Object.assign(content.blueprint, { mission: 42 })],
+      // Not exactly the pinned definitions.
+      ['2.4.0', (content) => content.tools.pop()],
+      ['2.5.0', (content) => content.skills.push(structuredClone(content.skills[0]!))],
+      // Internally inconsistent: a workflow step uses an action the blueprint does not grant.
+      ['2.6.0', (content) => (content.workflows[0]!.steps[0]!.action = 'workspace.command')],
+    ];
+    for (const [version, change, schema] of refused)
+      await register(store, version, change, schema ? { schema } : {});
+    const outcomes = await Promise.all(
+      refused.map(([version]) =>
+        catalog.bundle(qa.id, version, 404).then(
+          () => [version, 'served'],
+          (error: { status?: number; message: string }) => [version, error.status, error.message],
+        ),
+      ),
+    );
+    expect(outcomes).toEqual(
+      refused.map(([version]) => [version, 409, 'BLUEPRINT_VERSION_UNSUPPORTED']),
+    );
+    await catalog.reload();
+    expect((await versions(catalog)).map(([version]) => version)).toEqual(['1.2.0', '1.1.0']);
+    // The same content under the current schema is served.
+    await register(store, '2.7.0');
+    expect((await catalog.bundle(qa.id, '2.7.0')).blueprint.version).toBe('2.7.0');
   });
 });

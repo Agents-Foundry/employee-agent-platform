@@ -3,6 +3,13 @@ import { z } from 'zod';
 import { artifactRegistrationSchema } from '../../runtime/v1/schemas.js';
 import type { ExecutionOperation } from '../../execution.js';
 import {
+  credentialReleaseOutcomes,
+  sourceControlProviders,
+  type CredentialRedeemRequest,
+  type CredentialRedeemResponse,
+  type CredentialReleaseRequest,
+} from '../../credentials.js';
+import {
   EXECUTION_GRANT_KIND,
   EXECUTION_PROTOCOL_V1,
   type ExecuteOperationRequest,
@@ -30,6 +37,13 @@ const recordId = z.string().regex(/^[A-Za-z0-9_.:-]{1,120}$/);
 const timestamp = z.iso.datetime({ offset: true });
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const slug = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/);
+/** A lower-case DNS name: no port, credentials, IP brackets or trailing dot. */
+export const hostname = z
+  .string()
+  .max(253)
+  .regex(
+    /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/,
+  );
 
 /**
  * Workspace-relative path: `.` or `/`-separated segments of safe characters. No absolute
@@ -170,6 +184,14 @@ export const signedExecutionGrantSchema = z
         operationDigest: digest,
         isolation: z.enum(['sandboxed', 'local']),
         limits: limitsSchema,
+        credential: z
+          .object({
+            leaseId: uuid,
+            provider: z.enum(sourceControlProviders),
+            gitHost: hostname,
+          })
+          .strict()
+          .optional(),
         issuedAt: timestamp,
         expiresAt: timestamp,
       })
@@ -235,6 +257,53 @@ const responseSchema = z
     artifacts: z.array(artifactRegistrationSchema).max(50),
   })
   .strict();
+
+// Credential redemption between an execution runtime and the control plane (ADR 0031).
+
+const redeemRequestSchema = z.object({ leaseId: uuid, grant: z.unknown() }).strict();
+
+export function parseCredentialRedeemRequest(input: unknown): CredentialRedeemRequest {
+  const parsed = redeemRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new ExecutionProtocolError('EXECUTION_REQUEST_INVALID', issues(parsed.error));
+  return { leaseId: parsed.data.leaseId, grant: parsed.data.grant };
+}
+
+const redeemResponseSchema = z
+  .object({
+    leaseId: uuid,
+    credential: z
+      .object({
+        scheme: z.literal('basic'),
+        username: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
+        password: z
+          .string()
+          .min(1)
+          .max(4096)
+          .regex(/^[\x21-\x7e]+$/),
+      })
+      .strict(),
+    expiresAt: timestamp,
+  })
+  .strict();
+
+export function parseCredentialRedeemResponse(input: unknown): CredentialRedeemResponse {
+  const parsed = redeemResponseSchema.safeParse(input);
+  // Issues are not reported: they could quote the credential.
+  if (!parsed.success) throw new ExecutionProtocolError('EXECUTION_RESPONSE_INVALID');
+  return parsed.data;
+}
+
+const releaseRequestSchema = z
+  .object({ leaseId: uuid, grantId: uuid, outcome: z.enum(credentialReleaseOutcomes) })
+  .strict();
+
+export function parseCredentialReleaseRequest(input: unknown): CredentialReleaseRequest {
+  const parsed = releaseRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new ExecutionProtocolError('EXECUTION_REQUEST_INVALID', issues(parsed.error));
+  return parsed.data;
+}
 
 export function parseExecuteOperationResponse(input: unknown): ExecuteOperationResponse {
   const parsed = responseSchema.safeParse(input);

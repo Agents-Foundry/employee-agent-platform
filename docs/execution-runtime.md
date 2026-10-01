@@ -23,13 +23,38 @@ agent runtime tool (repository / browser)
 
 | Operation              | Governed by                      | Tool           | Notes                                                                                                                                                                               |
 | ---------------------- | -------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git.checkout`         | `repository.read`                | `repository`   | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only                                                                                      |
+| `git.checkout`         | `repository.read`                | `repository`   | Shallow clone of a branch or tag into a new workspace subdirectory; configured repository only; private repositories through a credential lease (below)                             |
 | `git.status`           | `repository.read`                | `repository`   | `git status --porcelain=v1 --branch`                                                                                                                                                |
 | `file.read`            | `repository.read`                | `repository`   | Text only, capped at 256 KiB; the path must stay inside the workspace after resolving symlinks                                                                                      |
 | `playwright.run`       | `qa.execute_playwright`          | `browser`      | Runs the project's installed `@playwright/test` with a JSON reporter against the configured QA origin; requires approval                                                            |
 | `file.write`           | `repository.write`               | `code-editor`  | Phase G. Inline UTF-8 content, at most 128 KiB; the deepest existing ancestor must resolve inside the workspace, and links are never written through                                |
 | `command`              | `workspace.command`              | `build`        | Phase G. Only `npm run <script>` for the agent's configured `projectScripts`; network `NONE`; container provider only                                                               |
 | `dependencies.install` | `workspace.dependencies.install` | `dependencies` | `npm ci --ignore-scripts` from the agent's configured `packageRegistryUrl` only, behind the egress proxy; container provider only ([ADR 0017](adr/0017-dependency-installation.md)) |
+
+## Private repositories
+
+See [ADR 0031](adr/0031-secret-and-credential-brokering.md).
+
+```text
+control plane: grant for git.checkout of a repository a source-control connection allows
+  └─ creates a credential lease (5 minutes, one use) and names it in the signed grant
+execution runtime, on receiving that grant:
+  ├─ POST /runtime/v1/credentials/redeem {leaseId, grant}   signed with its own identity
+  │     → the credential, once, if the lease, grant, run and connection all still hold
+  ├─ git clone through the egress proxy, credential as a header to that repository only
+  └─ POST /runtime/v1/credentials/release {leaseId, grantId, outcome}
+```
+
+- The agent runtime and the model never receive a credential, only the grant.
+- The credential is given to `git` through the child process environment. It is never in the
+  remote URL, `.git/config`, a credential helper, the command line, output or an artifact.
+- Every HTTPS checkout leaves through the egress proxy, limited to the grant's hosts.
+  Redirects are not followed.
+- Submodules are never fetched.
+- A failed, timed-out or cancelled checkout is removed. After a crash, the next start removes
+  the partial checkout, releases the lease and closes the grant (`OPERATION_INTERRUPTED`).
+- Without an execution identity, a grant that names a lease fails with
+  `CREDENTIALS_UNAVAILABLE`; it never falls back to an anonymous clone.
 
 ## Local provider guarantees
 
@@ -89,6 +114,10 @@ allow-list.
 | `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                                                        |
 | `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider                                               |
 | `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                         |
+| `EXECUTION_CONTROL_PLANE_URL`           | unset                     | Control plane to redeem credential leases from; set with the two variables below                         |
+| `EXECUTION_RUNTIME_ID`                  | unset                     | This runtime's identity, registered in the control plane with `"role": "execution"`                      |
+| `EXECUTION_RUNTIME_KEY_PATH`            | unset                     | Its Ed25519 private key (PKCS#8 PEM)                                                                     |
+| `EXECUTION_GIT_CA_FILE`                 | unset                     | A CA bundle git also trusts, for a git host with a private CA                                            |
 | `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                   |
 | `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                           |
 | `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`; `sandbox/playwright.Dockerfile` builds one          |
@@ -113,7 +142,11 @@ npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.
   Chromium crashes under 64.
 - Dependency installation is npm only (`npm ci`, install scripts disabled), from one
   configured registry without credentials. Packages that need install scripts do not work.
-- Only public HTTPS repositories work; checkouts are of branches or tags, not commit SHAs.
+- Checkouts are of branches or tags, not commit SHAs, over HTTPS only. Private repositories
+  need a GitHub or Bitbucket source-control connection.
+- Submodules are not fetched.
+- `git.checkout` runs on the host. Its network is limited by the egress proxy, not by a
+  container.
 - Shell commands are never granted; only allow-listed `npm run` scripts are.
-- If the execution runtime crashes mid-operation, the grant stays `RUNNING` and can't be
-  reused. The action must be requested again.
+- If the execution runtime crashes mid-operation, the grant can't be reused. The action must
+  be requested again. Only credentialed checkouts are cleaned up at the next start.

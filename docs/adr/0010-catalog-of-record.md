@@ -25,5 +25,5 @@ not part of the bundle; they are evaluated from the policy engine at resolution 
 - Changing a released version requires publishing a new version.
 - Versions that stop shipping remain resolvable for existing installations.
 - A policy change never changes a bundle's identity, and a bundle can never grant itself an outcome.
-- Rolling back to code that shipped a *different* body for an already registered version fails
+- Rolling back to code that shipped a _different_ body for an already registered version fails
   startup instead of drifting silently.

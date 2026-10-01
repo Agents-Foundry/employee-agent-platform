@@ -1,4 +1,5 @@
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
+import type { CheckoutCredential } from '../credential-client.js';
 
 export interface WorkspaceHandle {
   id: string;
@@ -25,6 +26,15 @@ export interface ProviderOutcome {
   artifacts: ProducedArtifact[];
 }
 
+/** What the execution service hands a provider beyond the operation itself. */
+export interface OperationContext {
+  /**
+   * A credential redeemed for exactly this `git.checkout` (ADR 0031). Providers use it only
+   * for that checkout's network requests and must never write it anywhere.
+   */
+  credential?: CheckoutCredential;
+}
+
 export type EnforcedLimit =
   'timeout' | 'output' | 'filesystem' | 'environment' | 'cpu' | 'memory' | 'processes' | 'network';
 
@@ -42,5 +52,6 @@ export interface ExecutionProvider {
     operation: ExecutionOperation,
     limits: ResourceLimits,
     signal: AbortSignal,
+    context?: OperationContext,
   ): Promise<ProviderOutcome>;
 }

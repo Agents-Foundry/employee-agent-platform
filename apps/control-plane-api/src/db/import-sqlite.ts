@@ -9,7 +9,8 @@ import { migrate } from './migrate.js';
 
 /**
  * Tables in foreign-key order. `select` overrides how rows are read from SQLite: the two
- * tables that gained `organization_id` in PostgreSQL take it from their parent.
+ * tables that gained `organization_id` in PostgreSQL take it from their parent, and catalog
+ * versions gain their bundle schema.
  */
 const TABLES: readonly { name: string; select?: string }[] = [
   { name: 'organizations' },
@@ -24,7 +25,11 @@ const TABLES: readonly { name: string; select?: string }[] = [
   { name: 'invitations' },
   { name: 'password_resets' },
   { name: 'account_link_invitations' },
-  { name: 'catalog_blueprint_versions' },
+  {
+    // SQLite schema 011 predates bundle schemas; every version it holds is the first one.
+    name: 'catalog_blueprint_versions',
+    select: `SELECT *, 'agents-foundry.catalog-bundle/v1' AS bundle_schema FROM catalog_blueprint_versions ORDER BY rowid`,
+  },
   { name: 'organization_agent_installations' },
   { name: 'agents' },
   { name: 'agent_manifests' },

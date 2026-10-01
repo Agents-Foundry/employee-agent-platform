@@ -1,6 +1,7 @@
 // agents-foundry/execution/v1 — the contract between an agent runtime and an execution runtime
 // (Architecture V2 Phase E, ADR 0007, ADR 0013). Pure types and constants.
 import type { ArtifactRegistration } from '../../artifacts.js';
+import type { GrantCredentialBinding } from '../../credentials.js';
 import { canonicalManifest } from '../../manifest.js';
 import type {
   ExecutionOperation,
@@ -46,6 +47,11 @@ export interface ExecutionGrantPayload {
   /** From the signed manifest. A provider that cannot deliver it must refuse the grant. */
   isolation: 'sandboxed' | 'local';
   limits: ResourceLimits;
+  /**
+   * Present only for a `git.checkout` the control plane authenticates (ADR 0031): the lease
+   * the execution runtime redeems for this checkout. Never a secret.
+   */
+  credential?: GrantCredentialBinding;
   issuedAt: string;
   expiresAt: string;
 }

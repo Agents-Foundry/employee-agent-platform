@@ -14,6 +14,7 @@ import { hashToken, type PasswordConfig } from '../src/auth.js';
 import { hashPassword } from '../src/passwords.js';
 import { LOCAL_ISSUER } from '../src/onboarding-types.js';
 import { FileSecretStore, MemorySecretStore } from '../src/actions/secrets.js';
+import { DevelopmentSecretProvider, SecretBroker } from '../src/secrets/secret-broker.js';
 import { JiraIssueTrackerConnector } from '../src/actions/connectors/jira.js';
 import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
 import { evaluateActionPolicy } from '../../../packages/policy-engine/src/index.js';
@@ -537,7 +538,8 @@ describe('Action Gateway', () => {
       const second = await runningStep(agentId);
       const secondRequest = await approve(second);
       secrets = new MemorySecretStore();
-      (db.actions as unknown as { deps: { secrets: MemorySecretStore } }).deps.secrets = secrets;
+      (db.actions as unknown as { deps: { secrets: SecretBroker } }).deps.secrets =
+        new SecretBroker(new DevelopmentSecretProvider(secrets));
       expect((await second.execute(secondRequest.requestId).expect(200)).body).toMatchObject({
         status: 'FAILED',
         error: { code: 'SECRET_UNRESOLVED' },

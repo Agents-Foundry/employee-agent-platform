@@ -19,4 +19,10 @@ Demo headers remain public and forgeable, and demo mode cannot run with NODE_ENV
 
 ## Key management
 
+Connector and repository secrets are stored as `secret://` references and read only through
+the secret broker, from Vault or a development file. Private repositories are checked out with
+single-use credential leases that only an execution runtime can redeem; the agent runtime and
+the model never receive a credential
+([ADR 0031](adr/0031-secret-and-credential-brokering.md)).
+
 `llm_key_bindings.secret_ref` is an opaque pointer such as a cloud secret-manager resource name. Provider keys must be created, rotated, and read only through the vault integration. The API must never return secret material to either Angular application.

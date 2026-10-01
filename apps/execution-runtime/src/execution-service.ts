@@ -1,10 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { ArtifactRegistration, ExecuteOperationResponse } from '@agents-foundry/contracts';
+import type {
+  ArtifactRegistration,
+  CredentialReleaseOutcome,
+  ExecuteOperationResponse,
+} from '@agents-foundry/contracts';
 import { parseExecuteOperationRequest } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import type { ExecutionArtifactStore } from './artifact-store.js';
+import {
+  CredentialRefused,
+  type CheckoutCredential,
+  type CredentialSource,
+} from './credential-client.js';
 import { GrantRejected, type GrantVerifier } from './grant-verifier.js';
+import { inside } from './providers/local-provider.js';
 import type { ExecutionProvider } from './providers/execution-provider.js';
 import type { StateStore } from './state-store.js';
 
@@ -29,6 +39,11 @@ export interface ExecutionServiceOptions {
    * only; off by default so a misconfigured deployment fails closed.
    */
   allowUnsandboxed?: boolean;
+  /**
+   * Redeems repository credential leases from the control plane (ADR 0031). Without it, a
+   * grant that names a lease is refused: a private checkout never falls back to anonymous.
+   */
+  credentials?: CredentialSource;
 }
 
 /**
@@ -79,7 +94,7 @@ export class ExecutionService {
     this.busy.add(lockKey);
     const started = Date.now();
     try {
-      const response = await this.run(grant.payload, operation, signal, started);
+      const response = await this.run(grant, operation, signal, started);
       this.options.state.completeGrant(grant.payload.grantId, response);
       return response;
     } finally {
@@ -87,12 +102,47 @@ export class ExecutionService {
     }
   }
 
+  /**
+   * After a crash: discard the partial checkout of every credentialed operation that never
+   * finished, end its lease, and close its grant so it cannot be replayed. Call once at
+   * startup, before serving requests.
+   */
+  async recover(): Promise<number> {
+    const interrupted = this.options.state.pendingCredentials();
+    for (const pending of interrupted) {
+      rmSync(pending.target, { recursive: true, force: true, maxRetries: 3 });
+      // The control plane expires the lease on its own if this cannot reach it.
+      await this.options.credentials
+        ?.release(pending.leaseId, pending.grantId, 'INTERRUPTED')
+        .catch(() => {});
+      this.options.state.completeGrant(pending.grantId, {
+        result: {
+          requestId: pending.requestId,
+          status: 'FAILED',
+          artifactIds: [],
+          durationMs: 0,
+          error: {
+            code: 'OPERATION_INTERRUPTED',
+            message: 'The execution runtime stopped during this checkout; it was discarded.',
+          },
+        },
+        workspace: { id: pending.workspaceId, state: 'READY' },
+        output: '',
+        truncated: false,
+        artifacts: [],
+      });
+      this.options.state.clearPendingCredential(pending.grantId);
+    }
+    return interrupted.length;
+  }
+
   private async run(
-    grant: Parameters<GrantVerifier['verify']>[0]['payload'],
+    signed: Parameters<GrantVerifier['verify']>[0],
     operation: Parameters<ExecutionProvider['execute']>[1],
     signal: AbortSignal,
     started: number,
   ): Promise<ExecuteOperationResponse> {
+    const grant = signed.payload;
     const scope = grant.correlation;
     let workspace = this.options.state.workspace(scope);
     const directory = (id: string) => join(this.root, 'workspaces', id);
@@ -125,14 +175,56 @@ export class ExecutionService {
     }
     const scratch = join(this.root, 'scratch', workspace.id);
     mkdirSync(scratch, { recursive: true, mode: 0o700 });
+    // A grant that names a credential lease is an authenticated checkout and nothing else.
+    const binding = grant.credential;
+    if (binding && (operation.kind !== 'git.checkout' || !this.options.credentials))
+      return refuse(
+        workspace.id,
+        'READY',
+        binding && operation.kind === 'git.checkout'
+          ? 'CREDENTIALS_UNAVAILABLE'
+          : 'CREDENTIAL_OPERATION_FORBIDDEN',
+        'This execution runtime cannot perform an authenticated checkout.',
+      );
     this.options.state.setWorkspaceState(workspace.id, 'IN_USE');
+    let credential: CheckoutCredential | undefined;
+    let leaseOutcome: CredentialReleaseOutcome = 'FAILED';
     try {
+      if (binding && operation.kind === 'git.checkout') {
+        // Recorded first, so a crash after this point is cleaned up at the next start.
+        this.options.state.recordPendingCredential({
+          grantId: grant.grantId,
+          leaseId: binding.leaseId,
+          requestId: grant.requestId,
+          workspaceId: workspace.id,
+          target: await inside(directory(workspace.id), operation.path, false),
+        });
+        try {
+          credential = await this.options.credentials!.redeem(signed, binding.leaseId, signal);
+        } catch (error) {
+          if (!(error instanceof CredentialRefused)) throw error;
+          return refuse(
+            workspace.id,
+            'READY',
+            'CREDENTIAL_REFUSED',
+            `The control plane refused the repository credential (${error.code}).`,
+          );
+        }
+      }
       const outcome = await this.options.provider.execute(
         { id: workspace.id, root: directory(workspace.id), scratch },
         operation,
         grant.limits,
         signal,
+        credential ? { credential } : {},
       );
+      leaseOutcome = signal.aborted
+        ? 'CANCELLED'
+        : outcome.status === 'SUCCEEDED'
+          ? 'SUCCEEDED'
+          : outcome.status === 'TIMED_OUT'
+            ? 'TIMED_OUT'
+            : 'FAILED';
       const artifacts: ArtifactRegistration[] = [];
       for (const produced of outcome.artifacts) {
         const id = randomUUID();
@@ -169,6 +261,15 @@ export class ExecutionService {
         artifacts,
       };
     } finally {
+      if (binding) {
+        credential = undefined;
+        if (signal.aborted) leaseOutcome = 'CANCELLED';
+        // Ends the lease whatever happened; the control plane expires it if this fails.
+        await this.options.credentials
+          ?.release(binding.leaseId, grant.grantId, leaseOutcome)
+          .catch(() => {});
+        this.options.state.clearPendingCredential(grant.grantId);
+      }
       this.options.state.setWorkspaceState(workspace.id, 'READY');
     }
   }
