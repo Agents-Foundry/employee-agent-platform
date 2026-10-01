@@ -10,13 +10,24 @@ import type {
 } from '@agents-foundry/contracts';
 import { evaluatePolicy, isKnownAction } from '../../../../packages/policy-engine/src/index.js';
 import { OrganizationDomainError } from '../organization/structure-service.js';
-import { bundleDigest, resolveCatalog, type BlueprintBundleContent } from './catalog-registry.js';
+import {
+  CATALOG_BUNDLE_SCHEMA,
+  resolveCatalog,
+  storedBundleProblems,
+  type BlueprintBundleContent,
+} from './catalog-registry.js';
 import { ChangeListener, type ChangeFeed } from '../db/change-listener.js';
 import type { PgStore } from '../db/pg-store.js';
 
 export type Answers = Record<string, string | string[]>;
 
-type CatalogRow = { blueprint_id: string; version: string; digest: string; content: string };
+type CatalogRow = {
+  blueprint_id: string;
+  version: string;
+  digest: string;
+  bundle_schema: string;
+  content: string;
+};
 
 /** Numeric semver ordering; a pre-release sorts before its release. */
 export function compareVersions(a: string, b: string): number {
@@ -68,22 +79,20 @@ export const CATALOG_VERSION_CHANNEL = 'af_catalog_versions';
 
 const key = (id: string, version: string) => `${id}@${version}`;
 
-/**
- * Whether this release can serve a stored version: its content still matches its digest and
- * every action it declares is known to this policy engine.
- */
+/** Whether this release can serve a stored version (ADR 0030). */
 function verified(row: CatalogRow): boolean {
-  try {
-    const content = JSON.parse(row.content) as BlueprintBundleContent;
-    return (
-      content.blueprint.id === row.blueprint_id &&
-      content.blueprint.version === row.version &&
-      bundleDigest(content) === row.digest &&
-      content.blueprint.policy.actions.every((action) => isKnownAction(action))
-    );
-  } catch {
-    return false;
-  }
+  return (
+    storedBundleProblems(
+      {
+        blueprintId: row.blueprint_id,
+        version: row.version,
+        digest: row.digest,
+        schema: row.bundle_schema,
+        content: row.content,
+      },
+      isKnownAction,
+    ).length === 0
+  );
 }
 
 /**
@@ -143,16 +152,17 @@ export class CatalogService {
           throw new Error(`CATALOG_VERSION_MUTATED: ${blueprint.id}@${blueprint.version}`);
         if (!existing)
           await db.run(
-            'INSERT INTO catalog_blueprint_versions (blueprint_id,version,digest,content,registered_at) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING',
+            'INSERT INTO catalog_blueprint_versions (blueprint_id,version,digest,bundle_schema,content,registered_at) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING',
             blueprint.id,
             blueprint.version,
             digest,
+            CATALOG_BUNDLE_SCHEMA,
             JSON.stringify(content),
             now,
           );
       }
       return db.all<CatalogRow>(
-        'SELECT blueprint_id, version, digest, content FROM catalog_blueprint_versions',
+        'SELECT blueprint_id, version, digest, bundle_schema, content FROM catalog_blueprint_versions',
       );
     });
     const catalog = new CatalogService(db, rows, options.feed ?? db, options.retryMs);
@@ -190,7 +200,7 @@ export class CatalogService {
           this.add(
             await this.read(() =>
               this.db.all<CatalogRow>(
-                'SELECT blueprint_id, version, digest, content FROM catalog_blueprint_versions',
+                'SELECT blueprint_id, version, digest, bundle_schema, content FROM catalog_blueprint_versions',
               ),
             ),
           );
@@ -282,7 +292,7 @@ export class CatalogService {
   private async fetch(id: string, version: string): Promise<CatalogRow | undefined> {
     const row = await this.read(() =>
       this.db.get<CatalogRow>(
-        'SELECT blueprint_id, version, digest, content FROM catalog_blueprint_versions WHERE blueprint_id=? AND version=?',
+        'SELECT blueprint_id, version, digest, bundle_schema, content FROM catalog_blueprint_versions WHERE blueprint_id=? AND version=?',
         id,
         version,
       ),

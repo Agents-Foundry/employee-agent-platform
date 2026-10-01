@@ -352,6 +352,19 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Catalog bundle compatibility — delivered
+
+See [ADR 0030](adr/0030-catalog-bundle-compatibility.md).
+
+- Migration 0010 records each version's bundle schema (`agents-foundry.catalog-bundle/v1`).
+- Stored bundles are served only if this release implements their schema and they pass the
+  current strict schemas, their digest, stored id and version, exact pinning and the
+  consistency rules; otherwise `BLUEPRINT_VERSION_UNSUPPORTED`.
+
+### Limitations
+
+- Evaluation suites are not stored, so only shipped suites are validated.
+
 ## Catalog version reload — delivered
 
 See [ADR 0029](adr/0029-catalog-version-reload.md).
