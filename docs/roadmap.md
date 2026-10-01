@@ -28,39 +28,62 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
 - Native system-browser Google sign-in (pending)
 - PostgreSQL with row-level organization isolation (implemented, [ADR 0018](adr/0018-postgresql-row-level-security.md))
-- Vault-backed BYOK and organization-key bindings
+- Vault-backed BYOK and organization-key bindings (pending; connector secrets are `secret://`
+  references resolved from an operator file)
 - Admin CRUD for departments, teams, roles, employees, and agents
 
 ## Milestone 3 — Read-only QA context
 
-- Jira story and release context
-- Bitbucket repository indexing and change-impact analysis
-- Approved connector registry, bounded retries, and audit evidence
+- Jira story context (implemented: governed `jira.read`, Architecture V2 Phase F); release
+  context (pending)
+- Bitbucket repository indexing and change-impact analysis (pending)
+- Approved connector registry, bounded retries, and audit evidence (partly implemented:
+  per-organization Jira and GitHub connections behind the Action Gateway, with audit)
 
 ## Milestone 4 — Isolated test execution
 
-- Ephemeral execution job per approved run
-- Playwright trace, screenshots, console, and network evidence
-- Artifact retention policy and signed downloads
-- Pre/post-release sanity packs
+- Isolated execution per approved operation (implemented: the separate execution runtime runs
+  each operation under a signed, single-use grant; repository code runs in locked-down
+  containers behind an egress proxy)
+- Playwright runs captured as artifacts (implemented); trace, screenshot, console and network
+  evidence beyond the run output (pending)
+- Artifact retention enforcement and signed downloads (pending)
+- Pre/post-release sanity packs (pending)
 
 ## Milestone 5 — Governed writes and pilot
 
-- Evidence-backed Jira defect drafts
-- Human-approved Jira/PR writes
-- Evaluation suite, failure drills, observability, and QA team pilot
+- Human-approved Jira issue creation and draft GitHub pull requests (implemented, Phases D
+  and G)
+- Governance evaluation suites and model-quality evaluations (implemented, ADRs 0019, 0020 and 0025)
+- Failure drills, observability and the QA team pilot (pending)
 
 ## Architecture V2 track
 
 Phased evolution toward a generic governed AI employee platform. See `migration-plan.md`.
 
+All planned phases are implemented:
+
 - Phase A — generic execution contracts, thread/run/step/event persistence, artifacts, Agent
-  Manifest v2 (flagged) and the runtime protocol v1 (implemented; no runtime executes yet)
-- Phase B — versioned, digest-pinned agent catalog and organization installations (implemented)
-- Phases C–G — agent runtime, Action Gateway, execution runtime, QA migration, and the Frontend
-  Engineer as the second-role acceptance test (pending)
+  Manifest v2 (flagged) and the runtime protocol v1
+- Phase B — versioned, digest-pinned agent catalog and organization installations
+- Phase C — separate agent runtime with signed transport, workload identity and approval
+  pause/resume
+- Phase D — Action Gateway, Policy v2, payload-bound approvals and Jira issue creation
+- Phase E — separate execution runtime under signed, single-use execution grants
+- Phase F — QA stories on the generic runtime (behind `QA_GENERIC_RUNTIME_ENABLED`)
+- Phase G — Frontend Engineer as the second-role acceptance test, with container sandboxing
+
+Hardening delivered since: egress proxy, governed dependency installation, PostgreSQL with
+forced row-level security, role evaluation suites, model-quality evaluations, organization
+model spending limits, prices and alerts, signed alert webhooks, scheduled quality runs,
+per-instance tenant domain cache, native column types and multi-instance catalog reload
+(ADRs 0016–0029).
+
+Pending: managed secret and credential brokering, and private repository checkout.
 
 ## Milestone 6 — Agent factory
 
-- Reusable role blueprints for frontend, backend, DevOps, product, sales, and HR
-- Versioned skills, tools, connectors, policies, evaluations, and promotion workflow
+- Reusable role blueprints: QA Engineer and Frontend Engineer (implemented); backend, DevOps,
+  product, sales and HR (pending)
+- Versioned skills, tools, policies and evaluations as catalog data (implemented); a catalog
+  promotion workflow (pending)
