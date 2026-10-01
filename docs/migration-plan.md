@@ -222,7 +222,8 @@ See [ADR 0018](adr/0018-postgresql-row-level-security.md).
 - Verified tenant domains are looked up per request, without a cache (cached since
   [ADR 0027](adr/0027-tenant-domain-cache.md)).
 - The catalog is loaded at startup. A version registered later by another instance fails
-  closed until restart.
+  closed until restart (loaded without a restart since
+  [ADR 0029](adr/0029-catalog-version-reload.md)).
 - Timestamps and JSON stay text columns (native since
   [ADR 0028](adr/0028-native-column-types.md)).
 
@@ -351,6 +352,25 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Catalog version reload — delivered
+
+See [ADR 0029](adr/0029-catalog-version-reload.md).
+
+- Migration 0009 notifies `af_catalog_versions` when a blueprint version is registered. Every
+  instance loads it without restarting.
+- A version not yet loaded is read from the database when it is resolved, so it no longer
+  fails closed while the notification is on its way. Listings reload first while
+  notifications are not received.
+- Stored versions are served only if they still match their digest and declare only actions
+  this release knows; otherwise they fail with `BLUEPRINT_VERSION_UNSUPPORTED`.
+
+### Limitations
+
+- Each instance holds one more listening connection.
+- Resolving a version that does not exist reads the database each time.
+- An older instance refuses newer versions that declare actions it does not know until it is
+  upgraded.
+
 ## Native column types — delivered
 
 See [ADR 0028](adr/0028-native-column-types.md).
@@ -454,6 +474,8 @@ live quality run records scores per model and flags regressions
 ([ADR 0025](adr/0025-scheduled-quality-runs.md)), which administrators see in the console
 once imported ([ADR 0026](adr/0026-model-quality-view.md)). Verified tenant domains are
 remembered per instance and forgotten on change ([ADR 0027](adr/0027-tenant-domain-cache.md)),
-and timestamps and JSON use native column types ([ADR 0028](adr/0028-native-column-types.md)).
-The highest-value follow-up is reloading catalog versions registered by another instance,
-which now fail closed until restart, using the same change notifications as tenant domains.
+timestamps and JSON use native column types ([ADR 0028](adr/0028-native-column-types.md)),
+and catalog versions registered by another instance are loaded without a restart
+([ADR 0029](adr/0029-catalog-version-reload.md)).
+The highest-value follow-up is sending each weekly quality run's results to the control plane
+from the workflow, so administrators no longer depend on an operator import to see them.

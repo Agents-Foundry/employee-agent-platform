@@ -59,7 +59,7 @@ export class InstallationService {
 
   async create(actor: Actor, raw: unknown): Promise<OrganizationAgentInstallation> {
     const input = createInput.parse(raw);
-    const bundle = this.catalog.bundle(input.blueprintId, input.blueprintVersion);
+    const bundle = await this.catalog.bundle(input.blueprintId, input.blueprintVersion);
     const config = this.catalog.validateAnswers(bundle, input.configuration, 'INSTALLATION');
     return this.transaction(actor, async () => {
       await this.assertNameFree(actor.organizationId, input.name);
@@ -94,7 +94,7 @@ export class InstallationService {
         throw new OrganizationDomainError(409, 'INSTALLATION_RETIRED');
       if (before.version !== input.version)
         throw new OrganizationDomainError(409, 'VERSION_CONFLICT');
-      const bundle = this.catalog.bundle(before.blueprintId, input.blueprintVersion);
+      const bundle = await this.catalog.bundle(before.blueprintId, input.blueprintVersion);
       const config = this.catalog.validateAnswers(bundle, input.configuration, 'INSTALLATION');
       if (input.name.toLowerCase() !== before.name.toLowerCase())
         await this.assertNameFree(actor.organizationId, input.name);

@@ -200,18 +200,15 @@ describe('catalog of record', () => {
       const db = await ControlPlaneDatabase.open({ store: await connect(), signer, catalog: next });
       {
         // 1.1.0 and 1.2.0 stopped shipping but stay resolvable from the catalog of record.
-        expect(db.catalog.bundle(qa.id, '1.1.0').blueprint.mission).toBe(qa.mission);
-        const qaSummaries = db.catalog.summaries().filter((s) => s.id === qa.id);
+        expect((await db.catalog.bundle(qa.id, '1.1.0')).blueprint.mission).toBe(qa.mission);
+        const qaSummaries = (await db.catalog.summaries()).filter((s) => s.id === qa.id);
         expect(qaSummaries.map((s) => [s.version, s.latest])).toEqual([
           ['1.3.0', true],
           ['1.2.0', false],
           ['1.1.0', false],
         ]);
         expect(
-          db.catalog
-            .legacyBlueprints()
-            .filter((b) => b.id === qa.id)
-            .map((b) => b.version),
+          (await db.catalog.legacyBlueprints()).filter((b) => b.id === qa.id).map((b) => b.version),
         ).toEqual(['1.3.0']);
         const sql = rawSql(db);
         await expect(
@@ -391,7 +388,7 @@ describe('organization installations', () => {
       version: 1,
       configuration: installationConfig,
     });
-    expect(installation.blueprintDigest).toBe(db.catalog.bundle(qa.id, '1.1.0').digest);
+    expect(installation.blueprintDigest).toBe((await db.catalog.bundle(qa.id, '1.1.0')).digest);
     const base = { name: 'Other', blueprintId: qa.id, blueprintVersion: '1.1.0' };
     for (const body of [
       { ...base, configuration: { ...installationConfig, qaUrl: 'https://qa.example.com' } },
@@ -597,7 +594,9 @@ describe('second role through configuration only (ADR 0009)', () => {
       const agentId = manifestSubject(manifest.payload).agentId;
       expect(await db.getManifest(agentId, 'org_agents_foundry')).toEqual(manifest);
       expect(
-        db.pinnedWorkflow(manifest, 'implement-ui-change')?.steps.map((step) => step.action),
+        (await db.pinnedWorkflow(manifest, 'implement-ui-change'))?.steps.map(
+          (step) => step.action,
+        ),
       ).toEqual([
         'jira.read',
         'repository.write',
@@ -651,7 +650,9 @@ describe('second role through configuration only (ADR 0009)', () => {
         outcome: 'ALLOW',
       });
       expect(
-        db.pinnedWorkflow(manifest, 'implement-ui-change')?.steps.map((step) => step.action),
+        (await db.pinnedWorkflow(manifest, 'implement-ui-change'))?.steps.map(
+          (step) => step.action,
+        ),
       ).toEqual([
         'jira.read',
         'repository.write',

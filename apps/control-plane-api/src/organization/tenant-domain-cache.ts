@@ -1,11 +1,9 @@
-import { DatabaseScopeError } from '../db/pg-store.js';
+import { ChangeListener, type ChangeFeed } from '../db/change-listener.js';
 
 /** The channel migration 0007 notifies whenever a tenant domain resolution could change. */
 export const TENANT_DOMAIN_CHANNEL = 'af_tenant_domains';
 
-export interface DomainChangeFeed {
-  listen(channel: string, onNotify: () => void, onLost: () => void): Promise<() => void>;
-}
+export type DomainChangeFeed = ChangeFeed;
 
 export interface TenantDomainCacheOptions {
   /** How long a verified host's organization is reused (default 60 s). */
@@ -39,27 +37,27 @@ export class TenantDomainCache {
   private readonly ttlMs: number;
   private readonly negativeTtlMs: number;
   private readonly maxEntries: number;
-  private readonly retryMs: number;
   private readonly now: () => number;
+  private readonly listener: ChangeListener;
   private generation = 0;
-  private unlisten: (() => void) | undefined;
-  private retry: NodeJS.Timeout | undefined;
-  private stopped = false;
 
-  constructor(
-    private readonly feed: DomainChangeFeed,
-    options: TenantDomainCacheOptions = {},
-  ) {
+  constructor(feed: DomainChangeFeed, options: TenantDomainCacheOptions = {}) {
     this.ttlMs = options.ttlMs ?? 60_000;
     this.negativeTtlMs = options.negativeTtlMs ?? 30_000;
     this.maxEntries = options.maxEntries ?? 10_000;
-    this.retryMs = options.retryMs ?? 5_000;
     this.now = options.now ?? Date.now;
+    // Anything remembered while not listening could have missed a change.
+    this.listener = new ChangeListener(
+      feed,
+      TENANT_DOMAIN_CHANNEL,
+      { onChange: () => this.invalidate(), onLost: () => this.invalidate() },
+      options.retryMs,
+    );
   }
 
   /** Whether entries are being used: only while change notifications are connected. */
   get live(): boolean {
-    return this.unlisten !== undefined;
+    return this.listener.live;
   }
 
   get size(): number {
@@ -67,35 +65,12 @@ export class TenantDomainCache {
   }
 
   /** Starts listening for changes. Never throws; failures retry in the background. */
-  async start(): Promise<void> {
-    if (this.stopped || this.unlisten) return;
-    clearTimeout(this.retry);
-    this.retry = undefined;
-    let ready = false,
-      lostEarly = false;
-    try {
-      const unlisten = await this.feed.listen(
-        TENANT_DOMAIN_CHANNEL,
-        () => this.invalidate(),
-        () => (ready ? this.lost() : (lostEarly = true)),
-      );
-      if (this.stopped) return unlisten();
-      if (lostEarly) return this.scheduleRetry();
-      // Anything remembered from before could have missed a change.
-      this.invalidate();
-      this.unlisten = unlisten;
-      ready = true;
-    } catch (error) {
-      if (error instanceof DatabaseScopeError) return; // The store is closed.
-      this.scheduleRetry();
-    }
+  start(): Promise<void> {
+    return this.listener.start();
   }
 
   stop(): void {
-    this.stopped = true;
-    clearTimeout(this.retry);
-    this.unlisten?.();
-    this.unlisten = undefined;
+    this.listener.stop();
     this.invalidate();
   }
 
@@ -138,20 +113,5 @@ export class TenantDomainCache {
     this.entries.set(host, { organizationId, expiresAt: this.now() + ttl });
     while (this.entries.size > this.maxEntries)
       this.entries.delete(this.entries.keys().next().value!);
-  }
-
-  private lost(): void {
-    this.unlisten = undefined;
-    this.invalidate();
-    this.scheduleRetry();
-  }
-
-  private scheduleRetry(): void {
-    if (this.stopped || this.retry) return;
-    this.retry = setTimeout(() => {
-      this.retry = undefined;
-      void this.start();
-    }, this.retryMs);
-    this.retry.unref();
   }
 }
