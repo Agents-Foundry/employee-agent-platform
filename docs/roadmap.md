@@ -85,7 +85,8 @@ repositories are checked out with single-use credential leases (ADR 0031).
 
 ## Milestone 6 — Agent factory
 
-- Reusable role blueprints: QA Engineer and Frontend Engineer (implemented); backend, DevOps,
-  product, sales and HR (pending)
+- Reusable role blueprints as catalog data: QA Engineer, Frontend Engineer, Backend Engineer,
+  Code Reviewer and Test Automation Engineer (implemented); DevOps, product, sales and HR
+  (pending)
 - Versioned skills, tools, policies and evaluations as catalog data (implemented); a catalog
   promotion workflow (pending)
