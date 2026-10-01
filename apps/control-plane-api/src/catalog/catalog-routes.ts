@@ -17,9 +17,9 @@ export function configureCatalogRoutes(
   config: AuthConfig,
 ): void {
   const catalogRouter = Router();
-  catalogRouter.get('/blueprints', async (_req, res) => res.json(catalog.summaries()));
+  catalogRouter.get('/blueprints', async (_req, res) => res.json(await catalog.summaries()));
   catalogRouter.get('/blueprints/:id/versions/:version', async (req, res) =>
-    res.json(catalog.bundle(String(req.params['id']), String(req.params['version']), 404)),
+    res.json(await catalog.bundle(String(req.params['id']), String(req.params['version']), 404)),
   );
   // Model-quality results describe catalog roles; admins read them to choose models (ADR 0026).
   catalogRouter.get('/quality', async (req, res) =>

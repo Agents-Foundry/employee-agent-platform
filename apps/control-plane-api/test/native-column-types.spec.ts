@@ -72,7 +72,7 @@ describe('native column types (migration 0008)', () => {
       [metadata],
     );
 
-    expect(await migrate(urls.owner)).toEqual([8]);
+    expect(await migrate(urls.owner, POSTGRES_MIGRATIONS.slice(0, 8))).toEqual([8]);
     const store = await connect(urls);
     const read = await store.platform(() =>
       store.all('SELECT id, created_at FROM users ORDER BY created_at'),

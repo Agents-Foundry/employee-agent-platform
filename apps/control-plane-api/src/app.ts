@@ -183,7 +183,7 @@ export function createApp(
   });
 
   app.get('/api/blueprints', async (_request, response) =>
-    response.json(database.catalog.legacyBlueprints()),
+    response.json(await database.catalog.legacyBlueprints()),
   );
   app.get('/api/organization/agents', async (_request, response) => {
     const actor = response.locals['actor'];

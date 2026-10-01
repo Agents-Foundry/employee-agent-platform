@@ -94,7 +94,7 @@ export interface ExecutionServiceOptions {
   resolveWorkflow?: (
     manifest: AnySignedAgentManifest,
     workflowId: string,
-  ) => WorkflowDefinition | undefined;
+  ) => Promise<WorkflowDefinition | undefined>;
   /** Append an agent message to a conversation (caller's transaction). */
   conversationMessage?: (
     organizationId: string,
@@ -606,7 +606,7 @@ export class ExecutionService {
       let workflow: WorkflowDefinition | undefined;
       if (run.task.workflow) {
         workflow = manifest.payload.workflows.includes(run.task.workflow)
-          ? this.options.resolveWorkflow?.(manifest, run.task.workflow)
+          ? await this.options.resolveWorkflow?.(manifest, run.task.workflow)
           : undefined;
         if (!workflow) throw new ExecutionError(409, 'MANIFEST_INVALID');
       }

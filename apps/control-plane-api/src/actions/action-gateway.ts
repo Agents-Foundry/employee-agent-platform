@@ -37,7 +37,7 @@ export interface ActionGatewayDependencies {
     organizationId: string,
     employeeId: string,
   ) => Promise<AnySignedAgentManifest>;
-  bundle: (blueprintId: string, version: string) => ResolvedBlueprintBundle;
+  bundle: (blueprintId: string, version: string) => Promise<ResolvedBlueprintBundle>;
   audit: Audit;
   connectors: ConnectorService;
   policies: ActionPolicyService;
@@ -636,7 +636,10 @@ export class ActionGateway {
     if (!payload.tools.includes(request.toolId)) return deny('TOOL_NOT_IN_MANIFEST');
     let bundle: ResolvedBlueprintBundle;
     try {
-      bundle = this.deps.bundle(payload.metadata.blueprint.id, payload.metadata.blueprint.version);
+      bundle = await this.deps.bundle(
+        payload.metadata.blueprint.id,
+        payload.metadata.blueprint.version,
+      );
     } catch {
       return deny('BLUEPRINT_UNAVAILABLE');
     }

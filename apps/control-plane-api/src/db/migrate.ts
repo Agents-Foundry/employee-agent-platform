@@ -9,6 +9,7 @@ import { alertWebhooksSql } from './migrations/0005-alert-webhooks.js';
 import { modelQualityResultsSql } from './migrations/0006-model-quality-results.js';
 import { tenantDomainNotificationsSql } from './migrations/0007-tenant-domain-notifications.js';
 import { nativeColumnTypesSql } from './migrations/0008-native-column-types.js';
+import { catalogVersionNotificationsSql } from './migrations/0009-catalog-version-notifications.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -20,6 +21,7 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 6, name: 'model-quality-results', sql: modelQualityResultsSql },
   { version: 7, name: 'tenant-domain-notifications', sql: tenantDomainNotificationsSql },
   { version: 8, name: 'native-column-types', sql: nativeColumnTypesSql },
+  { version: 9, name: 'catalog-version-notifications', sql: catalogVersionNotificationsSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

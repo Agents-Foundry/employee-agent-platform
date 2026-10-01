@@ -162,6 +162,7 @@ export class ControlPlaneDatabase {
       const database = new ControlPlaneDatabase(store, catalog, signer, options);
       if (options.seedDemo) await database.seed();
       await database.tenancy.domains.start();
+      await database.catalog.start();
       return database;
     } catch (error) {
       if (!options.store) await store.close();
@@ -244,16 +245,16 @@ export class ControlPlaneDatabase {
   }
 
   /** A workflow from the exact catalog bundle the manifest pins; undefined if anything differs. */
-  pinnedWorkflow(
+  async pinnedWorkflow(
     manifest: AnySignedAgentManifest,
     workflowId: string,
-  ): WorkflowDefinition | undefined {
+  ): Promise<WorkflowDefinition | undefined> {
     if (manifest.payload.apiVersion !== 'agents-foundry/v2') return undefined;
     const { blueprint } = manifest.payload.metadata;
     if (!blueprint.digest || !manifest.payload.workflows.includes(workflowId)) return undefined;
     let bundle: ResolvedBlueprintBundle;
     try {
-      bundle = this.catalog.bundle(blueprint.id, blueprint.version, 404);
+      bundle = await this.catalog.bundle(blueprint.id, blueprint.version, 404);
     } catch {
       return undefined;
     }
@@ -1085,7 +1086,7 @@ export class ControlPlaneDatabase {
         ))
       )
         throw new Error('ACTOR_FORBIDDEN');
-      const bundle = this.catalog.bundle(input.blueprintId, input.blueprintVersion);
+      const bundle = await this.catalog.bundle(input.blueprintId, input.blueprintVersion);
       const request: ProvisioningRequest = {
         ...input,
         answers: this.catalog.validateAnswers(bundle, input.answers, 'ALL'),
@@ -1148,7 +1149,7 @@ export class ControlPlaneDatabase {
       }
       // Resolved after the replay check: an unchanged retry returns its original result even
       // if the installation was retired since. Retirement still blocks new agents (trigger).
-      const bundle = this.catalog.bundle(input.blueprintId, input.blueprintVersion);
+      const bundle = await this.catalog.bundle(input.blueprintId, input.blueprintVersion);
       const installation = input.installationId
         ? await this.installations.activeInstallation(actor.organizationId, input.installationId)
         : null;
@@ -1327,7 +1328,7 @@ export class ControlPlaneDatabase {
       let manifest: AnySignedAgentManifest | undefined;
       if (decision === 'APPROVED') {
         request.agentId = randomUUID();
-        const bundle = this.catalog.bundle(request.blueprintId, request.blueprintVersion);
+        const bundle = await this.catalog.bundle(request.blueprintId, request.blueprintVersion);
         const agentName = agentLabel(bundle, request.answers);
         manifest = this.issueManifest({
           manifestId: randomUUID(),
@@ -1463,6 +1464,7 @@ export class ControlPlaneDatabase {
 
   close(): Promise<void> {
     this.tenancy.domains.stop();
+    this.catalog.stop();
     return this.store.close();
   }
 
@@ -1662,7 +1664,7 @@ export class ControlPlaneDatabase {
       );
       if (
         manifest.payload.apiVersion !== 'agents-foundry/v2' ||
-        !this.pinnedWorkflow(manifest, QA_WORKFLOW)
+        !(await this.pinnedWorkflow(manifest, QA_WORKFLOW))
       )
         return null;
       // Checked again by Policy v2 for every browser run; refused here so nothing is queued.
