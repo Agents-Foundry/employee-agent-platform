@@ -6,14 +6,14 @@ lockfiles and do not need entries unless they are vendored or modified.
 
 ## Required fields per entry
 
-| Field                  | Description                                                   |
-| ---------------------- | ------------------------------------------------------------- |
-| Source repository      | URL and exact commit SHA                                      |
-| Licence                | SPDX identifier, verified at that commit                      |
-| Files reused           | Source paths → destination paths in this repository           |
-| Modifications          | Summary of changes                                            |
-| Attribution required   | Notice text and where it is reproduced                        |
-| Compatibility decision | Who approved, and why the licence is compatible               |
+| Field                  | Description                                         |
+| ---------------------- | --------------------------------------------------- |
+| Source repository      | URL and exact commit SHA                            |
+| Licence                | SPDX identifier, verified at that commit            |
+| Files reused           | Source paths → destination paths in this repository |
+| Modifications          | Summary of changes                                  |
+| Attribution required   | Notice text and where it is reproduced              |
+| Compatibility decision | Who approved, and why the licence is compatible     |
 
 ## Entries
 

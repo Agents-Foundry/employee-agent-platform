@@ -43,22 +43,22 @@ connector, no workspace, and no artifact.
 
 ## 2. Current implemented capabilities (preserve)
 
-| Area                         | Evidence                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------- |
-| Tenancy and org structure    | `migrations/001`–`005`, `organization/structure-service.ts`, `tenancy-service.ts`                 |
-| Job architecture             | `organization/job-service.ts`, `packages/contracts/src/jobs.ts`                                   |
-| Identity                     | `auth.ts` (demo, password, Google OIDC), `users` / `organization_memberships`, account linking     |
-| Onboarding / recovery        | invitations, activation, password reset, operator CLIs (`create-customer.ts`, `recover-member.ts`) |
-| Agent provisioning           | `/api/provisioning`, admin decisions, `/api/organization/agents` batch creation with idempotency  |
-| Signed manifests             | `manifest-signing.ts` (Ed25519, SPKI SHA-256 key id), `packages/contracts/src/manifest.ts`       |
-| Client verification          | `apps/employee-desktop/src/app/verify-manifest.ts` (Web Crypto, ownership checks)                |
-| Conversations                | `conversations`, `messages`, owner-scoped routes                                                  |
-| Policy                       | `packages/policy-engine` static decisions; unknown and prototype keys deny                       |
-| Approvals                    | `approvals` table, admin-only, self-approval forbidden, double decision → 409                   |
-| Audit                        | `audit_events` (application), `organization_change_events` (immutable via triggers)              |
-| Migrations                   | `migrations/index.ts` checksum-locked, `BEGIN IMMEDIATE`, fail-closed on edited migrations       |
-| Security middleware          | helmet, CORS allow-list, verified-domain host resolution (421), rate limiting, 64 KB JSON limit   |
-| CI                           | `.github/workflows/ci.yml` → `npm ci && npm run check`                                             |
+| Area                      | Evidence                                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| Tenancy and org structure | `migrations/001`–`005`, `organization/structure-service.ts`, `tenancy-service.ts`                  |
+| Job architecture          | `organization/job-service.ts`, `packages/contracts/src/jobs.ts`                                    |
+| Identity                  | `auth.ts` (demo, password, Google OIDC), `users` / `organization_memberships`, account linking     |
+| Onboarding / recovery     | invitations, activation, password reset, operator CLIs (`create-customer.ts`, `recover-member.ts`) |
+| Agent provisioning        | `/api/provisioning`, admin decisions, `/api/organization/agents` batch creation with idempotency   |
+| Signed manifests          | `manifest-signing.ts` (Ed25519, SPKI SHA-256 key id), `packages/contracts/src/manifest.ts`         |
+| Client verification       | `apps/employee-desktop/src/app/verify-manifest.ts` (Web Crypto, ownership checks)                  |
+| Conversations             | `conversations`, `messages`, owner-scoped routes                                                   |
+| Policy                    | `packages/policy-engine` static decisions; unknown and prototype keys deny                         |
+| Approvals                 | `approvals` table, admin-only, self-approval forbidden, double decision → 409                      |
+| Audit                     | `audit_events` (application), `organization_change_events` (immutable via triggers)                |
+| Migrations                | `migrations/index.ts` checksum-locked, `BEGIN IMMEDIATE`, fail-closed on edited migrations         |
+| Security middleware       | helmet, CORS allow-list, verified-domain host resolution (421), rate limiting, 64 KB JSON limit    |
+| CI                        | `.github/workflows/ci.yml` → `npm ci && npm run check`                                             |
 
 ## 3. Current limitations relevant to V2
 
@@ -91,30 +91,30 @@ connector, no workspace, and no artifact.
 
 ## 4. Files/modules affected by Phase A
 
-| File                                                     | Change                                                                     |
-| -------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `packages/contracts/src/index.ts`                        | Re-export new contracts; generic `SignedManifest<P>`; optional run links    |
-| `apps/control-plane-api/src/app.ts`                      | QA route dual-writes generic run; new read-only execution routes           |
-| `apps/control-plane-api/src/database.ts`                 | Construct execution service; approval decision resumes linked runs         |
-| `apps/control-plane-api/src/manifest-signing.ts`         | Sign/verify any manifest version; reject unknown `apiVersion`             |
-| `apps/control-plane-api/src/migrations/index.ts`         | Register migration 006                                                     |
-| `apps/employee-desktop/src/app/verify-manifest.ts`       | Accept v1 and v2 payloads with version-specific ownership checks           |
-| `apps/employee-desktop/src/app/app.ts`                   | Read QA target URL from either manifest version                           |
+| File                                               | Change                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------ |
+| `packages/contracts/src/index.ts`                  | Re-export new contracts; generic `SignedManifest<P>`; optional run links |
+| `apps/control-plane-api/src/app.ts`                | QA route dual-writes generic run; new read-only execution routes         |
+| `apps/control-plane-api/src/database.ts`           | Construct execution service; approval decision resumes linked runs       |
+| `apps/control-plane-api/src/manifest-signing.ts`   | Sign/verify any manifest version; reject unknown `apiVersion`            |
+| `apps/control-plane-api/src/migrations/index.ts`   | Register migration 006                                                   |
+| `apps/employee-desktop/src/app/verify-manifest.ts` | Accept v1 and v2 payloads with version-specific ownership checks         |
+| `apps/employee-desktop/src/app/app.ts`             | Read QA target URL from either manifest version                          |
 
 ## 5. New modules required (Phase A)
 
-| Module                                                    | Responsibility                                                      |
-| --------------------------------------------------------- | ------------------------------------------------------------------- |
-| `packages/contracts/src/execution.ts`                     | Task, Thread, AgentRun, RunStep, AgentEvent, ToolCall/Result, etc.  |
-| `packages/contracts/src/run-lifecycle.ts`                 | Deterministic run/step state machines shared by all hosts           |
-| `packages/contracts/src/artifacts.ts`                     | Artifact, Evidence, storage reference and retention contracts       |
-| `packages/contracts/src/manifest-v2.ts`                   | Agent Manifest v2 payload types                                     |
-| `packages/contracts/src/runtime/v1/protocol.ts`           | `agents-foundry/runtime/v1` commands and event envelope types       |
-| `packages/contracts/src/runtime/v1/schemas.ts`            | Zod parsers for the protocol and manifest v2 (Node consumers only)  |
-| `apps/control-plane-api/src/migrations/006-agent-execution.ts` | Threads, runs, steps, events, artifacts; approval run links    |
-| `apps/control-plane-api/src/execution/execution-service.ts` | Tenant-scoped persistence and transitions for the generic model   |
-| `apps/control-plane-api/src/execution/execution-routes.ts`  | Versioned read API `/api/execution/v1/...`                         |
-| `apps/control-plane-api/src/agents/manifest-v2.ts`        | QA compatibility adapter: blueprint + provisioning → Manifest v2    |
+| Module                                                         | Responsibility                                                     |
+| -------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `packages/contracts/src/execution.ts`                          | Task, Thread, AgentRun, RunStep, AgentEvent, ToolCall/Result, etc. |
+| `packages/contracts/src/run-lifecycle.ts`                      | Deterministic run/step state machines shared by all hosts          |
+| `packages/contracts/src/artifacts.ts`                          | Artifact, Evidence, storage reference and retention contracts      |
+| `packages/contracts/src/manifest-v2.ts`                        | Agent Manifest v2 payload types                                    |
+| `packages/contracts/src/runtime/v1/protocol.ts`                | `agents-foundry/runtime/v1` commands and event envelope types      |
+| `packages/contracts/src/runtime/v1/schemas.ts`                 | Zod parsers for the protocol and manifest v2 (Node consumers only) |
+| `apps/control-plane-api/src/migrations/006-agent-execution.ts` | Threads, runs, steps, events, artifacts; approval run links        |
+| `apps/control-plane-api/src/execution/execution-service.ts`    | Tenant-scoped persistence and transitions for the generic model    |
+| `apps/control-plane-api/src/execution/execution-routes.ts`     | Versioned read API `/api/execution/v1/...`                         |
+| `apps/control-plane-api/src/agents/manifest-v2.ts`             | QA compatibility adapter: blueprint + provisioning → Manifest v2   |
 
 Later phases add `agent-runtime`, `execution-runtime` and `foundry-connectors` as separate
 repositories only once their protocols are stable (see ADR 0002 and ADR 0007).
@@ -138,14 +138,14 @@ source of the legacy QA response; the generic run links to it through `legacy_qa
 
 ## 7. API changes
 
-| Route                                         | Change                                                   |
-| --------------------------------------------- | -------------------------------------------------------- |
-| `POST /api/qa/runs`                           | Unchanged request; response gains optional `agentRun` link |
-| `POST /api/approvals/:id/decision`            | Unchanged contract; additionally transitions a linked run |
-| `GET /api/agents/:id/manifest`                | Unchanged; may return a v2 manifest when v2 issuance is enabled |
-| `GET /api/execution/v1/threads/:id`           | New, read-only; owner employee or organization admin      |
-| `GET /api/execution/v1/runs/:id`              | New, read-only; run + steps + artifacts                  |
-| `GET /api/execution/v1/runs/:id/events`       | New, read-only; paginated by `afterSequence`             |
+| Route                                   | Change                                                          |
+| --------------------------------------- | --------------------------------------------------------------- |
+| `POST /api/qa/runs`                     | Unchanged request; response gains optional `agentRun` link      |
+| `POST /api/approvals/:id/decision`      | Unchanged contract; additionally transitions a linked run       |
+| `GET /api/agents/:id/manifest`          | Unchanged; may return a v2 manifest when v2 issuance is enabled |
+| `GET /api/execution/v1/threads/:id`     | New, read-only; owner employee or organization admin            |
+| `GET /api/execution/v1/runs/:id`        | New, read-only; run + steps + artifacts                         |
+| `GET /api/execution/v1/runs/:id/events` | New, read-only; paginated by `afterSequence`                    |
 
 No runtime-ingestion HTTP route is added in Phase A: the runtime has no workload identity yet,
 and an unauthenticated ingestion route would let a browser forge run history. The protocol
@@ -158,7 +158,7 @@ properly authenticated transport.
 
 - Control plane → runtime commands: `run.submit`, `run.resume`, `run.cancel`.
 - Runtime → control plane: a single event envelope `{ protocol, eventId, runId, threadId,
-  sequence, type, occurredAt, stepId?, correlation, payload }` whose `type` is a closed union.
+sequence, type, occurredAt, stepId?, correlation, payload }` whose `type` is a closed union.
 - Every message is strict-parsed; unknown fields, unknown types and other protocol versions are
   rejected. Events are idempotent by `eventId` and ordered by per-run `sequence`.
 - The control plane never interprets kernel internals; the payloads are the contract.
@@ -221,14 +221,14 @@ brief) and must not contribute code to the commercial core.
 
 ## 15. Risks
 
-| Risk                                                             | Mitigation                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Dual-write divergence between `qa_runs` and `agent_runs`         | Same transaction; legacy row is authoritative for the legacy response    |
-| Contract churn before the runtime exists                         | Versioned protocol; parser tests; changes require a new version          |
-| Manifest v2 shape wrong for later roles                          | Issued only behind a flag until the Frontend Engineer role validates it  |
-| `database.ts` keeps growing                                      | New logic lives in `execution/` and `agents/` modules                    |
-| SQLite single-writer limits for event volume                     | Resolved: PostgreSQL with row-level security (ADR 0018)                  |
-| Over-claiming capability                                         | Docs state explicitly that no runtime, tool, or connector executes yet   |
+| Risk                                                     | Mitigation                                                              |
+| -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Dual-write divergence between `qa_runs` and `agent_runs` | Same transaction; legacy row is authoritative for the legacy response   |
+| Contract churn before the runtime exists                 | Versioned protocol; parser tests; changes require a new version         |
+| Manifest v2 shape wrong for later roles                  | Issued only behind a flag until the Frontend Engineer role validates it |
+| `database.ts` keeps growing                              | New logic lives in `execution/` and `agents/` modules                   |
+| SQLite single-writer limits for event volume             | Resolved: PostgreSQL with row-level security (ADR 0018)                 |
+| Over-claiming capability                                 | Docs state explicitly that no runtime, tool, or connector executes yet  |
 
 ## 16. Rollback strategy
 

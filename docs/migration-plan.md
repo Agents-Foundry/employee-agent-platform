@@ -110,7 +110,8 @@ error handling and documentation. A type, table or route stub alone does not cou
 - One control-plane action (`jira.issue.create`) and one connector (Jira Cloud).
 - There is no egress proxy or DNS-rebinding defence. Interrupted dispatches need manual
   reconciliation.
-- Secrets come from an operator file, not a managed vault.
+- Secrets come from an operator file, not a managed vault (a Vault provider exists since
+  [ADR 0031](adr/0031-secret-and-credential-brokering.md)).
 
 ## Phase E — delivered
 
@@ -134,8 +135,9 @@ error handling and documentation. A type, table or route stub alone does not cou
 
 - There is no sandboxing provider. Sandboxed agents run only with
   `EXECUTION_ALLOW_UNSANDBOXED=true`.
-- There is no dependency installation, and private repositories are not supported.
-  `command` and `file.write` are never granted.
+- There is no dependency installation, and private repositories are not supported (supported
+  since [ADR 0031](adr/0031-secret-and-credential-brokering.md)). `command` and `file.write`
+  are never granted.
 
 ## Phase F — delivered
 
@@ -352,6 +354,37 @@ See [ADR 0024](adr/0024-alert-webhooks.md).
 - Delivery is at least once. Receivers drop repeats by `af-webhook-id`.
 - Endpoints can't be edited or removed, only disabled.
 
+## Secret broker, credential broker and private checkout — delivered
+
+See [ADR 0031](adr/0031-secret-and-credential-brokering.md).
+
+- `SecretBroker` is the only path from a `secret://` reference to a value, with a development
+  provider and a Vault KV v2 provider (`SECRET_PROVIDER`). Connectors use it too.
+- Migration 0011: `organization_source_control_connections` (GitHub and Bitbucket) and
+  `repository_credential_leases`, both under forced row-level security. Neither holds a
+  credential.
+- A checkout grant for a repository a connection allows names a credential lease: tenant-,
+  repository- and operation-scoped, five minutes, one use, revocable, redeemable only by an
+  execution runtime identity presenting that signed grant.
+- The execution runtime redeems the lease, clones through the egress proxy with the
+  credential held only in memory and the `git` process environment, and releases the lease.
+- Credential modes: a stored read-only token (GitHub or Bitbucket), or a GitHub App that mints
+  a single-repository, read-only token per lease and revokes it afterwards.
+- Runtime identities have a role: `agent` runtimes cannot redeem; `execution` runtimes can do
+  nothing else.
+
+### Limitations
+
+- A stored token cannot be withdrawn at the provider when a lease is revoked; its own scope
+  and lifetime are the limit. Use the GitHub App mode where possible.
+- Provider-side revocation is remembered only by the API instance that redeemed the lease.
+- Bitbucket has no per-lease token minting; it uses a stored repository access token.
+- Submodules are never fetched. Commit SHAs cannot be checked out.
+- There is no admin console panel yet; connections and leases are managed through
+  `/api/organization/source-control-connections` and `/api/organization/credential-leases`.
+- The Vault provider is tested against a simulated Vault, not a live one.
+- Model credentials (`EMPLOYEE_BYOK` and organization keys) do not use the secret broker yet.
+
 ## Catalog bundle compatibility — delivered
 
 See [ADR 0030](adr/0030-catalog-bundle-compatibility.md).
@@ -489,6 +522,10 @@ once imported ([ADR 0026](adr/0026-model-quality-view.md)). Verified tenant doma
 remembered per instance and forgotten on change ([ADR 0027](adr/0027-tenant-domain-cache.md)),
 timestamps and JSON use native column types ([ADR 0028](adr/0028-native-column-types.md)),
 and catalog versions registered by another instance are loaded without a restart
-([ADR 0029](adr/0029-catalog-version-reload.md)).
-The highest-value follow-up is sending each weekly quality run's results to the control plane
-from the workflow, so administrators no longer depend on an operator import to see them.
+([ADR 0029](adr/0029-catalog-version-reload.md)) after full validation
+([ADR 0030](adr/0030-catalog-bundle-compatibility.md)). Secrets are read only through a
+broker, and private GitHub and Bitbucket repositories are checked out with single-use
+credential leases ([ADR 0031](adr/0031-secret-and-credential-brokering.md)).
+The highest-value follow-up is a production pilot's remaining blockers: verifying the Vault
+provider against a live Vault, moving model credentials behind the secret broker, and an
+admin console panel for source-control connections and credential leases.

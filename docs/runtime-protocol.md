@@ -132,6 +132,15 @@ Every failure returns the same `401 RUNTIME_UNAUTHENTICATED`.
 | `POST /runtime/v1/models/reserve`  | `{ reservationId, decision: ALLOWED, maxOutputTokens }` or `{ reservationId, decision: DENIED, code: MODEL_BUDGET_EXCEEDED, reason }`; before every model call (ADR 0021)   |
 | `POST /runtime/v1/models/settle`   | `{ reservationId, status: SETTLED }`; the call's provider-reported tokens, once                                                                                             |
 
+Each identity has a `role` (ADR 0031). The routes above are for `agent` identities, the
+default. Two more routes are for `execution` identities only, and the wrong role gets
+`403 RUNTIME_ROLE_FORBIDDEN`:
+
+| Route                                  | Response                                                                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /runtime/v1/credentials/redeem`  | `{ leaseId, credential, expiresAt }` once, for `{ leaseId, grant }` where the signed grant names that lease and everything matches |
+| `POST /runtime/v1/credentials/release` | `{ leaseId, status }` for `{ leaseId, grantId, outcome }`; only the runtime that redeemed the lease may release it                 |
+
 Leases (`agent_run_leases`) bind a run to one runtime and session. A queued run that never
 started can be reclaimed after 10 minutes. An undelivered command is redelivered to its holder
 after 60 seconds.

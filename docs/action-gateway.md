@@ -88,8 +88,10 @@ rows show the target resource and the expiry time.
 
 ## Secrets
 
-Connections store `secret://<name>`. The operator secret file (`CONNECTOR_SECRETS_PATH`) is
-scoped per organization:
+Connections store `secret://<name>`. Values are read only through the secret broker
+([ADR 0031](adr/0031-secret-and-credential-brokering.md)): from Vault when
+`SECRET_PROVIDER=vault`, otherwise from the operator secret file (`CONNECTOR_SECRETS_PATH`),
+which is scoped per organization:
 
 ```json
 { "<organizationId>": { "jira-api-token": "<token>" } }

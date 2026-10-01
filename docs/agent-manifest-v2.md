@@ -20,22 +20,38 @@ resolved, signed runtime configuration of one employee-assigned agent. Types liv
 ```yaml
 apiVersion: agents-foundry/v2
 kind: AgentManifest
-metadata: { manifestId, agentId, organizationId, employeeId, issuedAt,
-            blueprint: { id, version, digest }, installationId? }   # digest and installationId since Phase B
+metadata: {
+    manifestId,
+    agentId,
+    organizationId,
+    employeeId,
+    issuedAt,
+    blueprint: { id, version, digest },
+    installationId?,
+  } # digest and installationId since Phase B
 identity: { name, role: qa-engineer, department: Engineering }
 persona: { profile: qa-engineer-default }
 runtime: { profile: standard-agent, isolation: sandboxed }
 model: { profile: qa-default, provider, model, credentialMode: ORGANIZATION_MANAGED }
 skills: [{ id: story-analysis, version: 1.0.0 }, …]
 tools: [repository, browser, artifact]
-connectors: [{ id: jira, capabilities: [issueTracker.read] }, { id: bitbucket, capabilities: [sourceControl.read] }]
+connectors:
+  [
+    { id: jira, capabilities: [issueTracker.read] },
+    { id: bitbucket, capabilities: [sourceControl.read] },
+  ]
 mcp: [playwright]
 memory: { profile: project-employee-memory }
 knowledge: { sources: [assigned-repositories, issue-tracker-project] }
-policies: { profile: qa-standard, policyVersion: foundation-approval-v1, capabilities: [{ action, outcome }] }
+policies:
+  {
+    profile: qa-standard,
+    policyVersion: foundation-approval-v1,
+    capabilities: [{ action, outcome }],
+  }
 workflows: [validate-story, sanity-test, regression-test, post-release-validation]
 evaluations: { suite: qa-engineer-v1 }
-configuration: { projectName, repositoryUrl, qaUrl, … }   # resolved installation answers
+configuration: { projectName, repositoryUrl, qaUrl, … } # resolved installation answers
 conversationSync: REQUIRED
 ```
 

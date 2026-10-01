@@ -13,15 +13,15 @@ logs, reports, patches, defect drafts and so on. Contracts live in
 
 ## Model
 
-| Field              | Notes                                                                  |
-| ------------------ | ---------------------------------------------------------------------- |
-| `id`               | UUID chosen by the producer, so registration is idempotent             |
+| Field                                           | Notes                                                                            |
+| ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| `id`                                            | UUID chosen by the producer, so registration is idempotent                       |
 | `organizationId`, `threadId`, `runId`, `stepId` | The step must belong to the run, and the run to the thread and tenant (triggers) |
-| `type`, `mediaType`, `name` | A closed type list, a MIME type, and a file name with no path separators |
-| `storageReference` | `artifact://<store>/<opaque-key>` only                                  |
-| `checksum`         | SHA-256                                                                 |
-| `sizeBytes`        | Up to 5 GiB                                                             |
-| `retentionPolicy`  | `EPHEMERAL`, `STANDARD_30D`, `EXTENDED_365D` or `LEGAL_HOLD`            |
+| `type`, `mediaType`, `name`                     | A closed type list, a MIME type, and a file name with no path separators         |
+| `storageReference`                              | `artifact://<store>/<opaque-key>` only                                           |
+| `checksum`                                      | SHA-256                                                                          |
+| `sizeBytes`                                     | Up to 5 GiB                                                                      |
+| `retentionPolicy`                               | `EPHEMERAL`, `STANDARD_30D`, `EXTENDED_365D` or `LEGAL_HOLD`                     |
 
 ## Security rules
 

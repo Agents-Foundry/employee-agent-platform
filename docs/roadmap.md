@@ -28,8 +28,9 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
 - Native system-browser Google sign-in (pending)
 - PostgreSQL with row-level organization isolation (implemented, [ADR 0018](adr/0018-postgresql-row-level-security.md))
-- Vault-backed BYOK and organization-key bindings (pending; connector secrets are `secret://`
-  references resolved from an operator file)
+- Vault-backed BYOK and organization-key bindings (pending; connector and repository secrets
+  are `secret://` references resolved through the secret broker, from Vault or an operator
+  file)
 - Admin CRUD for departments, teams, roles, employees, and agents
 
 ## Milestone 3 — Read-only QA context
@@ -79,7 +80,8 @@ model spending limits, prices and alerts, signed alert webhooks, scheduled quali
 per-instance tenant domain cache, native column types and multi-instance catalog reload
 (ADRs 0016–0029).
 
-Pending: managed secret and credential brokering, and private repository checkout.
+Secrets are read through a broker with a Vault provider, and private GitHub and Bitbucket
+repositories are checked out with single-use credential leases (ADR 0031).
 
 ## Milestone 6 — Agent factory
 
