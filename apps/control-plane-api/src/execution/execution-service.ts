@@ -95,6 +95,11 @@ export interface ExecutionServiceOptions {
     manifest: AnySignedAgentManifest,
     workflowId: string,
   ) => Promise<WorkflowDefinition | undefined>;
+  /**
+   * Called in the same transaction when a run completes, fails or is cancelled, so anything
+   * that only made sense while it ran (credential leases, ADR 0031) ends with it.
+   */
+  onRunStopped?: (organizationId: string, runId: string, status: AgentRunStatus) => Promise<void>;
   /** Append an agent message to a conversation (caller's transaction). */
   conversationMessage?: (
     organizationId: string,
@@ -934,6 +939,8 @@ export class ExecutionService {
       scope.runId,
       scope.organizationId,
     );
+    if (run.status !== to && (to === 'COMPLETED' || to === 'FAILED' || to === 'CANCELLED'))
+      await this.options.onRunStopped?.(scope.organizationId, scope.runId, to);
   }
 
   private async transitionStep(

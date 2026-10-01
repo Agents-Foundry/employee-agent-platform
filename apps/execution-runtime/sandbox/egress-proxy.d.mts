@@ -9,6 +9,8 @@ export interface EgressProxyOptions {
   lookup?: (host: string) => Promise<string[]>;
   /** Addresses no grant may reach. Default: {@link isBlockedAddress}. */
   isBlocked?: (address: string) => boolean;
+  /** Tests only: the local port standing in for an allowed host's port. */
+  portFor?: (host: string, port: number) => number;
 }
 
 export function normalizeHost(host: string): string;

@@ -223,15 +223,20 @@ export class RuntimeTransportService {
     return this.db.tenant(organizationId, async () => {
       const { run } = await this.runningStep(runtime, request.correlation);
       const { correlation } = request;
-      return this.deps.gateway.issueGrant(run, request.requestId, {
-        organizationId: correlation.organizationId,
-        employeeId: correlation.employeeId,
-        agentId: correlation.agentId,
-        threadId: correlation.threadId,
-        runId: correlation.runId,
-        stepId: correlation.stepId,
-        toolCallId: correlation.toolCallId,
-      });
+      return this.deps.gateway.issueGrant(
+        run,
+        request.requestId,
+        {
+          organizationId: correlation.organizationId,
+          employeeId: correlation.employeeId,
+          agentId: correlation.agentId,
+          threadId: correlation.threadId,
+          runId: correlation.runId,
+          stepId: correlation.stepId,
+          toolCallId: correlation.toolCallId,
+        },
+        runtime.id,
+      );
     });
   }
 

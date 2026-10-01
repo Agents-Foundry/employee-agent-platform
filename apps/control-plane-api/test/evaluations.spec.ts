@@ -41,9 +41,13 @@ describe('role governance evaluations', () => {
       );
   });
 
-  it.each(cases)('$name', async ({ blueprint, suite, scenario }) => {
-    const report = await runScenario(blueprint, suite, scenario);
-    expect(report.failures, JSON.stringify(report.results, null, 2)).toEqual([]);
-    // Each scenario runs the whole stack; the parallel suite makes that slow on some machines.
-  }, 120_000);
+  it.each(cases)(
+    '$name',
+    async ({ blueprint, suite, scenario }) => {
+      const report = await runScenario(blueprint, suite, scenario);
+      expect(report.failures, JSON.stringify(report.results, null, 2)).toEqual([]);
+      // Each scenario runs the whole stack; the parallel suite makes that slow on some machines.
+    },
+    120_000,
+  );
 });

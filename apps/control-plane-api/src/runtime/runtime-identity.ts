@@ -18,6 +18,12 @@ export interface RuntimeIdentity {
   /** Tenants this runtime may serve; `'*'` is a platform-operated shared runtime. */
   organizations: '*' | ReadonlySet<string>;
   runtimeProfiles: ReadonlySet<string>;
+  /**
+   * `agent` runtimes claim runs and request actions and grants; `execution` runtimes only
+   * redeem and release repository credential leases (ADR 0031). Neither can do the other's
+   * work, so an agent runtime can never obtain a credential.
+   */
+  role: 'agent' | 'execution';
 }
 
 const identitySchema = z
@@ -36,6 +42,7 @@ const identitySchema = z
       .array(z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/))
       .min(1)
       .max(50),
+    role: z.enum(['agent', 'execution']).optional(),
   })
   .strict();
 const registrySchema = z.array(identitySchema).max(100);
@@ -69,6 +76,7 @@ export class RuntimeIdentityRegistry {
         publicKey,
         organizations: wildcard ? '*' : new Set(config.organizations),
         runtimeProfiles: new Set(config.runtimeProfiles),
+        role: config.role ?? 'agent',
       });
     }
   }

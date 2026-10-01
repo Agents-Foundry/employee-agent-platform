@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, open, realpath, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
 import { runProcess, type ProcessResult } from '../process-runner.js';
+import { startLocalEgressProxy, type EgressOverrides, type LocalEgressProxy } from './egress.js';
 import type {
   ExecutionProvider,
+  OperationContext,
   ProducedArtifact,
   ProviderOutcome,
   WorkspaceHandle,
@@ -17,6 +19,10 @@ export interface LocalProviderOptions {
   nodeExecutable?: string;
   maxOutputBytes?: number;
   maxFileBytes?: number;
+  /** A CA bundle git also trusts for HTTPS hosts (an enterprise git host's private CA). */
+  gitCaFile?: string;
+  /** Test seams for the egress proxy that every HTTPS checkout goes through. */
+  egress?: EgressOverrides;
 }
 
 const MODEL_OUTPUT_LIMIT = 20_000;
@@ -76,11 +82,15 @@ export class LocalExecutionProvider implements ExecutionProvider {
     operation: ExecutionOperation,
     limits: ResourceLimits,
     signal: AbortSignal,
+    context: OperationContext = {},
   ): Promise<ProviderOutcome> {
     try {
+      // A credential is redeemed for one checkout and is never offered to anything else.
+      if (context.credential && operation.kind !== 'git.checkout')
+        throw new OperationFailure('CREDENTIAL_OPERATION_FORBIDDEN', '');
       switch (operation.kind) {
         case 'git.checkout':
-          return await this.checkout(workspace, operation, limits, signal);
+          return await this.checkout(workspace, operation, limits, signal, context);
         case 'git.status':
           return await this.status(workspace, operation.path, limits, signal);
         case 'file.read':
@@ -146,6 +156,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
     cwd: string,
     limits: ResourceLimits,
     signal: AbortSignal,
+    extraEnv: Record<string, string> = {},
   ): Promise<ProcessResult> {
     const hooks = join(workspace.scratch, 'no-hooks');
     await mkdir(hooks, { recursive: true });
@@ -161,57 +172,132 @@ export class LocalExecutionProvider implements ExecutionProvider {
     ];
     return runProcess(this.options.gitExecutable ?? 'git', [...safety, ...args], {
       cwd,
-      env: await this.environment(workspace),
+      env: await this.environment(workspace, extraEnv),
       timeoutMs: limits.timeoutMs,
       maxOutputBytes: this.options.maxOutputBytes ?? 1024 * 1024,
       signal,
     });
   }
 
+  /**
+   * Clone one branch or tag. HTTPS clones leave only through the egress proxy, limited to the
+   * grant's hosts, and never follow redirects. A brokered credential (ADR 0031) is sent only
+   * as an `Authorization` header on requests to this exact repository URL: it is passed to git
+   * in the child process environment, never in the URL, a config file, a credential helper or
+   * the command line, so nothing of it remains in the workspace. Submodules are never fetched.
+   * A failed, timed-out or cancelled clone leaves no partial checkout behind.
+   */
   private async checkout(
     workspace: WorkspaceHandle,
     operation: Extract<ExecutionOperation, { kind: 'git.checkout' }>,
     limits: ResourceLimits,
     signal: AbortSignal,
+    context: OperationContext,
   ): Promise<ProviderOutcome> {
     const url = new URL(operation.repositoryUrl);
+    const { credential } = context;
     if (url.protocol === 'file:' && !this.options.allowFileRepositories)
       throw new OperationFailure(
         'REPOSITORY_PROTOCOL_FORBIDDEN',
         'file:// repositories are disabled.',
       );
+    if (credential && url.protocol !== 'https:')
+      throw new OperationFailure('CREDENTIAL_PROTOCOL_FORBIDDEN', 'Credentials need HTTPS.');
     const target = await inside(workspace.root, operation.path, false);
     if (existsSync(target))
       throw new OperationFailure('PATH_ALREADY_EXISTS', `${operation.path} already exists.`);
     const template = join(workspace.scratch, 'empty-template');
     await mkdir(template, { recursive: true });
-    const clone = await this.git(
-      workspace,
-      [
-        'clone',
-        '--depth',
-        '1',
-        '--single-branch',
-        '--no-tags',
-        `--template=${template}`,
-        '--branch',
-        operation.ref,
-        '--',
-        operation.repositoryUrl,
-        target,
-      ],
-      workspace.root,
-      limits,
-      signal,
-    );
-    if (clone.exitCode !== 0 || clone.timedOut)
-      return failedProcess(clone, 'GIT_CHECKOUT_FAILED', 'git clone');
+    const secrets = credential?.secrets() ?? [];
+    const network: string[] = [];
+    const env: Record<string, string> = {};
+    let proxy: LocalEgressProxy | undefined;
+    let clone: ProcessResult;
+    try {
+      if (url.protocol === 'https:') {
+        proxy = await startLocalEgressProxy(
+          limits.network.mode === 'ALLOW_LIST' ? limits.network.allowedHosts : [],
+          this.options.egress,
+        );
+        network.push(
+          '-c',
+          `http.proxy=${proxy.url}`,
+          '-c',
+          'http.followRedirects=false',
+          '-c',
+          'protocol.allow=never',
+          '-c',
+          'protocol.https.allow=always',
+          '-c',
+          'submodule.recurse=false',
+          ...(this.options.gitCaFile ? ['-c', `http.sslCAInfo=${this.options.gitCaFile}`] : []),
+        );
+      }
+      if (credential) {
+        if (credential.expiresAt <= Date.now())
+          throw new OperationFailure('CREDENTIAL_EXPIRED', 'The credential lease expired.');
+        const { username, password } = credential.reveal();
+        const basic = Buffer.from(`${username}:${password}`).toString('base64');
+        env['GIT_CONFIG_COUNT'] = '1';
+        env['GIT_CONFIG_KEY_0'] = `http.${operation.repositoryUrl}.extraHeader`;
+        env['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${basic}`;
+      }
+      clone = redacted(
+        await this.git(
+          workspace,
+          [
+            ...network,
+            'clone',
+            '--depth',
+            '1',
+            '--single-branch',
+            '--no-tags',
+            '--no-recurse-submodules',
+            `--template=${template}`,
+            '--branch',
+            operation.ref,
+            '--',
+            operation.repositoryUrl,
+            target,
+          ],
+          workspace.root,
+          limits,
+          signal,
+          env,
+        ),
+        secrets,
+      );
+    } finally {
+      await proxy?.close();
+    }
+    const discard = () => rm(target, { recursive: true, force: true, maxRetries: 3 });
+    if (clone.exitCode !== 0 || clone.timedOut || signal.aborted) {
+      await discard();
+      const failure = failedProcess(clone, 'GIT_CHECKOUT_FAILED', 'git clone');
+      if (proxy?.denied.length && failure.error && !clone.timedOut)
+        failure.error = {
+          code: 'EGRESS_DENIED',
+          message: `The checkout tried to reach a host the grant does not allow: ${proxy.denied[0]}.`,
+        };
+      return failure;
+    }
+    if (credential) {
+      // Belt and braces: nothing of the credential may have reached the repository's config.
+      const config = await readFile(join(target, '.git', 'config'), 'utf8').catch(() => '');
+      if (secrets.some((secret) => config.includes(secret)) || /extraheader/i.test(config)) {
+        await discard();
+        throw new OperationFailure('CREDENTIAL_PERSISTED', 'The checkout was discarded.');
+      }
+    }
     const head = await this.git(workspace, ['rev-parse', 'HEAD'], target, limits, signal);
     const commit = head.stdout.trim();
+    const submodules = existsSync(join(target, '.gitmodules'))
+      ? ' Its submodules were not fetched: submodule checkout is not supported.'
+      : '';
     return {
       status: 'SUCCEEDED',
       exitCode: 0,
-      output: `Checked out ${operation.ref} of ${operation.repositoryUrl} into ${operation.path} at ${commit}.`,
+      output: `Checked out ${operation.ref} of ${operation.repositoryUrl} into ${operation.path} at ${commit}.${submodules}`,
       truncated: false,
       artifacts: processLogs(clone, 'git-checkout.log'),
     };
@@ -334,6 +420,20 @@ export class LocalExecutionProvider implements ExecutionProvider {
     );
     return playwrightOutcome(result, operation);
   }
+}
+
+/** Replace every occurrence of each secret; longest first so no fragment survives. */
+export function redact(text: string, secrets: readonly string[]): string {
+  let result = text;
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length))
+    if (secret) result = result.split(secret).join('[REDACTED]');
+  return result;
+}
+
+function redacted(result: ProcessResult, secrets: readonly string[]): ProcessResult {
+  return secrets.length
+    ? { ...result, stdout: redact(result.stdout, secrets), stderr: redact(result.stderr, secrets) }
+    : result;
 }
 
 /** Collect a process's output as a log artifact (none when it printed nothing). */

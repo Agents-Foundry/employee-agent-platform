@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { ExecutionArtifactStore } from './artifact-store.js';
+import { ControlPlaneCredentialClient } from './credential-client.js';
 import { ExecutionService } from './execution-service.js';
 import { GrantVerifier } from './grant-verifier.js';
 import {
@@ -22,6 +23,9 @@ const host = process.env['EXECUTION_RUNTIME_HOST'] ?? '127.0.0.1';
 const port = Number(process.env['EXECUTION_RUNTIME_PORT'] ?? 4500);
 const hostOptions = {
   allowFileRepositories: process.env['EXECUTION_ALLOW_FILE_REPOSITORIES'] === 'true',
+  ...(process.env['EXECUTION_GIT_CA_FILE']
+    ? { gitCaFile: process.env['EXECUTION_GIT_CA_FILE'] }
+    : {}),
 };
 const providerId = process.env['EXECUTION_PROVIDER'] ?? 'local';
 if (providerId !== 'local' && providerId !== 'container')
@@ -52,6 +56,7 @@ const provider: ExecutionProvider =
       })
     : new LocalExecutionProvider(hostOptions);
 const state = new StateStore(join(root, 'state.db'));
+const credentials = ControlPlaneCredentialClient.fromEnvironment();
 const service = new ExecutionService({
   verifier: new GrantVerifier(required('EXECUTION_GRANT_VERIFICATION_KEY')),
   provider,
@@ -59,7 +64,10 @@ const service = new ExecutionService({
   artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
   workspaceRoot: root,
   allowUnsandboxed: process.env['EXECUTION_ALLOW_UNSANDBOXED'] === 'true',
+  ...(credentials ? { credentials } : {}),
 });
+// Checkouts a previous process left unfinished are discarded and their leases ended.
+const recovered = await service.recover();
 const server = createExecutionServer(service, provider).listen(port, host, () => {
   console.log(
     JSON.stringify({
@@ -68,6 +76,8 @@ const server = createExecutionServer(service, provider).listen(port, host, () =>
       host,
       port,
       provider: provider.id,
+      authenticatedCheckout: credentials !== undefined,
+      recoveredCheckouts: recovered,
     }),
   );
 });

@@ -185,546 +185,560 @@ function implementScript(seen: ModelRequest[], override: () => [string, object][
 describe.each([
   ...(docker ? [{ mode: 'container sandbox', useDocker: true }] : []),
   { mode: 'recorded commands', useDocker: false },
-])('Frontend Engineer on the shared runtime ($mode)', ({ useDocker }) => {
-  let db: ControlPlaneDatabase;
-  let app: ReturnType<typeof createApp>;
-  let controlServer: Server;
-  let executionServer: Server;
-  let state: StateStore;
-  let provider: FixtureRepositoryProvider;
-  let host: RuntimeHost;
-  let root: string;
-  let agentId: string;
-  let github: { method: string; path: string; body: Record<string, unknown> | null }[];
-  let modelRequests: ModelRequest[];
-  let scenario: [string, object][] | null;
+])(
+  'Frontend Engineer on the shared runtime ($mode)',
+  ({ useDocker }) => {
+    let db: ControlPlaneDatabase;
+    let app: ReturnType<typeof createApp>;
+    let controlServer: Server;
+    let executionServer: Server;
+    let state: StateStore;
+    let provider: FixtureRepositoryProvider;
+    let host: RuntimeHost;
+    let root: string;
+    let agentId: string;
+    let github: { method: string; path: string; body: Record<string, unknown> | null }[];
+    let modelRequests: ModelRequest[];
+    let scenario: [string, object][] | null;
 
-  const listen = (server: Server) =>
-    new Promise<string>((resolve) =>
-      server.listen(0, '127.0.0.1', () =>
-        resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`),
-      ),
-    );
-  const sql = () => rawSql(db);
-  const BASE = 'a'.repeat(40);
+    const listen = (server: Server) =>
+      new Promise<string>((resolve) =>
+        server.listen(0, '127.0.0.1', () =>
+          resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`),
+        ),
+      );
+    const sql = () => rawSql(db);
+    const BASE = 'a'.repeat(40);
 
-  beforeEach(async () => {
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    const secrets = new MemorySecretStore();
-    secrets.set(org, 'jira-token', 'jira-test-token');
-    secrets.set(org, 'github-token', 'github-test-token');
-    github = [];
-    modelRequests = [];
-    scenario = null;
-    db = await testDatabase({
-      manifestV2Issuance: true,
-      genericRuntime: true,
-      secrets,
-      connectorFetch: async (url, init) => {
-        const target = new URL(String(url));
-        if (target.hostname === 'demo.atlassian.net')
-          return Response.json({
-            key: 'UI-7',
-            fields: {
-              summary: 'Show a free-shipping banner',
-              status: { name: 'Ready' },
-              issuetype: { name: 'Story' },
-              description: 'Banner text: Free shipping over $50',
-            },
-          });
-        const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
-        github.push({ method: String(init?.method), path: target.pathname, body });
-        const path = target.pathname.replace('/repos/acme/storefront', '');
-        if (path === '/git/ref/heads/main') return Response.json({ object: { sha: BASE } });
-        if (path === `/git/commits/${BASE}`)
-          return Response.json({ tree: { sha: 'b'.repeat(40) } });
-        if (path === '/git/trees') return Response.json({ sha: 'c'.repeat(40) }, { status: 201 });
-        if (path === '/git/commits') return Response.json({ sha: 'd'.repeat(40) }, { status: 201 });
-        if (path === '/git/refs') return Response.json({ ref: 'x' }, { status: 201 });
-        if (path === '/pulls')
-          return Response.json(
-            { number: 42, html_url: 'https://github.com/acme/storefront/pull/42' },
-            { status: 201 },
-          );
-        return new Response('{}', { status: 404 });
-      },
-      runtimeIdentities: [
-        {
-          id: 'runtime-fe',
-          publicKeySpki: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
-          organizations: [org],
-          runtimeProfiles: ['standard-agent'],
+    beforeEach(async () => {
+      const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+      const secrets = new MemorySecretStore();
+      secrets.set(org, 'jira-token', 'jira-test-token');
+      secrets.set(org, 'github-token', 'github-test-token');
+      github = [];
+      modelRequests = [];
+      scenario = null;
+      db = await testDatabase({
+        manifestV2Issuance: true,
+        genericRuntime: true,
+        secrets,
+        connectorFetch: async (url, init) => {
+          const target = new URL(String(url));
+          if (target.hostname === 'demo.atlassian.net')
+            return Response.json({
+              key: 'UI-7',
+              fields: {
+                summary: 'Show a free-shipping banner',
+                status: { name: 'Ready' },
+                issuetype: { name: 'Story' },
+                description: 'Banner text: Free shipping over $50',
+              },
+            });
+          const body = init?.body
+            ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+            : null;
+          github.push({ method: String(init?.method), path: target.pathname, body });
+          const path = target.pathname.replace('/repos/acme/storefront', '');
+          if (path === '/git/ref/heads/main') return Response.json({ object: { sha: BASE } });
+          if (path === `/git/commits/${BASE}`)
+            return Response.json({ tree: { sha: 'b'.repeat(40) } });
+          if (path === '/git/trees') return Response.json({ sha: 'c'.repeat(40) }, { status: 201 });
+          if (path === '/git/commits')
+            return Response.json({ sha: 'd'.repeat(40) }, { status: 201 });
+          if (path === '/git/refs') return Response.json({ ref: 'x' }, { status: 201 });
+          if (path === '/pulls')
+            return Response.json(
+              { number: 42, html_url: 'https://github.com/acme/storefront/pull/42' },
+              { status: 201 },
+            );
+          return new Response('{}', { status: 404 });
         },
-      ],
-    });
-    const pending = await db.requestProvisioning(
-      employee.id,
-      {
-        blueprintId: 'engineering.frontend-engineer',
-        blueprintVersion: '1.0.0',
-        provider: 'test-provider',
-        model: 'test-model',
-        credentialMode: 'ORGANIZATION_MANAGED',
-        answers: {
-          projectName: 'Storefront',
-          repositoryUrl: 'https://github.com/acme/storefront',
-          projectScripts: 'lint, test',
-          issueTracker: ['Jira'],
-          sourceControl: ['GitHub'],
-        },
-      },
-      org,
-    );
-    agentId = manifestSubject(
-      (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')).manifest!
-        .payload,
-    ).agentId;
-    // The seeded demo admin has no organization membership; skip that check for the fixture.
-    const authorize = db.structure.authorize;
-    db.structure.authorize = async () => undefined;
-    await db.connectors.create(admin, {
-      provider: 'jira',
-      name: 'Demo Jira',
-      baseUrl: 'https://demo.atlassian.net',
-      secretRef: 'secret://jira-token',
-      settings: { allowedProjects: ['UI'] },
-    });
-    await db.connectors.create(admin, {
-      provider: 'github',
-      name: 'Acme GitHub',
-      baseUrl: 'https://api.github.com',
-      secretRef: 'secret://github-token',
-      settings: { allowedRepositories: ['acme/storefront'] },
-    });
-    db.structure.authorize = authorize;
-    app = createApp(db);
-    controlServer = createServer(app);
-    root = mkdtempSync(join(tmpdir(), 'af-fe-e2e-'));
-    state = new StateStore(':memory:');
-    provider = new FixtureRepositoryProvider(useDocker);
-    executionServer = createExecutionServer(
-      new ExecutionService({
-        verifier: new GrantVerifier(db.signer.verificationKey.publicKeySpki),
-        provider,
-        state,
-        artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
-        workspaceRoot: root,
-        // Only the no-Docker variant needs the development override; the sandbox satisfies it.
-        allowUnsandboxed: !useDocker,
-      }),
-      provider,
-    );
-    const [controlUrl, executionUrl] = await Promise.all([
-      listen(controlServer),
-      listen(executionServer),
-    ]);
-    const execution = new ExecutionClient(executionUrl);
-    host = new RuntimeHost({
-      controlPlane: new ControlPlaneClient({
-        baseUrl: controlUrl,
-        runtimeId: 'runtime-fe',
-        privateKey,
-      }),
-      verifier: new ManifestVerifier(db.signer.verificationKey.publicKeySpki),
-      kernel: new NativeKernel(),
-      models: new ModelGateway(
-        [
-          new ScriptedProvider(
-            'test-provider',
-            implementScript(modelRequests, () => scenario),
-          ),
-        ],
-        { resolve: async () => ({ apiKey: 'test-only' }) },
-      ),
-      // The same tool set any role's runtime carries; the manifest decides what is offered.
-      tools: new ToolRegistry([
-        new IssueTrackerTool(),
-        new SourceControlTool(),
-        new RepositoryTool(execution),
-        new BrowserTool(execution),
-        new CodeEditorTool(execution),
-        new BuildTool(execution),
-        new DependencyTool(execution),
-      ]),
-      artifacts: new MemoryArtifactStore(),
-      checkpoints: new MemoryCheckpointStore(),
-      logger: silent,
-    });
-  });
-
-  afterEach(async () => {
-    await host.drain();
-    await Promise.all([
-      new Promise((resolve) => controlServer.close(resolve)),
-      new Promise((resolve) => executionServer.close(resolve)),
-    ]);
-    state.close();
-    await db.close();
-    rmSync(root, { recursive: true, force: true });
-  });
-
-  it('implements, verifies and proposes a change, publishing exactly the approved files', async () => {
-    const run = (
-      await demoRequest(app)
-        .post('/api/execution/v1/runs')
-        .send({
-          agentId,
-          task: {
-            objective: 'Implement UI-7',
-            workflow: 'implement-ui-change',
-            workItem: { system: 'issue-tracker', key: 'UI-7' },
-            inputs: {},
+        runtimeIdentities: [
+          {
+            id: 'runtime-fe',
+            publicKeySpki: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
+            organizations: [org],
+            runtimeProfiles: ['standard-agent'],
           },
-        })
-        .expect(202)
-    ).body as { id: string };
-    await host.pollOnce();
-    await host.drain();
-
-    // The pinned workflow reached the kernel; the browser tool is not granted to this role.
-    expect(modelRequests[0]!.system).toContain('Follow workflow implement-ui-change@1.0.0');
-    const offered = modelRequests[0]!.tools.map((tool) => tool.name).sort();
-    expect(offered).toEqual([
-      'build',
-      'code-editor',
-      'issue-tracker',
-      'repository',
-      'source-control',
-    ]);
-
-    let detail = await db.execution.getRun(employee, run.id);
-    expect(detail.run.status).toBe('WAITING_FOR_APPROVAL');
-    const approval = detail.approvals.find((item) => item.status === 'PENDING')!;
-    expect(approval).toMatchObject({ action: 'repository.pull_request.create', risk: 'HIGH' });
-    const listed = (await request(app).get('/api/approvals').set(adminHeaders).expect(200)).body;
-    const summary = listed.find((item: { id: string }) => item.id === approval.id)
-      .summary as string;
-    expect(summary).toMatch(
-      /^Open a draft pull request in acme\/storefront from agents-foundry\/ui-7 into main: "Show the free-shipping banner"\. 1 file\(s\): src\/banner\.js\. Change set [0-9a-f]{12}\.$/,
-    );
-
-    // What ran, under which grant limits: no step needed network except the checkout.
-    const kinds = provider.seen.map((entry) => entry.operation.kind);
-    expect(kinds).toEqual(['git.checkout', 'file.write', 'command']);
-    const network = provider.seen.map((entry) => entry.limits.network);
-    expect(network).toEqual([
-      { mode: 'ALLOW_LIST', allowedHosts: ['github.com'] },
-      { mode: 'NONE', allowedHosts: [] },
-      { mode: 'NONE', allowedHosts: [] },
-    ]);
-    const results = toolResults(modelRequests.at(-1)!).map((block) => block.content);
-    expect(results[3]).toContain(useDocker ? '1 passing' : '[recorded, not executed]');
-    expect(results[4]).toBe('ACTION_DENIED: The target resource is outside the configured scope.');
-    expect(results[5]).toMatch(/^TOOL_NOT_AVAILABLE|Tool browser is not available/);
-    const workspace = readdirSync(join(root, 'workspaces'))[0]!;
-    expect(
-      readFileSync(join(root, 'workspaces', workspace, 'repo', 'src', 'banner.js'), 'utf8'),
-    ).toBe(BANNER);
-
-    await request(app)
-      .post(`/api/approvals/${approval.id}/decision`)
-      .set(adminHeaders)
-      .send({ decision: 'APPROVED' })
-      .expect(200);
-    await host.pollOnce();
-    await host.drain();
-
-    detail = await db.execution.getRun(employee, run.id);
-    expect(detail.run.status).toBe('COMPLETED');
-    expect(github.map((call) => `${call.method} ${call.path}`)).toEqual([
-      'GET /repos/acme/storefront/git/ref/heads/main',
-      `GET /repos/acme/storefront/git/commits/${BASE}`,
-      'POST /repos/acme/storefront/git/trees',
-      'POST /repos/acme/storefront/git/commits',
-      'POST /repos/acme/storefront/git/refs',
-      'POST /repos/acme/storefront/pulls',
-    ]);
-    expect(github[2]!.body).toEqual({
-      base_tree: 'b'.repeat(40),
-      tree: [{ path: 'src/banner.js', mode: '100644', type: 'blob', content: BANNER }],
-    });
-    expect(github[4]!.body).toEqual({ ref: 'refs/heads/agents-foundry/ui-7', sha: 'd'.repeat(40) });
-    expect(github[5]!.body).toMatchObject({
-      draft: true,
-      head: 'agents-foundry/ui-7',
-      base: 'main',
-    });
-    const final = toolResults(modelRequests.at(-1)!).at(-1)!.content;
-    expect(final).toBe(
-      'Opened draft pull request #42 (https://github.com/acme/storefront/pull/42) from agents-foundry/ui-7.',
-    );
-    const grants = (
-      await sql()
-        .prepare('SELECT signed_grant FROM agent_execution_grants ORDER BY issued_at, seq')
-        .all()
-    ).map((row) => (JSON.parse(String(row['signed_grant'])) as SignedExecutionGrant).payload);
-    expect(grants.map((grant) => [grant.action, grant.isolation])).toEqual([
-      ['repository.read', 'sandboxed'],
-      ['repository.write', 'sandboxed'],
-      ['workspace.command', 'sandboxed'],
-    ]);
-    expect(JSON.stringify(await sql().prepare('SELECT * FROM audit_events').all())).not.toContain(
-      'github-test-token',
-    );
-  });
-
-  it('denies pull requests without changes or outside the configured repository', async () => {
-    const proposal = {
-      repository: 'acme/storefront',
-      baseBranch: 'main',
-      headBranch: 'agents-foundry/ui-7',
-      title: 'Nothing yet',
-      body: '',
-      path: 'repo',
-    };
-    scenario = [
-      ['source-control', proposal],
-      [
-        'repository',
-        {
-          kind: 'git.checkout',
-          repositoryUrl: 'https://github.com/acme/storefront',
-          ref: 'main',
-          path: 'repo',
-        },
-      ],
-      ['code-editor', { kind: 'file.write', path: 'repo/src/banner.js', content: BANNER }],
-      ['source-control', { ...proposal, repository: 'acme/payments' }],
-      ['source-control', { ...proposal, headBranch: 'main' }],
-    ];
-    await demoRequest(app)
-      .post('/api/execution/v1/runs')
-      .send({ agentId, task: { objective: 'Propose', inputs: {} } })
-      .expect(202);
-    await host.pollOnce();
-    await host.drain();
-    expect(toolResults(modelRequests.at(-1)!).map((block) => block.content)).toEqual([
-      'ACTION_DENIED: CHANGE_SET_EMPTY',
-      expect.stringContaining('Checked out main'),
-      `Created repo/src/banner.js (${Buffer.byteLength(BANNER)} bytes).`,
-      'ACTION_DENIED: The target resource is outside the configured scope.',
-      expect.stringMatching(/^TOOL_INPUT_INVALID: headBranch/),
-    ]);
-    expect(github).toEqual([]);
-    // GitHub connections name repositories as owner/name; other shapes are refused.
-    const authorize = db.structure.authorize;
-    db.structure.authorize = async () => undefined;
-    try {
-      for (const settings of [
-        { allowedRepositories: ['not a repo'] },
-        { allowedRepositories: ['acme/x', 'ACME/X'] },
-        { allowedProjects: ['UI'] },
-      ])
-        await expect(
-          db.connectors.create(admin, {
-            provider: 'github',
-            name: 'Other',
-            baseUrl: 'https://api.github.com',
-            secretRef: 'secret://github-token',
-            settings,
-          }),
-        ).rejects.toThrow();
-    } finally {
-      db.structure.authorize = authorize;
-    }
-    expect((await db.connectors.active(org, 'github'))?.settings).toEqual({
-      allowedProjects: [],
-      allowedRepositories: ['acme/storefront'],
-    });
-  });
-
-  it('installs dependencies only from the registry configured for the agent (1.1.0)', async () => {
-    const provision = async (packageRegistryUrl?: string) => {
+        ],
+      });
       const pending = await db.requestProvisioning(
         employee.id,
         {
           blueprintId: 'engineering.frontend-engineer',
-          blueprintVersion: '1.1.0',
+          blueprintVersion: '1.0.0',
           provider: 'test-provider',
           model: 'test-model',
           credentialMode: 'ORGANIZATION_MANAGED',
           answers: {
             projectName: 'Storefront',
             repositoryUrl: 'https://github.com/acme/storefront',
-            ...(packageRegistryUrl ? { packageRegistryUrl } : {}),
+            projectScripts: 'lint, test',
             issueTracker: ['Jira'],
             sourceControl: ['GitHub'],
           },
         },
         org,
       );
-      return manifestSubject(
+      agentId = manifestSubject(
         (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')).manifest!
           .payload,
       ).agentId;
-    };
-    const mirror = 'https://npm.acme.internal/repository/npm/';
-    const install = (registryUrl: string) =>
-      ['dependencies', { kind: 'dependencies.install', path: 'repo', registryUrl }] as [
-        string,
-        object,
+      // The seeded demo admin has no organization membership; skip that check for the fixture.
+      const authorize = db.structure.authorize;
+      db.structure.authorize = async () => undefined;
+      await db.connectors.create(admin, {
+        provider: 'jira',
+        name: 'Demo Jira',
+        baseUrl: 'https://demo.atlassian.net',
+        secretRef: 'secret://jira-token',
+        settings: { allowedProjects: ['UI'] },
+      });
+      await db.connectors.create(admin, {
+        provider: 'github',
+        name: 'Acme GitHub',
+        baseUrl: 'https://api.github.com',
+        secretRef: 'secret://github-token',
+        settings: { allowedRepositories: ['acme/storefront'] },
+      });
+      db.structure.authorize = authorize;
+      app = createApp(db);
+      controlServer = createServer(app);
+      root = mkdtempSync(join(tmpdir(), 'af-fe-e2e-'));
+      state = new StateStore(':memory:');
+      provider = new FixtureRepositoryProvider(useDocker);
+      executionServer = createExecutionServer(
+        new ExecutionService({
+          verifier: new GrantVerifier(db.signer.verificationKey.publicKeySpki),
+          provider,
+          state,
+          artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
+          workspaceRoot: root,
+          // Only the no-Docker variant needs the development override; the sandbox satisfies it.
+          allowUnsandboxed: !useDocker,
+        }),
+        provider,
+      );
+      const [controlUrl, executionUrl] = await Promise.all([
+        listen(controlServer),
+        listen(executionServer),
+      ]);
+      const execution = new ExecutionClient(executionUrl);
+      host = new RuntimeHost({
+        controlPlane: new ControlPlaneClient({
+          baseUrl: controlUrl,
+          runtimeId: 'runtime-fe',
+          privateKey,
+        }),
+        verifier: new ManifestVerifier(db.signer.verificationKey.publicKeySpki),
+        kernel: new NativeKernel(),
+        models: new ModelGateway(
+          [
+            new ScriptedProvider(
+              'test-provider',
+              implementScript(modelRequests, () => scenario),
+            ),
+          ],
+          { resolve: async () => ({ apiKey: 'test-only' }) },
+        ),
+        // The same tool set any role's runtime carries; the manifest decides what is offered.
+        tools: new ToolRegistry([
+          new IssueTrackerTool(),
+          new SourceControlTool(),
+          new RepositoryTool(execution),
+          new BrowserTool(execution),
+          new CodeEditorTool(execution),
+          new BuildTool(execution),
+          new DependencyTool(execution),
+        ]),
+        artifacts: new MemoryArtifactStore(),
+        checkpoints: new MemoryCheckpointStore(),
+        logger: silent,
+      });
+    });
+
+    afterEach(async () => {
+      await host.drain();
+      await Promise.all([
+        new Promise((resolve) => controlServer.close(resolve)),
+        new Promise((resolve) => executionServer.close(resolve)),
+      ]);
+      state.close();
+      await db.close();
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it('implements, verifies and proposes a change, publishing exactly the approved files', async () => {
+      const run = (
+        await demoRequest(app)
+          .post('/api/execution/v1/runs')
+          .send({
+            agentId,
+            task: {
+              objective: 'Implement UI-7',
+              workflow: 'implement-ui-change',
+              workItem: { system: 'issue-tracker', key: 'UI-7' },
+              inputs: {},
+            },
+          })
+          .expect(202)
+      ).body as { id: string };
+      await host.pollOnce();
+      await host.drain();
+
+      // The pinned workflow reached the kernel; the browser tool is not granted to this role.
+      expect(modelRequests[0]!.system).toContain('Follow workflow implement-ui-change@1.0.0');
+      const offered = modelRequests[0]!.tools.map((tool) => tool.name).sort();
+      expect(offered).toEqual([
+        'build',
+        'code-editor',
+        'issue-tracker',
+        'repository',
+        'source-control',
+      ]);
+
+      let detail = await db.execution.getRun(employee, run.id);
+      expect(detail.run.status).toBe('WAITING_FOR_APPROVAL');
+      const approval = detail.approvals.find((item) => item.status === 'PENDING')!;
+      expect(approval).toMatchObject({ action: 'repository.pull_request.create', risk: 'HIGH' });
+      const listed = (await request(app).get('/api/approvals').set(adminHeaders).expect(200)).body;
+      const summary = listed.find((item: { id: string }) => item.id === approval.id)
+        .summary as string;
+      expect(summary).toMatch(
+        /^Open a draft pull request in acme\/storefront from agents-foundry\/ui-7 into main: "Show the free-shipping banner"\. 1 file\(s\): src\/banner\.js\. Change set [0-9a-f]{12}\.$/,
+      );
+
+      // What ran, under which grant limits: no step needed network except the checkout.
+      const kinds = provider.seen.map((entry) => entry.operation.kind);
+      expect(kinds).toEqual(['git.checkout', 'file.write', 'command']);
+      const network = provider.seen.map((entry) => entry.limits.network);
+      expect(network).toEqual([
+        { mode: 'ALLOW_LIST', allowedHosts: ['github.com'] },
+        { mode: 'NONE', allowedHosts: [] },
+        { mode: 'NONE', allowedHosts: [] },
+      ]);
+      const results = toolResults(modelRequests.at(-1)!).map((block) => block.content);
+      expect(results[3]).toContain(useDocker ? '1 passing' : '[recorded, not executed]');
+      expect(results[4]).toBe(
+        'ACTION_DENIED: The target resource is outside the configured scope.',
+      );
+      expect(results[5]).toMatch(/^TOOL_NOT_AVAILABLE|Tool browser is not available/);
+      const workspace = readdirSync(join(root, 'workspaces'))[0]!;
+      expect(
+        readFileSync(join(root, 'workspaces', workspace, 'repo', 'src', 'banner.js'), 'utf8'),
+      ).toBe(BANNER);
+
+      await request(app)
+        .post(`/api/approvals/${approval.id}/decision`)
+        .set(adminHeaders)
+        .send({ decision: 'APPROVED' })
+        .expect(200);
+      await host.pollOnce();
+      await host.drain();
+
+      detail = await db.execution.getRun(employee, run.id);
+      expect(detail.run.status).toBe('COMPLETED');
+      expect(github.map((call) => `${call.method} ${call.path}`)).toEqual([
+        'GET /repos/acme/storefront/git/ref/heads/main',
+        `GET /repos/acme/storefront/git/commits/${BASE}`,
+        'POST /repos/acme/storefront/git/trees',
+        'POST /repos/acme/storefront/git/commits',
+        'POST /repos/acme/storefront/git/refs',
+        'POST /repos/acme/storefront/pulls',
+      ]);
+      expect(github[2]!.body).toEqual({
+        base_tree: 'b'.repeat(40),
+        tree: [{ path: 'src/banner.js', mode: '100644', type: 'blob', content: BANNER }],
+      });
+      expect(github[4]!.body).toEqual({
+        ref: 'refs/heads/agents-foundry/ui-7',
+        sha: 'd'.repeat(40),
+      });
+      expect(github[5]!.body).toMatchObject({
+        draft: true,
+        head: 'agents-foundry/ui-7',
+        base: 'main',
+      });
+      const final = toolResults(modelRequests.at(-1)!).at(-1)!.content;
+      expect(final).toBe(
+        'Opened draft pull request #42 (https://github.com/acme/storefront/pull/42) from agents-foundry/ui-7.',
+      );
+      const grants = (
+        await sql()
+          .prepare('SELECT signed_grant FROM agent_execution_grants ORDER BY issued_at, seq')
+          .all()
+      ).map((row) => (JSON.parse(String(row['signed_grant'])) as SignedExecutionGrant).payload);
+      expect(grants.map((grant) => [grant.action, grant.isolation])).toEqual([
+        ['repository.read', 'sandboxed'],
+        ['repository.write', 'sandboxed'],
+        ['workspace.command', 'sandboxed'],
+      ]);
+      expect(JSON.stringify(await sql().prepare('SELECT * FROM audit_events').all())).not.toContain(
+        'github-test-token',
+      );
+    });
+
+    it('denies pull requests without changes or outside the configured repository', async () => {
+      const proposal = {
+        repository: 'acme/storefront',
+        baseBranch: 'main',
+        headBranch: 'agents-foundry/ui-7',
+        title: 'Nothing yet',
+        body: '',
+        path: 'repo',
+      };
+      scenario = [
+        ['source-control', proposal],
+        [
+          'repository',
+          {
+            kind: 'git.checkout',
+            repositoryUrl: 'https://github.com/acme/storefront',
+            ref: 'main',
+            path: 'repo',
+          },
+        ],
+        ['code-editor', { kind: 'file.write', path: 'repo/src/banner.js', content: BANNER }],
+        ['source-control', { ...proposal, repository: 'acme/payments' }],
+        ['source-control', { ...proposal, headBranch: 'main' }],
       ];
-    const start = async (id: string) => {
       await demoRequest(app)
         .post('/api/execution/v1/runs')
-        .send({ agentId: id, task: { objective: 'Install', inputs: {} } })
+        .send({ agentId, task: { objective: 'Propose', inputs: {} } })
         .expect(202);
       await host.pollOnce();
       await host.drain();
-      return toolResults(modelRequests.at(-1)!).map((block) => block.content);
-    };
+      expect(toolResults(modelRequests.at(-1)!).map((block) => block.content)).toEqual([
+        'ACTION_DENIED: CHANGE_SET_EMPTY',
+        expect.stringContaining('Checked out main'),
+        `Created repo/src/banner.js (${Buffer.byteLength(BANNER)} bytes).`,
+        'ACTION_DENIED: The target resource is outside the configured scope.',
+        expect.stringMatching(/^TOOL_INPUT_INVALID: headBranch/),
+      ]);
+      expect(github).toEqual([]);
+      // GitHub connections name repositories as owner/name; other shapes are refused.
+      const authorize = db.structure.authorize;
+      db.structure.authorize = async () => undefined;
+      try {
+        for (const settings of [
+          { allowedRepositories: ['not a repo'] },
+          { allowedRepositories: ['acme/x', 'ACME/X'] },
+          { allowedProjects: ['UI'] },
+        ])
+          await expect(
+            db.connectors.create(admin, {
+              provider: 'github',
+              name: 'Other',
+              baseUrl: 'https://api.github.com',
+              secretRef: 'secret://github-token',
+              settings,
+            }),
+          ).rejects.toThrow();
+      } finally {
+        db.structure.authorize = authorize;
+      }
+      expect((await db.connectors.active(org, 'github'))?.settings).toEqual({
+        allowedProjects: [],
+        allowedRepositories: ['acme/storefront'],
+      });
+    });
 
-    scenario = [
-      [
-        'repository',
-        {
-          kind: 'git.checkout',
-          repositoryUrl: 'https://github.com/acme/storefront',
-          ref: 'main',
-          path: 'repo',
-        },
-      ],
-      install('https://npm.acme.internal/repository/npm'),
-      install('https://registry.npmjs.org/'),
-      install('http://npm.acme.internal/repository/npm/'),
-    ];
-    expect(await start(await provision(mirror))).toEqual([
-      expect.stringContaining('Checked out main'),
-      '[recorded, not executed] npm ci',
-      'ACTION_DENIED: The target resource is outside the configured scope.',
-      'ACTION_DENIED: The target resource is outside the configured scope.',
-    ]);
-    // The grant opened the network to the configured registry's host and nothing else.
-    const installs = provider.seen.filter(
-      (entry) => entry.operation.kind === 'dependencies.install',
-    );
-    expect(installs.map((entry) => entry.limits.network)).toEqual([
-      { mode: 'ALLOW_LIST', allowedHosts: ['npm.acme.internal'] },
-    ]);
+    it('installs dependencies only from the registry configured for the agent (1.1.0)', async () => {
+      const provision = async (packageRegistryUrl?: string) => {
+        const pending = await db.requestProvisioning(
+          employee.id,
+          {
+            blueprintId: 'engineering.frontend-engineer',
+            blueprintVersion: '1.1.0',
+            provider: 'test-provider',
+            model: 'test-model',
+            credentialMode: 'ORGANIZATION_MANAGED',
+            answers: {
+              projectName: 'Storefront',
+              repositoryUrl: 'https://github.com/acme/storefront',
+              ...(packageRegistryUrl ? { packageRegistryUrl } : {}),
+              issueTracker: ['Jira'],
+              sourceControl: ['GitHub'],
+            },
+          },
+          org,
+        );
+        return manifestSubject(
+          (await db.decideProvisioning(pending.id, org, admin.id, 'APPROVED', 'Pilot')).manifest!
+            .payload,
+        ).agentId;
+      };
+      const mirror = 'https://npm.acme.internal/repository/npm/';
+      const install = (registryUrl: string) =>
+        ['dependencies', { kind: 'dependencies.install', path: 'repo', registryUrl }] as [
+          string,
+          object,
+        ];
+      const start = async (id: string) => {
+        await demoRequest(app)
+          .post('/api/execution/v1/runs')
+          .send({ agentId: id, task: { objective: 'Install', inputs: {} } })
+          .expect(202);
+        await host.pollOnce();
+        await host.drain();
+        return toolResults(modelRequests.at(-1)!).map((block) => block.content);
+      };
 
-    // Without a configured registry, nothing can be installed.
-    modelRequests.length = 0;
-    scenario = [install(mirror)];
-    expect(await start(await provision())).toEqual([
-      'ACTION_DENIED: The target resource is outside the configured scope.',
-    ]);
-  });
+      scenario = [
+        [
+          'repository',
+          {
+            kind: 'git.checkout',
+            repositoryUrl: 'https://github.com/acme/storefront',
+            ref: 'main',
+            path: 'repo',
+          },
+        ],
+        install('https://npm.acme.internal/repository/npm'),
+        install('https://registry.npmjs.org/'),
+        install('http://npm.acme.internal/repository/npm/'),
+      ];
+      expect(await start(await provision(mirror))).toEqual([
+        expect.stringContaining('Checked out main'),
+        '[recorded, not executed] npm ci',
+        'ACTION_DENIED: The target resource is outside the configured scope.',
+        'ACTION_DENIED: The target resource is outside the configured scope.',
+      ]);
+      // The grant opened the network to the configured registry's host and nothing else.
+      const installs = provider.seen.filter(
+        (entry) => entry.operation.kind === 'dependencies.install',
+      );
+      expect(installs.map((entry) => entry.limits.network)).toEqual([
+        { mode: 'ALLOW_LIST', allowedHosts: ['npm.acme.internal'] },
+      ]);
 
-  it('runs in a conversation of the same agent and reports back into it', async () => {
-    scenario = [];
-    const chat = (
-      await demoRequest(app)
-        .post('/api/conversations')
-        .send({ employeeId: employee.id, agentId, title: 'UI-7' })
-        .expect(201)
-    ).body as { id: string };
-    const task = { objective: 'Implement UI-7', workflow: 'implement-ui-change', inputs: {} };
-    const run = (
+      // Without a configured registry, nothing can be installed.
+      modelRequests.length = 0;
+      scenario = [install(mirror)];
+      expect(await start(await provision())).toEqual([
+        'ACTION_DENIED: The target resource is outside the configured scope.',
+      ]);
+    });
+
+    it('runs in a conversation of the same agent and reports back into it', async () => {
+      scenario = [];
+      const chat = (
+        await demoRequest(app)
+          .post('/api/conversations')
+          .send({ employeeId: employee.id, agentId, title: 'UI-7' })
+          .expect(201)
+      ).body as { id: string };
+      const task = { objective: 'Implement UI-7', workflow: 'implement-ui-change', inputs: {} };
+      const run = (
+        await demoRequest(app)
+          .post('/api/execution/v1/runs')
+          .send({ agentId, conversationId: chat.id, task })
+          .expect(202)
+      ).body as { threadId: string };
+      await host.pollOnce();
+      await host.drain();
+      const messages = (await demoRequest(app).get(`/api/conversations/${chat.id}`).expect(200))
+        .body.messages as { author: string; content: string }[];
+      expect(messages).toEqual([
+        expect.objectContaining({
+          author: 'AGENT',
+          content: 'UI-7 implemented and proposed as a draft pull request.',
+        }),
+      ]);
+      expect(
+        await sql()
+          .prepare('SELECT conversation_id FROM agent_threads WHERE id=?')
+          .get(run.threadId),
+      ).toEqual({ conversation_id: chat.id });
+      const other = (
+        await demoRequest(app)
+          .post('/api/conversations')
+          .send({ employeeId: employee.id, agentId: 'agent_qa_engineer', title: 'QA' })
+          .expect(201)
+      ).body as { id: string };
       await demoRequest(app)
         .post('/api/execution/v1/runs')
-        .send({ agentId, conversationId: chat.id, task })
-        .expect(202)
-    ).body as { threadId: string };
-    await host.pollOnce();
-    await host.drain();
-    const messages = (await demoRequest(app).get(`/api/conversations/${chat.id}`).expect(200)).body
-      .messages as { author: string; content: string }[];
-    expect(messages).toEqual([
-      expect.objectContaining({
-        author: 'AGENT',
-        content: 'UI-7 implemented and proposed as a draft pull request.',
-      }),
-    ]);
-    expect(
-      await sql().prepare('SELECT conversation_id FROM agent_threads WHERE id=?').get(run.threadId),
-    ).toEqual({ conversation_id: chat.id });
-    const other = (
-      await demoRequest(app)
-        .post('/api/conversations')
-        .send({ employeeId: employee.id, agentId: 'agent_qa_engineer', title: 'QA' })
-        .expect(201)
-    ).body as { id: string };
-    await demoRequest(app)
-      .post('/api/execution/v1/runs')
-      .send({ agentId, conversationId: other.id, task })
-      .expect(409, { error: 'CONVERSATION_AGENT_MISMATCH' });
-    await demoRequest(app)
-      .post('/api/execution/v1/runs')
-      .send({ agentId, conversationId: chat.id, threadId: run.threadId, task })
-      .expect(400);
-  });
-
-  it('refuses to publish a change set that changed after approval', async () => {
-    const run = (
+        .send({ agentId, conversationId: other.id, task })
+        .expect(409, { error: 'CONVERSATION_AGENT_MISMATCH' });
       await demoRequest(app)
         .post('/api/execution/v1/runs')
-        .send({
-          agentId,
-          task: { objective: 'Implement UI-7', workflow: 'implement-ui-change', inputs: {} },
-        })
-        .expect(202)
-    ).body as { id: string };
-    await host.pollOnce();
-    await host.drain();
-    const approval = (await db.execution.getRun(employee, run.id)).approvals.find(
-      (item) => item.status === 'PENDING',
-    )!;
-    // Simulate a write recorded after the decision: the approved digest no longer matches.
-    const write = (await sql()
-      .prepare("SELECT * FROM agent_action_requests WHERE action='repository.write'")
-      .get()) as Record<string, string>;
-    await sql()
-      .prepare(
-        `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
+        .send({ agentId, conversationId: chat.id, threadId: run.threadId, task })
+        .expect(400);
+    });
+
+    it('refuses to publish a change set that changed after approval', async () => {
+      const run = (
+        await demoRequest(app)
+          .post('/api/execution/v1/runs')
+          .send({
+            agentId,
+            task: { objective: 'Implement UI-7', workflow: 'implement-ui-change', inputs: {} },
+          })
+          .expect(202)
+      ).body as { id: string };
+      await host.pollOnce();
+      await host.drain();
+      const approval = (await db.execution.getRun(employee, run.id)).approvals.find(
+        (item) => item.status === 'PENDING',
+      )!;
+      // Simulate a write recorded after the decision: the approved digest no longer matches.
+      const write = (await sql()
+        .prepare("SELECT * FROM agent_action_requests WHERE action='repository.write'")
+        .get()) as Record<string, string>;
+      await sql()
+        .prepare(
+          `INSERT INTO agent_action_requests (id, organization_id, run_id, step_id, runtime_id, action, tool_id,
          request_hash, decision, risk, reason, approval_id, created_at, parameters, policy_id, policy_version)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        '00000000-0000-4000-8000-000000000001',
-        org,
-        write['run_id']!,
-        write['step_id']!,
-        write['runtime_id']!,
-        'repository.write',
-        'code-editor',
-        'f'.repeat(64),
-        'ALLOWED',
-        'LOW',
-        'late write',
-        null,
-        new Date(Date.now() + 1000).toISOString(),
-        JSON.stringify({ kind: 'file.write', path: 'repo/src/extra.js', content: 'x' }),
-        null,
-        null,
-      );
-    await sql()
-      .prepare(
-        `INSERT INTO agent_execution_grants (grant_id, request_id, organization_id, run_id, operation_kind,
+        )
+        .run(
+          '00000000-0000-4000-8000-000000000001',
+          org,
+          write['run_id']!,
+          write['step_id']!,
+          write['runtime_id']!,
+          'repository.write',
+          'code-editor',
+          'f'.repeat(64),
+          'ALLOWED',
+          'LOW',
+          'late write',
+          null,
+          new Date(Date.now() + 1000).toISOString(),
+          JSON.stringify({ kind: 'file.write', path: 'repo/src/extra.js', content: 'x' }),
+          null,
+          null,
+        );
+      await sql()
+        .prepare(
+          `INSERT INTO agent_execution_grants (grant_id, request_id, organization_id, run_id, operation_kind,
          signed_grant, issued_at, expires_at) VALUES (?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        '00000000-0000-4000-8000-000000000002',
-        '00000000-0000-4000-8000-000000000001',
-        org,
-        write['run_id']!,
-        'file.write',
-        '{}',
-        new Date().toISOString(),
-        new Date().toISOString(),
-      );
-    await request(app)
-      .post(`/api/approvals/${approval.id}/decision`)
-      .set(adminHeaders)
-      .send({ decision: 'APPROVED' })
-      .expect(200);
-    await host.pollOnce();
-    await host.drain();
-    const final = toolResults(modelRequests.at(-1)!).at(-1)!.content;
-    expect(final).toBe('CHANGE_SET_CHANGED: The workspace changed after the decision.');
-    expect(github.filter((call) => call.method === 'POST')).toEqual([]);
-  });
-  // Real containers start slowly on Windows and under a busy parallel suite.
-}, 120_000);
+        )
+        .run(
+          '00000000-0000-4000-8000-000000000002',
+          '00000000-0000-4000-8000-000000000001',
+          org,
+          write['run_id']!,
+          'file.write',
+          '{}',
+          new Date().toISOString(),
+          new Date().toISOString(),
+        );
+      await request(app)
+        .post(`/api/approvals/${approval.id}/decision`)
+        .set(adminHeaders)
+        .send({ decision: 'APPROVED' })
+        .expect(200);
+      await host.pollOnce();
+      await host.drain();
+      const final = toolResults(modelRequests.at(-1)!).at(-1)!.content;
+      expect(final).toBe('CHANGE_SET_CHANGED: The workspace changed after the decision.');
+      expect(github.filter((call) => call.method === 'POST')).toEqual([]);
+    });
+    // Real containers start slowly on Windows and under a busy parallel suite.
+  },
+  120_000,
+);
 
 describe('platform code stays role-agnostic (ADR 0009)', () => {
   it('names no role outside the catalog, except the documented legacy QA compatibility', () => {

@@ -29,7 +29,8 @@ import type { ActionPolicyService, Audit } from './action-policy-service.js';
 import type { PgStore, Row } from '../db/pg-store.js';
 import { ConnectorError } from './connectors/jira.js';
 import type { ConnectorService } from './connector-service.js';
-import type { SecretResolver } from './secrets.js';
+import { SecretUnavailable, type SecretBroker } from '../secrets/secret-broker.js';
+import type { CredentialBroker } from '../credentials/credential-broker.js';
 
 export interface ActionGatewayDependencies {
   loadManifest: (
@@ -41,7 +42,10 @@ export interface ActionGatewayDependencies {
   audit: Audit;
   connectors: ConnectorService;
   policies: ActionPolicyService;
-  secrets: SecretResolver;
+  /** Connector credentials, resolved through the secret broker at dispatch (ADR 0031). */
+  secrets: Pick<SecretBroker, 'resolve'>;
+  /** Repository credential leases for authenticated checkouts (ADR 0031). */
+  credentials?: Pick<CredentialBroker, 'leaseForCheckout'>;
   evaluate?: typeof evaluateActionPolicy;
   /** Signs execution grants with the control-plane key (ADR 0013). */
   signGrant: (payload: ExecutionGrantPayload) => SignedExecutionGrant;
@@ -335,8 +339,13 @@ export class ActionGateway {
       // A pull request publishes exactly the approved change set; later writes need a new request.
       if ((approvedChanges?.digest ?? null) !== (current.changes?.digest ?? null))
         return refuse('CHANGE_SET_CHANGED', 'The workspace changed after the decision.');
-      const secret = this.deps.secrets.resolve(organizationId, connection.secretRef);
-      if (!secret) return refuse('SECRET_UNRESOLVED', 'The connection credential is unavailable.');
+      let secret: string;
+      try {
+        secret = (await this.deps.secrets.resolve(organizationId, connection.secretRef)).reveal();
+      } catch (error) {
+        if (!(error instanceof SecretUnavailable)) throw error;
+        return refuse('SECRET_UNRESOLVED', 'The connection credential is unavailable.');
+      }
       await this.db.run(
         `INSERT INTO agent_action_executions (request_id, organization_id, run_id, connection_id, status, started_at)
          VALUES (?,?,?,?,'DISPATCHING',?)`,
@@ -436,6 +445,7 @@ export class ActionGateway {
     run: Row,
     requestId: string,
     correlation: ExecutionGrantPayload['correlation'],
+    runtimeId: string,
     nowMs = Date.now(),
   ): Promise<SignedExecutionGrant> {
     const organizationId = String(run['organization_id']);
@@ -504,14 +514,32 @@ export class ActionGateway {
         throw await refuse('APPROVAL_REQUIRED', 409);
       if (!current.execution || !current.parameters) throw await refuse('PARAMETERS_REQUIRED', 409);
       const hosts = current.execution.policy.hosts(current.execution.operation);
+      const grantId = randomUUID();
+      const operation = current.execution.operation;
+      const operationDigest = digest(current.parameters);
+      // A checkout of a repository an active source-control connection allows is authenticated
+      // with a single-use credential lease bound to this grant; any other is anonymous.
+      const credential =
+        operation.kind === 'git.checkout' && this.deps.credentials
+          ? await this.deps.credentials.leaseForCheckout({
+              run,
+              requestId,
+              grantId,
+              operation,
+              operationDigest,
+              runtimeId,
+              grantExpiresAt: expiresAt,
+              nowMs,
+            })
+          : null;
       const grant = this.deps.signGrant({
         kind: EXECUTION_GRANT_KIND,
-        grantId: randomUUID(),
+        grantId,
         requestId,
         action: String(request['action']),
         correlation,
-        operationKind: current.execution.operation.kind,
-        operationDigest: digest(current.parameters),
+        operationKind: operation.kind,
+        operationDigest,
         isolation: current.execution.isolation,
         limits: {
           timeoutMs: Math.max(1000, Math.min(current.execution.timeoutMs, 3_600_000)),
@@ -522,6 +550,7 @@ export class ActionGateway {
             ? { mode: 'ALLOW_LIST', allowedHosts: hosts }
             : { mode: 'NONE', allowedHosts: [] },
         },
+        ...(credential ? { credential } : {}),
         issuedAt: nowIso,
         expiresAt,
       });
@@ -548,6 +577,7 @@ export class ActionGateway {
           grantId: grant.payload.grantId,
           operationKind: grant.payload.operationKind,
           expiresAt,
+          ...(credential ? { credentialLeaseId: credential.leaseId } : {}),
         },
         organizationId,
       );

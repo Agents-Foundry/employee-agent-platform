@@ -8,6 +8,7 @@ import { runProcess, type ProcessResult } from '../process-runner.js';
 import type {
   EnforcedLimit,
   ExecutionProvider,
+  OperationContext,
   ProviderOutcome,
   WorkspaceHandle,
 } from './execution-provider.js';
@@ -102,15 +103,7 @@ export interface EgressProxyRun {
   user: string;
 }
 
-/** The directory shipped with this package that holds `egress-proxy.mjs`, if present. */
-export function defaultEgressProxyDirectory(): string | null {
-  // src/providers/ in development, dist/apps/execution-runtime/src/providers/ when built.
-  for (const relative of ['../../sandbox/', '../../../../../sandbox/']) {
-    const directory = fileURLToPath(new URL(relative, import.meta.url)).replace(/[\\/]$/, '');
-    if (existsSync(join(directory, 'egress-proxy.mjs'))) return directory;
-  }
-  return null;
-}
+export { defaultEgressProxyDirectory } from './egress.js';
 
 function mountable(path: string): string {
   if (/[,"\n]/.test(path)) throw new OperationFailure('WORKSPACE_PATH_UNSUPPORTED', '');
@@ -290,13 +283,14 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     operation: ExecutionOperation,
     limits: ResourceLimits,
     signal: AbortSignal,
+    context: OperationContext = {},
   ): Promise<ProviderOutcome> {
     if (
       operation.kind !== 'command' &&
       operation.kind !== 'playwright.run' &&
       operation.kind !== 'dependencies.install'
     )
-      return this.host.execute(workspace, operation, limits, signal);
+      return this.host.execute(workspace, operation, limits, signal, context);
     try {
       const network = this.network(limits);
       switch (operation.kind) {

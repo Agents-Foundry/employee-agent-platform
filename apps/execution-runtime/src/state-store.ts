@@ -13,6 +13,14 @@ export interface WorkspaceRecord {
   state: WorkspaceState;
 }
 
+export interface PendingCredential {
+  grantId: string;
+  leaseId: string;
+  requestId: string;
+  workspaceId: string;
+  target: string;
+}
+
 type Scope = Pick<WorkspaceRecord, 'organizationId' | 'employeeId' | 'agentId' | 'threadId'>;
 
 /**
@@ -45,6 +53,14 @@ export class StateStore {
         created_at TEXT NOT NULL,
         last_used_at TEXT NOT NULL,
         UNIQUE(organization_id, employee_id, agent_id, thread_id)
+      );
+      CREATE TABLE IF NOT EXISTS pending_credentials (
+        grant_id TEXT PRIMARY KEY,
+        lease_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        started_at TEXT NOT NULL
       );
     `);
   }
@@ -113,6 +129,45 @@ export class StateStore {
     this.db
       .prepare('UPDATE workspaces SET state=?, last_used_at=? WHERE id=?')
       .run(state, new Date().toISOString(), id);
+  }
+
+  /**
+   * A credentialed checkout in progress: which lease, and which directory to discard if the
+   * runtime dies before it finishes. Identifiers and a path only; never a credential.
+   */
+  recordPendingCredential(pending: PendingCredential): void {
+    this.db
+      .prepare(
+        `INSERT INTO pending_credentials (grant_id, lease_id, request_id, workspace_id, target, started_at)
+         VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+      )
+      .run(
+        pending.grantId,
+        pending.leaseId,
+        pending.requestId,
+        pending.workspaceId,
+        pending.target,
+        new Date().toISOString(),
+      );
+  }
+
+  clearPendingCredential(grantId: string): void {
+    this.db.prepare('DELETE FROM pending_credentials WHERE grant_id=?').run(grantId);
+  }
+
+  pendingCredentials(): PendingCredential[] {
+    return (
+      this.db.prepare('SELECT * FROM pending_credentials ORDER BY started_at').all() as Record<
+        string,
+        string
+      >[]
+    ).map((row) => ({
+      grantId: row['grant_id']!,
+      leaseId: row['lease_id']!,
+      requestId: row['request_id']!,
+      workspaceId: row['workspace_id']!,
+      target: row['target']!,
+    }));
   }
 
   close(): void {

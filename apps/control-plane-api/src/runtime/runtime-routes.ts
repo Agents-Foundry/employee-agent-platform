@@ -9,6 +9,8 @@ import {
   type RuntimeIdentityRegistry,
 } from './runtime-identity.js';
 import type { RuntimeTransportService } from './runtime-transport-service.js';
+import { credentialTransportPaths } from '../../../../packages/contracts/src/credentials.js';
+import type { CredentialBroker } from '../credentials/credential-broker.js';
 
 const RUNTIME_BASE = '/runtime/v1';
 const relative = (path: string) => path.slice(RUNTIME_BASE.length);
@@ -21,6 +23,7 @@ export function configureRuntimeRoutes(
   app: Express,
   registry: RuntimeIdentityRegistry,
   transport: RuntimeTransportService,
+  credentials: CredentialBroker,
 ): void {
   const router = Router();
   router.use(
@@ -33,7 +36,7 @@ export function configureRuntimeRoutes(
     next();
   });
 
-  const authenticate = (request: Request): Promise<RuntimeIdentity> =>
+  const authenticateAny = (request: Request): Promise<RuntimeIdentity> =>
     authenticateRuntimeRequest(
       registry,
       {
@@ -44,6 +47,15 @@ export function configureRuntimeRoutes(
       },
       (runtimeId, nonce, expiresAt) => transport.consumeNonce(runtimeId, nonce, expiresAt),
     );
+  const forRole =
+    (role: RuntimeIdentity['role']) =>
+    async (request: Request): Promise<RuntimeIdentity> => {
+      const runtime = await authenticateAny(request);
+      if (runtime.role !== role) throw new ExecutionError(403, 'RUNTIME_ROLE_FORBIDDEN');
+      return runtime;
+    };
+  const authenticate = forRole('agent');
+  const authenticateExecution = forRole('execution');
   const json = (request: Request): unknown => {
     if (!request.is('application/json')) throw new ExecutionError(415, 'RUNTIME_JSON_REQUIRED');
     try {
@@ -55,6 +67,8 @@ export function configureRuntimeRoutes(
 
   router.post(relative(runtimeTransportPaths.claim), async (request, response) => {
     const runtime = await authenticate(request);
+    // Runtimes poll here, so no scheduler is needed to expire credential leases (ADR 0031).
+    await credentials.expireDue();
     const claim = await transport.claim(runtime);
     if (!claim) return response.status(204).end();
     return response.json(claim);
@@ -83,6 +97,14 @@ export function configureRuntimeRoutes(
   router.post(relative(runtimeTransportPaths.modelSettle), async (request, response) => {
     const runtime = await authenticate(request);
     response.json(await transport.settleModelTokens(runtime, json(request)));
+  });
+  router.post(relative(credentialTransportPaths.redeem), async (request, response) => {
+    const runtime = await authenticateExecution(request);
+    response.json(await credentials.redeem(runtime, json(request)));
+  });
+  router.post(relative(credentialTransportPaths.release), async (request, response) => {
+    const runtime = await authenticateExecution(request);
+    response.json(await credentials.release(runtime, json(request)));
   });
   app.use(RUNTIME_BASE, router);
 }
