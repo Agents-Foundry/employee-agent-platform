@@ -139,7 +139,10 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [0028](docs/adr/0028-native-column-types.md),
   [0029](docs/adr/0029-catalog-version-reload.md),
   [0030](docs/adr/0030-catalog-bundle-compatibility.md),
-  [0031](docs/adr/0031-secret-and-credential-brokering.md)
+  [0031](docs/adr/0031-secret-and-credential-brokering.md),
+  [0032](docs/adr/0032-durable-checkpoints-and-run-recovery.md),
+  [0033](docs/adr/0033-durable-artifact-storage.md),
+  [0034](docs/adr/0034-organization-managed-model-credentials.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

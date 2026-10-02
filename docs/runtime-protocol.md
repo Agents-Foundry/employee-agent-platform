@@ -17,11 +17,12 @@ type. Removing or re-typing a field requires `runtime/v2`.
 
 ## Commands (control plane → runtime)
 
-| Type         | Purpose                                           | Key fields                                                                                             |
-| ------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `run.submit` | Start a queued run                                | `run.task`, `run.runtimeProfile`, signed **v2** manifest, `workspace` binding, optional `run.workflow` |
-| `run.resume` | Deliver a human approval decision to a paused run | `approval.approvalId`, `decision`, `decidedAt`                                                         |
-| `run.cancel` | Stop a run                                        | `reason`                                                                                               |
+| Type          | Purpose                                                 | Key fields                                                                                             |
+| ------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `run.submit`  | Start a queued run                                      | `run.task`, `run.runtimeProfile`, signed **v2** manifest, `workspace` binding, optional `run.workflow` |
+| `run.resume`  | Deliver a human approval decision to a paused run       | `approval.approvalId`, `decision`, `decidedAt`                                                         |
+| `run.cancel`  | Stop a run                                              | `reason`                                                                                               |
+| `run.recover` | Continue a running run whose runtime stopped (ADR 0032) | `reason: LEASE_EXPIRED`, `openStepIds`                                                                 |
 
 Every command has a `commandId`, `issuedAt` and full `correlation`. `run.submit` requires an
 Agent Manifest v2, and the parser checks that the manifest's organization, employee and agent
@@ -122,15 +123,20 @@ Every failure returns the same `401 RUNTIME_UNAUTHENTICATED`.
 
 ### Endpoints
 
-| Route                              | Response                                                                                                                                                                    |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /runtime/v1/commands/claim`  | `200 { command, lease }` or `204`. Order: `run.cancel` for held runs the control plane ended, `run.resume` for held runs released by an approval, then a fresh `run.submit` |
-| `POST /runtime/v1/events`          | `201` (or `200` duplicate) `{ eventId, sequence, duplicate }`; only for runs the runtime leases                                                                             |
-| `POST /runtime/v1/actions`         | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
-| `POST /runtime/v1/actions/execute` | `{ requestId, status: SUCCEEDED \| FAILED, result?, error? }` for control-plane-executed actions (Phase D)                                                                  |
-| `POST /runtime/v1/actions/grant`   | Signed single-use execution grant for an allowed or approved execution-runtime action (Phase E, ADR 0013)                                                                   |
-| `POST /runtime/v1/models/reserve`  | `{ reservationId, decision: ALLOWED, maxOutputTokens }` or `{ reservationId, decision: DENIED, code: MODEL_BUDGET_EXCEEDED, reason }`; before every model call (ADR 0021)   |
-| `POST /runtime/v1/models/settle`   | `{ reservationId, status: SETTLED }`; the call's provider-reported tokens, once                                                                                             |
+| Route                                | Response                                                                                                                                                                    |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /runtime/v1/commands/claim`    | `200 { command, lease }` or `204`. Order: `run.cancel` for held runs the control plane ended, `run.resume` for held runs released by an approval, then a fresh `run.submit` |
+| `POST /runtime/v1/events`            | `201` (or `200` duplicate) `{ eventId, sequence, duplicate }`; only for runs the runtime leases                                                                             |
+| `POST /runtime/v1/actions`           | `{ requestId, decision: ALLOWED \| DENIED \| APPROVAL_REQUIRED, risk, reason, approvalId? }`                                                                                |
+| `POST /runtime/v1/actions/execute`   | `{ requestId, status: SUCCEEDED \| FAILED, result?, error? }` for control-plane-executed actions (Phase D)                                                                  |
+| `POST /runtime/v1/actions/grant`     | Signed single-use execution grant for an allowed or approved execution-runtime action (Phase E, ADR 0013)                                                                   |
+| `POST /runtime/v1/models/reserve`    | `{ reservationId, decision: ALLOWED, maxOutputTokens }` or `{ reservationId, decision: DENIED, code: MODEL_BUDGET_EXCEEDED, reason }`; before every model call (ADR 0021)   |
+| `POST /runtime/v1/models/settle`     | `{ reservationId, status: SETTLED }`; the call's provider-reported tokens, once                                                                                             |
+| `POST /runtime/v1/models/credential` | `{ provider, apiKey }` for a running run's manifest provider, resolved through the secret broker (ADR 0034)                                                                 |
+| `POST /runtime/v1/heartbeat`         | `{ held, lost }` for `{ runIds }`; renews the leases of the runs being executed (ADR 0032)                                                                                  |
+| `POST /runtime/v1/checkpoints`       | `201 { runId, version }`; the next checkpoint of a held run. The version must be the stored one plus one, and the session the lease's                                       |
+| `POST /runtime/v1/checkpoints/load`  | The latest checkpoint `{ runId, version, binding, sha256, body }`, or `204`                                                                                                 |
+| `POST /runtime/v1/artifacts`         | `201 { artifactId, storageReference, checksum, sizeBytes }`; stores verified bytes for a running step (ADR 0033)                                                            |
 
 Each identity has a `role` (ADR 0031). The routes above are for `agent` identities, the
 default. Two more routes are for `execution` identities only, and the wrong role gets
@@ -140,10 +146,13 @@ default. Two more routes are for `execution` identities only, and the wrong role
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /runtime/v1/credentials/redeem`  | `{ leaseId, credential, expiresAt }` once, for `{ leaseId, grant }` where the signed grant names that lease and everything matches |
 | `POST /runtime/v1/credentials/release` | `{ leaseId, status }` for `{ leaseId, grantId, outcome }`; only the runtime that redeemed the lease may release it                 |
+| `POST /runtime/v1/artifacts/execution` | `201` upload result for `{ grant, artifact, content }`; evidence for the signed grant's run and step (ADR 0033)                    |
 
-Leases (`agent_run_leases`) bind a run to one runtime and session. A queued run that never
-started can be reclaimed after 10 minutes. An undelivered command is redelivered to its holder
-after 60 seconds.
+Leases (`agent_run_leases`) bind a run to one runtime and session, and last 10 minutes past
+the runtime's last event, heartbeat or checkpoint. After that, a queued run that never started
+can be reclaimed, and a run with a durable checkpoint is handed to the next authorized runtime
+under a new session ([ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md)). An
+undelivered command is redelivered to its holder after 60 seconds.
 
 ### Governed actions
 
@@ -181,11 +190,13 @@ deadline. The paused run is then cancelled (`APPROVAL_EXPIRED`).
 
 ## Read API (browser-facing)
 
-| Route                                   | Who                                   | Returns                                         |
-| --------------------------------------- | ------------------------------------- | ----------------------------------------------- |
-| `GET /api/execution/v1/threads/:id`     | Owning employee                       | Thread and its runs                             |
-| `GET /api/execution/v1/runs/:id`        | Owning employee or organization admin | Run, steps, linked approvals, artifact metadata |
-| `GET /api/execution/v1/runs/:id/events` | Owning employee                       | `?afterSequence=&limit=` (≤ 200) page           |
+| Route                                             | Who                                     | Returns                                                            |
+| ------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------ |
+| `GET /api/execution/v1/threads/:id`               | Owning employee                         | Thread and its runs                                                |
+| `GET /api/execution/v1/runs/:id`                  | Owning employee or organization admin   | Run, steps, linked approvals, artifact metadata                    |
+| `GET /api/execution/v1/runs/:id/events`           | Owning employee                         | `?afterSequence=&limit=` (≤ 200) page                              |
+| `POST /api/execution/v1/artifacts/:id/retrievals` | Owning employee or organization admin   | `{ artifactId, path, expiresAt }`: a 60-second download permission |
+| `GET /api/execution/v1/artifact-content/:token`   | The person the permission was issued to | The artifact's bytes, as a download                                |
 
 Administrators can see run governance data for approvals, but not event history. Event history
 can contain agent messages, and conversations stay private to the employee, as they already

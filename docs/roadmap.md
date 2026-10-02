@@ -28,9 +28,9 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Google Workspace browser SSO/OIDC and verified RBAC (implemented; live tenant configuration required)
 - Native system-browser Google sign-in (pending)
 - PostgreSQL with row-level organization isolation (implemented, [ADR 0018](adr/0018-postgresql-row-level-security.md))
-- Vault-backed BYOK and organization-key bindings (pending; connector and repository secrets
-  are `secret://` references resolved through the secret broker, from Vault or an operator
-  file)
+- Organization model-key bindings resolved through the secret broker (implemented,
+  [ADR 0034](adr/0034-organization-managed-model-credentials.md)); employee BYOK on a
+  desktop-local runtime (pending, designed in the same ADR)
 - Admin CRUD for departments, teams, roles, employees, and agents
 
 ## Milestone 3 — Read-only QA context
@@ -48,7 +48,8 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
   containers behind an egress proxy)
 - Playwright runs captured as artifacts (implemented); trace, screenshot, console and network
   evidence beyond the run output (pending)
-- Artifact retention enforcement and signed downloads (pending)
+- Durable artifact storage, retention enforcement and short-lived authorized downloads
+  (implemented, [ADR 0033](adr/0033-durable-artifact-storage.md))
 - Pre/post-release sanity packs (pending)
 
 ## Milestone 5 — Governed writes and pilot
@@ -82,6 +83,10 @@ per-instance tenant domain cache, native column types and multi-instance catalog
 
 Secrets are read through a broker with a Vault provider, and private GitHub and Bitbucket
 repositories are checked out with single-use credential leases (ADR 0031).
+
+Runs are recoverable: checkpoints are durable, leases are kept alive by heartbeats, and another
+runtime continues an abandoned run (ADR 0032). Artifacts are stored durably with enforced
+retention (ADR 0033), and organization model keys come from the secret broker (ADR 0034).
 
 ## Milestone 6 — Agent factory
 

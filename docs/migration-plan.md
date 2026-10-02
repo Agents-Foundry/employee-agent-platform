@@ -82,8 +82,9 @@ error handling and documentation. A type, table or route stub alone does not cou
 - Only `artifact` is a real tool. Governed tools need connectors (D) or the execution
   runtime (E). Pause and resume are proven with a test double.
 - No employee UI for generic runs yet; runtime approvals appear in the existing admin panel.
-- Resume is sticky to the runtime that holds the local checkpoint. There is no reaper yet for
-  runs abandoned mid-execution.
+- Resume was sticky to the runtime that held the local checkpoint, with no reaper. Durable
+  checkpoints and recovery replaced this
+  ([ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md)).
 - `EMPLOYEE_BYOK` agents cannot run on a server runtime (fail closed).
 
 ## Phase D — delivered
@@ -526,6 +527,14 @@ and catalog versions registered by another instance are loaded without a restart
 ([ADR 0030](adr/0030-catalog-bundle-compatibility.md)). Secrets are read only through a
 broker, and private GitHub and Bitbucket repositories are checked out with single-use
 credential leases ([ADR 0031](adr/0031-secret-and-credential-brokering.md)).
+Runs survive their runtime: checkpoints are durable and another runtime continues an abandoned
+run without repeating finished work
+([ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md)). Artifact bytes are kept in an
+artifact store with verified hashes, short-lived authorized retrieval and enforced retention
+([ADR 0033](adr/0033-durable-artifact-storage.md)). Organization model keys are resolved
+through the secret broker
+([ADR 0034](adr/0034-organization-managed-model-credentials.md)).
 The highest-value follow-up is a production pilot's remaining blockers: verifying the Vault
-provider against a live Vault, moving model credentials behind the secret broker, and an
-admin console panel for source-control connections and credential leases.
+provider and the object-store adapter against live services, an admin console for
+source-control connections, credential leases, model credentials and artifact downloads, and
+observability (metrics and traces) for runs, recoveries and storage.
