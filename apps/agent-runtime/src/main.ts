@@ -1,15 +1,21 @@
-import { FileCheckpointStore } from './checkpoints.js';
+import { ControlPlaneCheckpointStore, FileCheckpointStore } from './checkpoints.js';
 import { loadRuntimeConfig, statePaths } from './config.js';
 import { NativeKernel } from './kernel/native-kernel.js';
 import { ManifestVerifier } from './manifest-verifier.js';
 import { AnthropicProvider } from './models/anthropic-provider.js';
-import { EnvironmentCredentialBroker, ModelGateway } from './models/model-gateway.js';
+import {
+  ControlPlaneModelCredentials,
+  EnvironmentCredentialBroker,
+  FirstAvailableCredentials,
+  ModelGateway,
+} from './models/model-gateway.js';
+import { RUNTIME_PROTOCOL_V1 } from '../../../packages/contracts/src/runtime/v1/protocol.js';
 import { ScriptedProvider } from './models/scripted-provider.js';
 import { consoleLogger, RuntimeHost } from './runtime-host.js';
 import { ArtifactTool } from './tools/artifact-tool.js';
 import { IssueTrackerTool } from './tools/issue-tracker-tool.js';
 import { SourceControlTool } from './tools/source-control-tool.js';
-import { LocalArtifactStore } from './tools/artifact-store.js';
+import { ControlPlaneArtifactStore, LocalArtifactStore } from './tools/artifact-store.js';
 import { ToolRegistry } from './tools/runtime-tool.js';
 import { ControlPlaneClient } from './transport/control-plane-client.js';
 import { ExecutionClient } from './transport/execution-client.js';
@@ -27,15 +33,36 @@ const providers = [
   new AnthropicProvider(),
   ...(config.enableScriptedModel ? [ScriptedProvider.demo()] : []),
 ];
+const controlPlane = new ControlPlaneClient({
+  baseUrl: config.controlPlaneUrl,
+  runtimeId: config.runtimeId,
+  privateKey: config.privateKey,
+});
+const environmentKeys = new EnvironmentCredentialBroker();
 const host = new RuntimeHost({
-  controlPlane: new ControlPlaneClient({
-    baseUrl: config.controlPlaneUrl,
-    runtimeId: config.runtimeId,
-    privateKey: config.privateKey,
-  }),
+  controlPlane,
   verifier: new ManifestVerifier(config.manifestVerificationKey),
   kernel: new NativeKernel(),
-  models: new ModelGateway(providers, new EnvironmentCredentialBroker()),
+  // Calls are made with the per-run broker below; this one is never the default path.
+  models: new ModelGateway(providers, {
+    resolve: async () => {
+      throw new Error('MODEL_CREDENTIAL_UNAVAILABLE');
+    },
+  }),
+  // The organization's key comes from the control plane's secret broker for each call.
+  modelCredentials: (correlation) => {
+    const managed = new ControlPlaneModelCredentials(async (provider) => {
+      const credential = await controlPlane.modelCredential({
+        protocol: RUNTIME_PROTOCOL_V1,
+        correlation,
+        provider,
+      });
+      return { apiKey: credential.apiKey };
+    });
+    return config.allowEnvironmentModelKeys
+      ? new FirstAvailableCredentials([managed, environmentKeys])
+      : managed;
+  },
   tools: new ToolRegistry([
     new ArtifactTool(),
     new IssueTrackerTool(),
@@ -52,14 +79,22 @@ const host = new RuntimeHost({
         ]
       : []),
   ]),
-  artifacts: new LocalArtifactStore(paths.artifacts),
-  checkpoints: new FileCheckpointStore(paths.checkpoints),
+  artifacts:
+    config.artifactStore === 'local'
+      ? new LocalArtifactStore(paths.artifacts)
+      : new ControlPlaneArtifactStore(controlPlane),
+  checkpoints:
+    config.checkpointStore === 'local'
+      ? new FileCheckpointStore(paths.checkpoints)
+      : new ControlPlaneCheckpointStore(controlPlane),
+  heartbeatIntervalMs: config.heartbeatIntervalMs,
   concurrency: config.concurrency,
   pollIntervalMs: config.pollIntervalMs,
 });
 
 consoleLogger.info('agent runtime started', {
   runtimeId: config.runtimeId,
+  checkpointStore: config.checkpointStore,
   providers: providers.map((provider) => provider.id),
 });
 void host.start();

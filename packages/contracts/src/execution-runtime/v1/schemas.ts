@@ -1,6 +1,10 @@
 // Strict parsers for agents-foundry/execution/v1. Node consumers only.
 import { z } from 'zod';
-import { artifactRegistrationSchema } from '../../runtime/v1/schemas.js';
+import {
+  artifactContentSchema,
+  artifactRegistrationSchema,
+  artifactUploadDescriptorSchema,
+} from '../../runtime/v1/schemas.js';
 import type { ExecutionOperation } from '../../execution.js';
 import {
   credentialReleaseOutcomes,
@@ -14,6 +18,7 @@ import {
   EXECUTION_PROTOCOL_V1,
   type ExecuteOperationRequest,
   type ExecuteOperationResponse,
+  type ExecutionArtifactUploadRequest,
   type SignedExecutionGrant,
 } from './protocol.js';
 
@@ -309,5 +314,23 @@ export function parseExecuteOperationResponse(input: unknown): ExecuteOperationR
   const parsed = responseSchema.safeParse(input);
   if (!parsed.success)
     throw new ExecutionProtocolError('EXECUTION_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const executionArtifactUploadSchema = z
+  .object({
+    grant: z.unknown(),
+    artifact: artifactUploadDescriptorSchema,
+    content: artifactContentSchema,
+  })
+  .strict();
+
+/** The grant is returned unparsed: the caller verifies its shape and signature. */
+export function parseExecutionArtifactUploadRequest(
+  input: unknown,
+): Omit<ExecutionArtifactUploadRequest, 'grant'> & { grant: unknown } {
+  const parsed = executionArtifactUploadSchema.safeParse(input);
+  if (!parsed.success)
+    throw new ExecutionProtocolError('EXECUTION_REQUEST_INVALID', issues(parsed.error));
   return parsed.data;
 }

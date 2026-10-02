@@ -4,6 +4,7 @@ import { ControlPlaneDatabase, type ControlPlaneDatabaseOptions } from '../../sr
 import { cloneDatabase, dropDatabase, roleUrl } from '../../src/db/bootstrap.js';
 import { PgStore } from '../../src/db/pg-store.js';
 import { ManifestSigner } from '../../src/manifest-signing.js';
+import { MemoryArtifactStore } from '../../src/artifacts/artifact-store.js';
 import { TEMPLATE_DATABASE, TEST_ROLES } from './postgres-roles.js';
 
 export type TestDatabaseOptions = Omit<ControlPlaneDatabaseOptions, 'store' | 'connection'>;
@@ -61,6 +62,7 @@ export async function testDatabase(
     const database = await ControlPlaneDatabase.open({
       seedDemo: true,
       signer: new ManifestSigner(),
+      artifactStore: new MemoryArtifactStore(),
       ...options,
       store,
     });

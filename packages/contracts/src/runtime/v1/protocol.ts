@@ -54,7 +54,20 @@ export interface RunCancelCommand extends CommandBase {
   reason: string;
 }
 
-export type RuntimeCommand = RunSubmitCommand | RunResumeCommand | RunCancelCommand;
+/**
+ * Continue a running run whose runtime stopped (ADR 0032). The runtime loads the run's latest
+ * durable checkpoint and carries on from it. It must not emit `run.started` again.
+ */
+export interface RunRecoverCommand extends CommandBase {
+  type: 'run.recover';
+  runId: string;
+  reason: 'LEASE_EXPIRED';
+  /** Steps the control plane still holds open. Any the checkpoint does not name are failed. */
+  openStepIds: string[];
+}
+
+export type RuntimeCommand =
+  RunSubmitCommand | RunResumeCommand | RunCancelCommand | RunRecoverCommand;
 
 /** Payload for each runtime-emitted event type. Digests replace raw tool input/output. */
 export interface RuntimeEventPayloads {

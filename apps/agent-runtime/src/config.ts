@@ -13,6 +13,22 @@ export interface RuntimeConfig {
   enableScriptedModel: boolean;
   /** Execution runtime for repository and browser tools; unset means those tools are absent. */
   executionRuntimeUrl: string | null;
+  /**
+   * Where checkpoints are kept (ADR 0032). `control-plane` (the default) lets another runtime
+   * continue a run; `local` keeps them on this host, for development.
+   */
+  checkpointStore: 'control-plane' | 'local';
+  /**
+   * Where artifact bytes are kept (ADR 0033). `control-plane` (the default) stores them in
+   * the control plane's artifact store; `local` keeps them on this host, for development.
+   */
+  artifactStore: 'control-plane' | 'local';
+  heartbeatIntervalMs: number;
+  /**
+   * Development only: also read organization-managed model keys from this process's
+   * environment when the organization has none configured (ADR 0034).
+   */
+  allowEnvironmentModelKeys: boolean;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -25,6 +41,12 @@ function bounded(value: string | undefined, fallback: number, min: number, max: 
   const parsed = value === undefined ? fallback : Number(value);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) throw new Error('CONFIG_INVALID');
   return parsed;
+}
+
+function choice<T extends string>(value: string | undefined, allowed: readonly [T, ...T[]]): T {
+  if (value === undefined || value === '') return allowed[0];
+  if (!allowed.includes(value as T)) throw new Error('CONFIG_INVALID');
+  return value as T;
 }
 
 /** Fails at startup on any missing or malformed setting; there are no insecure defaults. */
@@ -44,6 +66,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     concurrency: bounded(env['AGENT_RUNTIME_CONCURRENCY'], 4, 1, 64),
     enableScriptedModel: env['AGENT_RUNTIME_ENABLE_SCRIPTED_MODEL'] === 'true',
     executionRuntimeUrl: env['EXECUTION_RUNTIME_URL']?.trim() || null,
+    checkpointStore: choice(env['AGENT_RUNTIME_CHECKPOINT_STORE'], ['control-plane', 'local']),
+    artifactStore: choice(env['AGENT_RUNTIME_ARTIFACT_STORE'], ['control-plane', 'local']),
+    heartbeatIntervalMs: bounded(env['AGENT_RUNTIME_HEARTBEAT_MS'], 30_000, 1000, 300_000),
+    allowEnvironmentModelKeys: env['AGENT_RUNTIME_ENV_MODEL_KEYS'] === 'true',
   };
 }
 

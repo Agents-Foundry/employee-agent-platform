@@ -130,7 +130,7 @@ describe('native column types (migration 0008)', () => {
         .filter((item) => item.column_name.endsWith('_at') && item.data_type === 'text')
         .map((item) => `${item.table_name}.${item.column_name}`),
     ).toEqual(['schema_migrations.applied_at']);
-    expect(columns.filter((item) => item.data_type === 'timestamp with time zone').length).toBe(85);
+    expect(columns.filter((item) => item.data_type === 'timestamp with time zone').length).toBe(92);
     for (const [table, column] of [
       ['agent_runs', 'task'],
       ['agent_events', 'payload'],

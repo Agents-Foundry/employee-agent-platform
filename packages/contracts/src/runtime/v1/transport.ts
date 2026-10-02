@@ -1,5 +1,6 @@
 // HTTP transport for agents-foundry/runtime/v1 (Architecture V2 Phase C, ADR 0011).
 // Pure types and constants. Signing and verification happen with node:crypto on each side.
+import type { ArtifactUploadDescriptor } from '../../artifacts.js';
 import type { ApprovalRisk, ExecutionError, RuntimeCorrelation } from '../../execution.js';
 import type { RuntimeCommand, RuntimeProtocolVersion } from './protocol.js';
 
@@ -24,6 +25,13 @@ export const runtimeTransportPaths = {
   grant: '/runtime/v1/actions/grant',
   modelReserve: '/runtime/v1/models/reserve',
   modelSettle: '/runtime/v1/models/settle',
+  modelCredential: '/runtime/v1/models/credential',
+  heartbeat: '/runtime/v1/heartbeat',
+  checkpointSave: '/runtime/v1/checkpoints',
+  checkpointLoad: '/runtime/v1/checkpoints/load',
+  artifactUpload: '/runtime/v1/artifacts',
+  /** For execution runtimes, which present the signed grant instead of holding a lease. */
+  artifactUploadExecution: '/runtime/v1/artifacts/execution',
 } as const;
 
 /**
@@ -159,6 +167,98 @@ export interface RuntimeModelSettlementRequest {
 export interface RuntimeModelSettlement {
   reservationId: string;
   status: 'SETTLED';
+}
+
+/**
+ * A runtime names the runs it is executing right now, so their leases stay alive (ADR 0032).
+ * A run it no longer holds comes back in `lost`, and the runtime must stop working on it.
+ */
+export interface RuntimeHeartbeatRequest {
+  protocol: RuntimeProtocolVersion;
+  runIds: string[];
+}
+
+export interface RuntimeHeartbeat {
+  held: string[];
+  lost: string[];
+}
+
+/** What a checkpoint is bound to, checked by the control plane on every save and load. */
+export interface RunCheckpointBinding {
+  manifestId: string;
+  /** SHA-256 of the canonical signed manifest payload. */
+  manifestDigest: string;
+  workflow: string | null;
+  /** The step in progress when the checkpoint was taken, if any. */
+  stepId: string | null;
+  /** The approval the run is waiting for, if it is paused. */
+  approvalId: string | null;
+  kernelId: string;
+  /** The last runtime event sequence emitted before the checkpoint. */
+  runtimeSequence: number;
+}
+
+/**
+ * Save the next checkpoint of a run (ADR 0032). `version` must be exactly one more than the
+ * stored one and `sessionId` must be the run's current lease session, so a runtime that lost
+ * the run cannot advance it. `body` is opaque to the control plane.
+ */
+export interface RuntimeCheckpointSaveRequest {
+  protocol: RuntimeProtocolVersion;
+  correlation: RuntimeCorrelation;
+  sessionId: string;
+  version: number;
+  binding: RunCheckpointBinding;
+  /** SHA-256 of `body`. */
+  sha256: string;
+  body: string;
+}
+
+export interface RuntimeCheckpointAck {
+  runId: string;
+  version: number;
+}
+
+export interface RuntimeCheckpointLoadRequest {
+  protocol: RuntimeProtocolVersion;
+  correlation: RuntimeCorrelation;
+}
+
+/** The latest checkpoint of a run the runtime holds. */
+export interface RuntimeCheckpointRecord {
+  runId: string;
+  version: number;
+  binding: RunCheckpointBinding;
+  sha256: string;
+  body: string;
+}
+
+/**
+ * Ask for the organization's model credential for a run's model calls (ADR 0034). Only the
+ * holder of a running run may ask, and only for the provider its signed manifest names.
+ */
+export interface RuntimeModelCredentialRequest {
+  protocol: RuntimeProtocolVersion;
+  correlation: RuntimeCorrelation;
+  provider: string;
+}
+
+/** Held in the runtime's memory for one call. Never logged, checkpointed or emitted. */
+export interface RuntimeModelCredential {
+  provider: string;
+  apiKey: string;
+}
+
+/**
+ * An agent runtime uploads an artifact's bytes for a step of a run it holds (ADR 0033). The
+ * control plane verifies the size and SHA-256, stores the bytes in its artifact store and
+ * returns the reference to register. `content` is base64.
+ */
+export interface RuntimeArtifactUploadRequest {
+  protocol: RuntimeProtocolVersion;
+  correlation: RuntimeCorrelation & { stepId: string };
+  artifact: ArtifactUploadDescriptor;
+  content: string;
 }
 
 /** `POST /runtime/v1/events` acknowledgement. */

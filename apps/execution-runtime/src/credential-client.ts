@@ -1,15 +1,19 @@
 import { createHash, createPrivateKey, randomUUID, sign, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type {
+  ArtifactUpload,
+  ArtifactUploadDescriptor,
   CredentialReleaseOutcome,
   RepositoryCredential,
   SignedExecutionGrant,
 } from '@agents-foundry/contracts';
+import { parseArtifactUpload } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 import { credentialTransportPaths } from '../../../packages/contracts/src/credentials.js';
 import { parseCredentialRedeemResponse } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import {
   runtimeAuthHeaders,
   runtimeSigningInput,
+  runtimeTransportPaths,
 } from '../../../packages/contracts/src/runtime/v1/transport.js';
 
 /** A refusal or failure from the control plane. The code never contains a credential. */
@@ -68,15 +72,28 @@ export interface CredentialSource {
   release(leaseId: string, grantId: string, outcome: CredentialReleaseOutcome): Promise<void>;
 }
 
+/**
+ * Stores evidence of a granted operation in the control plane's artifact store (ADR 0033).
+ * The signed grant is the authorization; this runtime holds no object-store credentials.
+ */
+export interface EvidenceUploader {
+  upload(
+    grant: SignedExecutionGrant,
+    artifact: ArtifactUploadDescriptor,
+    content: Buffer,
+  ): Promise<ArtifactUpload>;
+}
+
 export interface ControlPlaneCredentialClientOptions {
   controlPlaneUrl: string;
   runtimeId: string;
   privateKey: KeyObject;
   timeoutMs?: number;
+  uploadTimeoutMs?: number;
   fetch?: typeof fetch;
 }
 
-export class ControlPlaneCredentialClient implements CredentialSource {
+export class ControlPlaneCredentialClient implements CredentialSource, EvidenceUploader {
   private readonly base: URL;
 
   constructor(private readonly options: ControlPlaneCredentialClientOptions) {
@@ -130,7 +147,38 @@ export class ControlPlaneCredentialClient implements CredentialSource {
     );
   }
 
-  private async post(path: string, body: unknown, signal: AbortSignal): Promise<unknown> {
+  async upload(
+    grant: SignedExecutionGrant,
+    artifact: ArtifactUploadDescriptor,
+    content: Buffer,
+  ): Promise<ArtifactUpload> {
+    const body = await this.post(
+      runtimeTransportPaths.artifactUploadExecution,
+      { grant, artifact, content: content.toString('base64') },
+      AbortSignal.timeout(this.options.uploadTimeoutMs ?? 120_000),
+      this.options.uploadTimeoutMs ?? 120_000,
+    );
+    let stored: ArtifactUpload;
+    try {
+      stored = parseArtifactUpload(body);
+    } catch {
+      throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+    }
+    if (
+      stored.artifactId !== artifact.id ||
+      stored.checksum.value !== artifact.checksum.value ||
+      stored.sizeBytes !== artifact.sizeBytes
+    )
+      throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+    return stored;
+  }
+
+  private async post(
+    path: string,
+    body: unknown,
+    signal: AbortSignal,
+    timeoutMs = this.options.timeoutMs ?? 15_000,
+  ): Promise<unknown> {
     const bytes = Buffer.from(JSON.stringify(body), 'utf8');
     const timestamp = new Date().toISOString();
     const nonce = randomUUID();
@@ -160,7 +208,7 @@ export class ControlPlaneCredentialClient implements CredentialSource {
         },
         body: bytes,
         redirect: 'error',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(this.options.timeoutMs ?? 15_000)]),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       });
     } catch {
       throw new CredentialRefused('CONTROL_PLANE_UNREACHABLE');

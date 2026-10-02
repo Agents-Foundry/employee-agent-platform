@@ -83,3 +83,14 @@ export interface ExecuteOperationResponse {
   /** Evidence already stored by the execution runtime; the agent runtime registers it on the run. */
   artifacts: ArtifactRegistration[];
 }
+
+/**
+ * An execution runtime uploads evidence produced by a granted operation (ADR 0033). The
+ * signed grant is its authorization: the artifact is stored for the grant's tenant, run and
+ * step, never for anything the request names. `content` is base64.
+ */
+export interface ExecutionArtifactUploadRequest {
+  grant: SignedExecutionGrant;
+  artifact: import('../../artifacts.js').ArtifactUploadDescriptor;
+  content: string;
+}

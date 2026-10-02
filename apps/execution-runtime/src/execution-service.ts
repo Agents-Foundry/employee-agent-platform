@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type {
@@ -12,6 +12,7 @@ import {
   CredentialRefused,
   type CheckoutCredential,
   type CredentialSource,
+  type EvidenceUploader,
 } from './credential-client.js';
 import { GrantRejected, type GrantVerifier } from './grant-verifier.js';
 import { inside } from './providers/local-provider.js';
@@ -44,6 +45,11 @@ export interface ExecutionServiceOptions {
    * grant that names a lease is refused: a private checkout never falls back to anonymous.
    */
   credentials?: CredentialSource;
+  /**
+   * Stores evidence in the control plane's artifact store (ADR 0033). Without it, evidence
+   * stays in `artifacts` on this host and cannot be retrieved through the control plane.
+   */
+  evidence?: EvidenceUploader;
 }
 
 /**
@@ -226,26 +232,48 @@ export class ExecutionService {
             ? 'TIMED_OUT'
             : 'FAILED';
       const artifacts: ArtifactRegistration[] = [];
+      const notStored: string[] = [];
       for (const produced of outcome.artifacts) {
         const id = randomUUID();
-        const stored = await this.options.artifacts.put({
-          organizationId: scope.organizationId,
-          runId: scope.runId,
-          artifactId: id,
-          name: produced.name,
-          content: produced.content,
-        });
-        artifacts.push({
+        const described = {
           id,
-          type: produced.type,
           mediaType: produced.mediaType,
           name: produced.name,
-          storageReference: stored.storageReference,
-          checksum: { algorithm: 'sha256', value: stored.checksum },
-          sizeBytes: stored.sizeBytes,
-          retentionPolicy: 'STANDARD_30D',
-        });
+          checksum: {
+            algorithm: 'sha256' as const,
+            value: createHash('sha256').update(produced.content).digest('hex'),
+          },
+          sizeBytes: produced.content.byteLength,
+          retentionPolicy: 'STANDARD_30D' as const,
+        };
+        let storageReference: string;
+        if (this.options.evidence) {
+          try {
+            storageReference = (
+              await this.options.evidence.upload(signed, described, produced.content)
+            ).storageReference;
+          } catch (error) {
+            // The operation already happened; say plainly that this evidence was not kept.
+            notStored.push(
+              `${produced.name} (${error instanceof CredentialRefused ? error.code : 'ARTIFACT_UPLOAD_FAILED'})`,
+            );
+            continue;
+          }
+        } else
+          storageReference = (
+            await this.options.artifacts.put({
+              organizationId: scope.organizationId,
+              runId: scope.runId,
+              artifactId: id,
+              name: produced.name,
+              content: produced.content,
+            })
+          ).storageReference;
+        artifacts.push({ ...described, type: produced.type, storageReference });
       }
+      const output = notStored.length
+        ? `${outcome.output}\n[evidence not stored: ${notStored.join(', ')}]`
+        : outcome.output;
       return {
         result: {
           requestId: grant.requestId,
@@ -256,7 +284,7 @@ export class ExecutionService {
           ...(outcome.error ? { error: outcome.error } : {}),
         },
         workspace: { id: workspace.id, state: 'READY' },
-        output: outcome.output,
+        output,
         truncated: outcome.truncated,
         artifacts,
       };

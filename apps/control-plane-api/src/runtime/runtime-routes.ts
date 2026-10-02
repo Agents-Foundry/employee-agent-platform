@@ -1,7 +1,10 @@
 import express, { Router, type Express, type Request } from 'express';
 import rateLimit from 'express-rate-limit';
 import { runtimeTransportPaths } from '../../../../packages/contracts/src/runtime/v1/transport.js';
-import { MAX_RUNTIME_MESSAGE_BYTES } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
+import {
+  MAX_CHECKPOINT_BYTES,
+  MAX_RUNTIME_MESSAGE_BYTES,
+} from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import { ExecutionError } from '../execution/execution-service.js';
 import {
   authenticateRuntimeRequest,
@@ -11,6 +14,8 @@ import {
 import type { RuntimeTransportService } from './runtime-transport-service.js';
 import { credentialTransportPaths } from '../../../../packages/contracts/src/credentials.js';
 import type { CredentialBroker } from '../credentials/credential-broker.js';
+import { MAX_ARTIFACT_UPLOAD_BYTES } from '../../../../packages/contracts/src/artifacts.js';
+import type { ArtifactService } from '../artifacts/artifact-service.js';
 
 const RUNTIME_BASE = '/runtime/v1';
 const relative = (path: string) => path.slice(RUNTIME_BASE.length);
@@ -24,10 +29,24 @@ export function configureRuntimeRoutes(
   registry: RuntimeIdentityRegistry,
   transport: RuntimeTransportService,
   credentials: CredentialBroker,
+  artifacts: ArtifactService,
 ): void {
   const router = Router();
   router.use(
     rateLimit({ windowMs: 60_000, limit: 1200, standardHeaders: 'draft-8', legacyHeaders: false }),
+  );
+  // A checkpoint is a JSON string inside JSON, so its escaped form can be far larger.
+  router.use(
+    relative(runtimeTransportPaths.checkpointSave),
+    express.raw({ type: () => true, limit: 3 * MAX_CHECKPOINT_BYTES }),
+  );
+  // Artifact bytes travel as base64 inside JSON, next to a signed grant or a correlation.
+  router.use(
+    relative(runtimeTransportPaths.artifactUpload),
+    express.raw({
+      type: () => true,
+      limit: Math.ceil(MAX_ARTIFACT_UPLOAD_BYTES / 3) * 4 + MAX_RUNTIME_MESSAGE_BYTES,
+    }),
   );
   // Raw bytes are needed to verify the body digest in the signature.
   router.use(express.raw({ type: () => true, limit: MAX_RUNTIME_MESSAGE_BYTES + 1024 }));
@@ -94,10 +113,39 @@ export function configureRuntimeRoutes(
     const runtime = await authenticate(request);
     response.json(await transport.reserveModelTokens(runtime, json(request)));
   });
+  router.post(relative(runtimeTransportPaths.modelCredential), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.modelCredential(runtime, json(request)));
+  });
   router.post(relative(runtimeTransportPaths.modelSettle), async (request, response) => {
     const runtime = await authenticate(request);
     response.json(await transport.settleModelTokens(runtime, json(request)));
   });
+  router.post(relative(runtimeTransportPaths.heartbeat), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.json(await transport.heartbeat(runtime, json(request)));
+  });
+  router.post(relative(runtimeTransportPaths.checkpointSave), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.status(201).json(await transport.saveCheckpoint(runtime, json(request)));
+  });
+  router.post(relative(runtimeTransportPaths.checkpointLoad), async (request, response) => {
+    const runtime = await authenticate(request);
+    const checkpoint = await transport.loadCheckpoint(runtime, json(request));
+    if (!checkpoint) return response.status(204).end();
+    return response.json(checkpoint);
+  });
+  router.post(relative(runtimeTransportPaths.artifactUpload), async (request, response) => {
+    const runtime = await authenticate(request);
+    response.status(201).json(await artifacts.uploadFromAgent(runtime, json(request)));
+  });
+  router.post(
+    relative(runtimeTransportPaths.artifactUploadExecution),
+    async (request, response) => {
+      const runtime = await authenticateExecution(request);
+      response.status(201).json(await artifacts.uploadFromExecution(runtime, json(request)));
+    },
+  );
   router.post(relative(credentialTransportPaths.redeem), async (request, response) => {
     const runtime = await authenticateExecution(request);
     response.json(await credentials.redeem(runtime, json(request)));

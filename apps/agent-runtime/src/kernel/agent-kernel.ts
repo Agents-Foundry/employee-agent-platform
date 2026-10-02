@@ -34,8 +34,12 @@ export interface KernelContext {
   workflow?: WorkflowDefinition;
   manifest: SignedAgentManifestV2;
   emit: EmitEvent;
+  /**
+   * `requestId` is the idempotency key. A kernel that checkpoints it before asking gets the
+   * same decision again after a recovery, instead of a second request.
+   */
   requestAction(
-    request: Omit<RuntimeActionRequest, 'protocol' | 'requestId'>,
+    request: Omit<RuntimeActionRequest, 'protocol' | 'requestId'> & { requestId?: string },
   ): Promise<RuntimeActionDecision>;
   /** Execute a control-plane-owned action that was allowed or approved (single use). */
   executeAction(
@@ -49,13 +53,24 @@ export interface KernelContext {
   models: RunModels;
   tools: RuntimeTool[];
   artifacts: ArtifactStore;
+  /**
+   * Save the kernel's state so another runtime could continue from here (ADR 0032). `stepId`
+   * names the step in progress, if any. `state` must be JSON-serializable.
+   */
+  checkpoint(state: unknown, stepId: string | null): Promise<void>;
   signal: AbortSignal;
+}
+
+/** Given to `resume` when the run is continued after its runtime stopped. */
+export interface KernelRecovery {
+  /** Steps the control plane still holds open. */
+  openStepIds: ReadonlySet<string>;
 }
 
 export type KernelOutcome =
   | { status: 'COMPLETED'; summary: string; artifactIds: string[] }
   /** The control plane already paused the run; `state` must be JSON-serializable. */
-  | { status: 'PAUSED'; approvalId: string; state: unknown }
+  | { status: 'PAUSED'; approvalId: string; stepId: string; state: unknown }
   | { status: 'FAILED'; error: RuntimeFailure };
 
 /**
@@ -65,9 +80,14 @@ export type KernelOutcome =
 export interface AgentKernel {
   readonly id: string;
   start(context: KernelContext): Promise<KernelOutcome>;
+  /**
+   * Continue from checkpointed state: after an approval decision, after the runtime that held
+   * the run stopped (`recovery`), or both. Work the state records as done is not repeated.
+   */
   resume(
     context: KernelContext,
     state: unknown,
-    approval: { approvalId: string; decision: 'APPROVED' | 'REJECTED' },
+    approval: { approvalId: string; decision: 'APPROVED' | 'REJECTED' } | null,
+    recovery?: KernelRecovery,
   ): Promise<KernelOutcome>;
 }

@@ -5,8 +5,18 @@ import type {
   RuntimeActionExecution,
   RuntimeActionGrantRequest,
   RuntimeActionRequest,
+  ArtifactUpload,
+  RuntimeArtifactUploadRequest,
   SignedExecutionGrant,
+  RuntimeCheckpointAck,
+  RuntimeCheckpointLoadRequest,
+  RuntimeCheckpointRecord,
+  RuntimeCheckpointSaveRequest,
   RuntimeClaimResponse,
+  RuntimeHeartbeat,
+  RuntimeHeartbeatRequest,
+  RuntimeModelCredential,
+  RuntimeModelCredentialRequest,
   RuntimeEventAck,
   RuntimeEventEnvelope,
   RuntimeModelReservation,
@@ -21,8 +31,13 @@ import {
 } from '../../../../packages/contracts/src/runtime/v1/transport.js';
 import {
   parseRuntimeActionDecision,
+  parseArtifactUpload,
   parseRuntimeActionExecution,
+  parseRuntimeCheckpointAck,
+  parseRuntimeCheckpointRecord,
   parseRuntimeClaimResponse,
+  parseRuntimeHeartbeat,
+  parseRuntimeModelCredential,
   parseRuntimeModelReservation,
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import { parseSignedExecutionGrant } from '../../../../packages/contracts/src/execution-runtime/v1/schemas.js';
@@ -38,6 +53,14 @@ export interface ControlPlanePort {
   /** Reserve tokens for one model call against the organization's limits (ADR 0021). */
   reserveModelTokens(request: RuntimeModelReservationRequest): Promise<RuntimeModelReservation>;
   settleModelTokens(request: RuntimeModelSettlementRequest): Promise<RuntimeModelSettlement>;
+  /** The organization's model credential for a running run's provider (ADR 0034). */
+  modelCredential(request: RuntimeModelCredentialRequest): Promise<RuntimeModelCredential>;
+  /** Keep the leases of the runs being executed alive; lost runs must be stopped (ADR 0032). */
+  heartbeat(request: RuntimeHeartbeatRequest): Promise<RuntimeHeartbeat>;
+  saveCheckpoint(request: RuntimeCheckpointSaveRequest): Promise<RuntimeCheckpointAck>;
+  loadCheckpoint(request: RuntimeCheckpointLoadRequest): Promise<RuntimeCheckpointRecord | null>;
+  /** Store an artifact's bytes in the control plane's artifact store (ADR 0033). */
+  uploadArtifact(request: RuntimeArtifactUploadRequest): Promise<ArtifactUpload>;
 }
 
 export interface ControlPlaneClientOptions {
@@ -100,6 +123,33 @@ export class ControlPlaneClient implements ControlPlanePort {
 
   async settleModelTokens(request: RuntimeModelSettlementRequest): Promise<RuntimeModelSettlement> {
     return (await this.post(runtimeTransportPaths.modelSettle, request)) as RuntimeModelSettlement;
+  }
+
+  async modelCredential(request: RuntimeModelCredentialRequest): Promise<RuntimeModelCredential> {
+    return parseRuntimeModelCredential(
+      await this.post(runtimeTransportPaths.modelCredential, request),
+    );
+  }
+
+  async heartbeat(request: RuntimeHeartbeatRequest): Promise<RuntimeHeartbeat> {
+    return parseRuntimeHeartbeat(await this.post(runtimeTransportPaths.heartbeat, request));
+  }
+
+  async saveCheckpoint(request: RuntimeCheckpointSaveRequest): Promise<RuntimeCheckpointAck> {
+    return parseRuntimeCheckpointAck(
+      await this.post(runtimeTransportPaths.checkpointSave, request),
+    );
+  }
+
+  async loadCheckpoint(
+    request: RuntimeCheckpointLoadRequest,
+  ): Promise<RuntimeCheckpointRecord | null> {
+    const response = await this.post(runtimeTransportPaths.checkpointLoad, request);
+    return response === null ? null : parseRuntimeCheckpointRecord(response);
+  }
+
+  async uploadArtifact(request: RuntimeArtifactUploadRequest): Promise<ArtifactUpload> {
+    return parseArtifactUpload(await this.post(runtimeTransportPaths.artifactUpload, request));
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {

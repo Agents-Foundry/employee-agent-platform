@@ -17,6 +17,14 @@ const stopWebhooks = database.alertWebhooks.options.enabled
   ? database.alertWebhooks.start(15_000)
   : () => undefined;
 
+// ADR 0032 and 0033: abandoned runs are reaped and artifact retention is enforced from this
+// process, as well as whenever runtimes poll.
+const housekeeping = setInterval(() => {
+  void database.runtimeTransport.reapAbandoned().catch(() => undefined);
+  void database.artifacts.enforceRetention().catch(() => undefined);
+}, 60_000);
+housekeeping.unref();
+
 const port = Number(process.env['PORT'] ?? 4100);
 const server = createApp(database, auth).listen(port, '127.0.0.1', () => {
   console.log(`Agents Foundry control plane API listening on http://127.0.0.1:${port}`);
@@ -25,6 +33,7 @@ const server = createApp(database, auth).listen(port, '127.0.0.1', () => {
 function shutdown(signal: string): void {
   console.log(`Received ${signal}; stopping control plane API.`);
   stopWebhooks();
+  clearInterval(housekeeping);
   server.close((error) => {
     void database.close().finally(() => process.exit(error ? 1 : 0));
   });

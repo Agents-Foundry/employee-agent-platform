@@ -1,11 +1,21 @@
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import type {
   AgentManifestV2Payload,
+  ArtifactUpload,
+  RuntimeArtifactUploadRequest,
   RuntimeActionDecision,
   RuntimeActionExecuteRequest,
   RuntimeActionExecution,
   RuntimeActionRequest,
+  RuntimeCheckpointAck,
+  RuntimeCheckpointLoadRequest,
+  RuntimeCheckpointRecord,
+  RuntimeCheckpointSaveRequest,
   RuntimeClaimResponse,
+  RuntimeHeartbeat,
+  RuntimeHeartbeatRequest,
+  RuntimeModelCredential,
+  RuntimeModelCredentialRequest,
   RuntimeCorrelation,
   RuntimeEventAck,
   RuntimeEventEnvelope,
@@ -19,7 +29,7 @@ import type {
 } from '@agents-foundry/contracts';
 import { canonicalManifest } from '../../../packages/contracts/src/manifest.js';
 import { parseRuntimeEvent } from '../../../packages/contracts/src/runtime/v1/schemas.js';
-import { MemoryCheckpointStore } from '../src/checkpoints.js';
+import { MemoryCheckpointStore, type CheckpointStore } from '../src/checkpoints.js';
 import { ControlPlaneError } from '../src/errors.js';
 import { NativeKernel } from '../src/kernel/native-kernel.js';
 import { ManifestVerifier } from '../src/manifest-verifier.js';
@@ -175,6 +185,88 @@ export class FakeControlPlane implements ControlPlanePort {
     return { reservationId: request.reservationId, status: 'SETTLED' };
   }
 
+  modelKey: string | null = 'organization-model-key';
+  readonly credentialRequests: RuntimeModelCredentialRequest[] = [];
+
+  async modelCredential(request: RuntimeModelCredentialRequest): Promise<RuntimeModelCredential> {
+    this.credentialRequests.push(request);
+    if (!this.modelKey) throw new ControlPlaneError(409, 'MODEL_CREDENTIAL_NOT_CONFIGURED');
+    return { provider: request.provider, apiKey: this.modelKey };
+  }
+
+  /** Runs reported lost on the next heartbeat. */
+  readonly lost = new Set<string>();
+  readonly heartbeats: string[][] = [];
+
+  async heartbeat(request: RuntimeHeartbeatRequest): Promise<RuntimeHeartbeat> {
+    this.heartbeats.push(request.runIds);
+    return {
+      held: request.runIds.filter((runId) => !this.lost.has(runId)),
+      lost: request.runIds.filter((runId) => this.lost.has(runId)),
+    };
+  }
+
+  /** Durable checkpoints as the control plane keeps them: latest per run, strictly ordered. */
+  readonly checkpoints = new Map<string, RuntimeCheckpointSaveRequest>();
+  readonly checkpointSaves: RuntimeCheckpointSaveRequest[] = [];
+
+  async saveCheckpoint(request: RuntimeCheckpointSaveRequest): Promise<RuntimeCheckpointAck> {
+    const runId = request.correlation.runId;
+    if (request.version !== (this.checkpoints.get(runId)?.version ?? 0) + 1)
+      throw new ControlPlaneError(409, 'CHECKPOINT_VERSION_CONFLICT');
+    this.checkpoints.set(runId, request);
+    this.checkpointSaves.push(request);
+    return { runId, version: request.version };
+  }
+
+  async loadCheckpoint(
+    request: RuntimeCheckpointLoadRequest,
+  ): Promise<RuntimeCheckpointRecord | null> {
+    const stored = this.checkpoints.get(request.correlation.runId);
+    if (!stored) return null;
+    return {
+      runId: stored.correlation.runId,
+      version: stored.version,
+      binding: stored.binding,
+      sha256: stored.sha256,
+      body: stored.body,
+    };
+  }
+
+  readonly uploads: RuntimeArtifactUploadRequest[] = [];
+
+  async uploadArtifact(request: RuntimeArtifactUploadRequest): Promise<ArtifactUpload> {
+    this.uploads.push(request);
+    const { correlation, artifact } = request;
+    return {
+      artifactId: artifact.id,
+      storageReference: `artifact://control-plane/${correlation.organizationId}/${correlation.runId}/${artifact.id}`,
+      checksum: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+    };
+  }
+
+  /** Hand a running run to whoever claims next, as after its runtime stopped. */
+  recover(subject: RuntimeCorrelation, openStepIds: string[] = []) {
+    this.claims.push({
+      command: {
+        protocol: 'agents-foundry/runtime/v1',
+        type: 'run.recover',
+        commandId: randomUUID(),
+        issuedAt: new Date().toISOString(),
+        correlation: subject,
+        runId: subject.runId,
+        reason: 'LEASE_EXPIRED',
+        openStepIds,
+      },
+      lease: {
+        sessionId: randomUUID(),
+        runtimeSequence: this.sequences.get(subject.runId) ?? 0,
+        leaseExpiresAt: new Date().toISOString(),
+      },
+    });
+  }
+
   types(runId: string): string[] {
     return this.events.filter((event) => event.runId === runId).map((event) => event.type);
   }
@@ -243,9 +335,11 @@ export function createHost(options: {
   tools?: RuntimeTool[];
   credentials?: CredentialBroker;
   maxTurns?: number;
+  checkpoints?: CheckpointStore;
+  modelCredentials?: (correlation: RuntimeCorrelation) => CredentialBroker;
 }) {
   const artifacts = new MemoryArtifactStore();
-  const checkpoints = new MemoryCheckpointStore();
+  const checkpoints = options.checkpoints ?? new MemoryCheckpointStore();
   const host = new RuntimeHost({
     controlPlane: options.controlPlane,
     verifier: new ManifestVerifier(manifestKeySpki),
@@ -254,6 +348,7 @@ export function createHost(options: {
     tools: new ToolRegistry(options.tools ?? [new ArtifactTool()]),
     artifacts,
     checkpoints,
+    ...(options.modelCredentials ? { modelCredentials: options.modelCredentials } : {}),
     logger: silentLogger,
   });
   return { host, artifacts, checkpoints };

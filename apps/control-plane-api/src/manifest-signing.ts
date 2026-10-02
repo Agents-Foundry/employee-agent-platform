@@ -108,6 +108,28 @@ export class ManifestSigner {
     }
   }
 
+  /** Artifact download permissions share the key but sign a domain-separated input (ADR 0033). */
+  signArtifactRetrieval(payload: string): string {
+    return sign(
+      null,
+      Buffer.from(`AF-ARTIFACT-RETRIEVAL-V1\n${payload}`),
+      this.privateKey,
+    ).toString('base64url');
+  }
+
+  verifyArtifactRetrieval(payload: string, signature: string): boolean {
+    try {
+      return verify(
+        null,
+        Buffer.from(`AF-ARTIFACT-RETRIEVAL-V1\n${payload}`),
+        this.publicKey,
+        Buffer.from(signature, 'base64url'),
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Webhook deliveries share the key but sign a domain-separated input (ADR 0024). */
   signWebhook(deliveryId: string, timestamp: number, body: string): string {
     return sign(

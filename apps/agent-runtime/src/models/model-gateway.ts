@@ -86,6 +86,52 @@ export class EnvironmentCredentialBroker implements CredentialBroker {
 }
 
 /**
+ * ORGANIZATION_MANAGED credentials from the control plane, which resolves the organization's
+ * `secret://` reference through its secret broker for the holder of a running run (ADR 0034).
+ * The key is fetched for each call and kept nowhere. EMPLOYEE_BYOK fails closed here too.
+ */
+export class ControlPlaneModelCredentials implements CredentialBroker {
+  constructor(private readonly fetchCredential: (provider: string) => Promise<ModelCredential>) {}
+
+  async resolve(scope: CredentialScope): Promise<ModelCredential> {
+    if (scope.credentialMode !== 'ORGANIZATION_MANAGED')
+      throw new RuntimeFailure(
+        'MODEL_CREDENTIAL_UNAVAILABLE',
+        'Employee-held model keys are not available to a server runtime.',
+      );
+    try {
+      return await this.fetchCredential(scope.provider);
+    } catch {
+      // Whatever the control plane answered, nothing of it is repeated.
+      throw new RuntimeFailure(
+        'MODEL_CREDENTIAL_UNAVAILABLE',
+        `No organization-managed credential is available for ${scope.provider}.`,
+      );
+    }
+  }
+}
+
+/** The first broker that has a credential. Employee-held keys never fall through. */
+export class FirstAvailableCredentials implements CredentialBroker {
+  constructor(private readonly brokers: readonly CredentialBroker[]) {}
+
+  async resolve(scope: CredentialScope): Promise<ModelCredential> {
+    let failure: unknown = new RuntimeFailure(
+      'MODEL_CREDENTIAL_UNAVAILABLE',
+      `No organization-managed credential is available for ${scope.provider}.`,
+    );
+    for (const broker of this.brokers) {
+      try {
+        return await broker.resolve(scope);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    throw failure;
+  }
+}
+
+/**
  * Meters one run's model calls against the organization's spending limits (ADR 0021). The
  * host binds it to the run; kernels never see it and cannot skip it.
  */
@@ -135,6 +181,7 @@ export class ModelGateway {
     request: Omit<ModelRequest, 'model'>,
     signal: AbortSignal,
     meter?: ModelUsageMeter,
+    credentials: CredentialBroker = this.credentials,
   ): Promise<{ response: ModelResponse; latencyMs: number }> {
     const { model, metadata } = manifest.payload;
     const provider = this.providers.get(model.provider);
@@ -143,7 +190,7 @@ export class ModelGateway {
         'MODEL_PROVIDER_UNAVAILABLE',
         `Model provider ${model.provider} is not available in this runtime.`,
       );
-    const credential = await this.credentials.resolve({
+    const credential = await credentials.resolve({
       organizationId: metadata.organizationId,
       employeeId: metadata.employeeId,
       provider: model.provider,
