@@ -109,6 +109,15 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
   (`AGENT_RUNTIME_STATE_DIR`, mode 0600).
 - **Logs:** they contain identifiers and error codes only.
 
+## Telemetry and retries
+
+The host traces each model call and tool call under its step and counts them
+([observability](observability.md)); kernels and tools are not changed for it. Requests that
+are safe to repeat (action decisions, executions and grants, all keyed by their request id)
+are retried when the control plane is unreachable; a refusal is final, and an action the
+control plane is still performing is waited for
+([ADR 0036](adr/0036-failure-drills-and-reconciliation.md)).
+
 ## Running locally
 
 ```bash

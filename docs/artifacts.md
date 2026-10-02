@@ -9,11 +9,12 @@ See [ADR 0033](adr/0033-durable-artifact-storage.md).
 ## Status
 
 - Implemented: the metadata model, tenant/run/step scoping, uploads from agent and execution
-  runtimes through the signed transport, hash verification, registration through the runtime
-  `artifact.created` event, browser-safe listing on run detail, short-lived authorized
-  retrieval, and retention enforcement.
+  runtimes through the signed transport, direct upload of large evidence to the artifact store
+  ([ADR 0037](adr/0037-direct-artifact-upload-and-browser-evidence.md)), hash verification,
+  registration through the runtime `artifact.created` event, browser-safe listing on run
+  detail, short-lived authorized retrieval, and retention enforcement.
 - Not implemented: a download control in the web or desktop applications, deletion on request,
-  uploads larger than 16 MiB, and application-level encryption.
+  artifacts larger than 128 MiB, streaming retrieval, and application-level encryption.
 
 ## Model
 
@@ -24,7 +25,7 @@ See [ADR 0033](adr/0033-durable-artifact-storage.md).
 | `type`, `mediaType`, `name`                     | A closed type list, a MIME type, and a file name with no path separators         |
 | `storageReference`                              | `artifact://<store>/<opaque-key>` only                                           |
 | `checksum`                                      | SHA-256                                                                          |
-| `sizeBytes`                                     | Up to 16 MiB for content the control plane stores                                |
+| `sizeBytes`                                     | Up to 16 MiB through the signed transport, 128 MiB by direct upload              |
 | `retentionPolicy`                               | `EPHEMERAL`, `STANDARD_30D`, `EXTENDED_365D` or `LEGAL_HOLD`                     |
 | `content`                                       | `AVAILABLE`, `DELETED` or `UNMANAGED`, with expiry and deletion time and reason  |
 
@@ -46,6 +47,9 @@ private.
    (`POST /runtime/v1/artifacts`, or `/runtime/v1/artifacts/execution` with a signed grant).
    The control plane verifies both, writes the object under
    `<organization>/<run>/<artifact id>` and returns the reference.
+   An execution runtime sends anything over 4 MiB directly instead: it asks for a permission
+   for exactly those bytes (`/runtime/v1/artifacts/execution/authorize`), sends them to the
+   store, and has the control plane read them back and accept them (`.../complete`).
 2. The run registers the artifact with `artifact.created`. A reference to the control plane's
    store is accepted only if it matches the stored object exactly.
 3. The owning employee, or an administrator of the organization, asks for a retrieval
