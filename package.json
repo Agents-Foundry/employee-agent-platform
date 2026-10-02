@@ -30,7 +30,8 @@
     "test:execution": "npm run test --workspace @agents-foundry/execution-runtime",
     "test:evals": "npm run test:evals --workspace @agents-foundry/control-plane-api",
     "eval:quality": "npm run eval:quality --workspace @agents-foundry/control-plane-api",
-    "check": "npm run build && npm run test"
+    "readiness": "npm run readiness --workspace @agents-foundry/control-plane-api",
+    "check": "npm run build && npm run test && npm run readiness"
   },
   "private": true,
   "workspaces": [

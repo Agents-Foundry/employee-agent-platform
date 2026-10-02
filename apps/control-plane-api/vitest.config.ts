@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     include: ['test/**/*.spec.ts'],
     exclude: ['dist/**', 'node_modules/**'],
+    // The results feed the pilot-readiness assessment (ADR 0038).
+    reporters: ['default', 'json'],
+    outputFile: { json: '../../.readiness/results/control-plane-api.json' },
     // Password tests run fixed-cost scrypt (N=2^15) repeatedly; parallel files under coverage
     // exceed the 5 s default on slower developer machines.
     testTimeout: 30_000,
