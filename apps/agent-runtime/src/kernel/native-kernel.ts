@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { canonicalManifest } from '../../../../packages/contracts/src/manifest.js';
-import { RuntimeFailure, asRuntimeFailure } from '../errors.js';
+import { ControlPlaneError, RuntimeFailure, asRuntimeFailure } from '../errors.js';
 import type { ModelContent, ModelMessage } from '../models/model-gateway.js';
 import type { RuntimeTool } from '../tools/runtime-tool.js';
-import type { AgentKernel, KernelContext, KernelOutcome } from './agent-kernel.js';
+import type { AgentKernel, KernelContext, KernelOutcome, KernelRecovery } from './agent-kernel.js';
 
 interface ToolUse {
   id: string;
@@ -12,31 +12,70 @@ interface ToolUse {
   input: unknown;
 }
 
+/**
+ * The tool call in progress. Its identifiers are fixed and checkpointed before anything is
+ * asked of the control plane, so a runtime that continues the run repeats the same requests
+ * and gets the recorded answers, not second effects.
+ */
+interface InFlight {
+  stepId: string;
+  toolCallId: string;
+  requestId: string;
+  /** Set once the call is known to wait for, or to have been released by, this approval. */
+  approvalId: string | null;
+}
+
 interface PendingTurn {
   toolUses: ToolUse[];
   results: ModelContent[];
   index: number;
-  awaiting: { approvalId: string; stepId: string; toolCallId: string; requestId: string } | null;
+  inFlight: InFlight | null;
 }
 
-/** Checkpointed between a pause and its resume. Contains conversation content: keep it local. */
+/** Checkpointed after every model turn and tool call. Contains conversation content. */
 interface NativeKernelState {
-  version: 1;
+  version: 2;
   messages: ModelMessage[];
   turns: number;
   artifactIds: string[];
   turn: PendingTurn | null;
 }
 
+const uuid = z.uuid();
 const stateSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   messages: z.array(z.any()),
   turns: z.number().int().min(0),
   artifactIds: z.array(z.string()),
-  turn: z.any().nullable(),
+  turn: z
+    .object({
+      toolUses: z.array(z.object({ id: z.string(), name: z.string(), input: z.unknown() })),
+      results: z.array(z.any()),
+      index: z.number().int().min(0),
+      inFlight: z
+        .object({
+          stepId: uuid,
+          toolCallId: uuid,
+          requestId: uuid,
+          approvalId: uuid.nullable(),
+        })
+        .strict()
+        .nullable(),
+    })
+    .strict()
+    .nullable(),
 });
 
-type Step = { kind: 'result'; block: ModelContent } | { kind: 'paused'; approvalId: string };
+/** How the first tool call after a resume differs from a fresh one. */
+interface Resumption {
+  /** The approval that released the run, when it was resumed by one. */
+  approvalId: string | null;
+  /** Open steps at the control plane, when the run is continued after its runtime stopped. */
+  openStepIds: ReadonlySet<string> | null;
+}
+
+type Step =
+  { kind: 'result'; block: ModelContent } | { kind: 'paused'; approvalId: string; stepId: string };
 
 function digest(value: unknown): string {
   return createHash('sha256').update(canonicalManifest(value)).digest('hex');
@@ -53,8 +92,9 @@ export interface NativeKernelOptions {
 
 /**
  * Minimal first-party kernel: a bounded model ⇄ tool loop. Every governed action is decided by
- * the control plane before the tool runs; an approval pause checkpoints the loop mid-turn and
- * resumes it without replaying earlier tool calls.
+ * the control plane before the tool runs. The loop is checkpointed after every model turn and
+ * around every tool call, so a pause, or another runtime taking the run over, continues it
+ * without repeating finished tool calls.
  */
 export class NativeKernel implements AgentKernel {
   readonly id = 'native-v1';
@@ -68,45 +108,63 @@ export class NativeKernel implements AgentKernel {
 
   async start(context: KernelContext): Promise<KernelOutcome> {
     const state: NativeKernelState = {
-      version: 1,
+      version: 2,
       messages: [{ role: 'user', content: [{ type: 'text', text: taskPrompt(context) }] }],
       turns: 0,
       artifactIds: [],
       turn: null,
     };
-    return this.loop(context, state);
+    try {
+      await context.checkpoint(state, null);
+    } catch (error) {
+      return { status: 'FAILED', error: asRuntimeFailure(error) };
+    }
+    return this.loop(context, state, null);
   }
 
   async resume(
     context: KernelContext,
     rawState: unknown,
-    approval: { approvalId: string; decision: 'APPROVED' | 'REJECTED' },
+    approval: { approvalId: string; decision: 'APPROVED' | 'REJECTED' } | null,
+    recovery?: KernelRecovery,
   ): Promise<KernelOutcome> {
     const parsed = stateSchema.safeParse(rawState);
     if (!parsed.success)
       return this.fail('RUNTIME_CHECKPOINT_INVALID', 'The run checkpoint could not be read.');
     const state = parsed.data as NativeKernelState;
-    const awaiting = state.turn?.awaiting;
-    if (!awaiting || awaiting.approvalId !== approval.approvalId)
-      return this.fail(
-        'RUNTIME_APPROVAL_MISMATCH',
-        'The approval does not match the paused action.',
-      );
-    if (approval.decision !== 'APPROVED')
-      return this.fail('ACTION_REJECTED', 'The governed action was rejected.');
-    return this.loop(context, state);
+    if (approval) {
+      const inFlight = state.turn?.inFlight;
+      // A null approval id means the pause itself was not checkpointed; the stored decision
+      // is compared when the call is repeated.
+      if (!inFlight || (inFlight.approvalId && inFlight.approvalId !== approval.approvalId))
+        return this.fail(
+          'RUNTIME_APPROVAL_MISMATCH',
+          'The approval does not match the paused action.',
+        );
+      if (approval.decision !== 'APPROVED')
+        return this.fail('ACTION_REJECTED', 'The governed action was rejected.');
+    }
+    return this.loop(context, state, {
+      approvalId: approval?.approvalId ?? null,
+      openStepIds: recovery?.openStepIds ?? null,
+    });
   }
 
-  private async loop(context: KernelContext, state: NativeKernelState): Promise<KernelOutcome> {
+  private async loop(
+    context: KernelContext,
+    state: NativeKernelState,
+    resumption: Resumption | null,
+  ): Promise<KernelOutcome> {
     try {
       while (true) {
         context.signal.throwIfAborted();
         if (state.turn) {
-          const paused = await this.runTools(context, state, state.turn);
+          const paused = await this.runTools(context, state, state.turn, resumption);
           if (paused) return paused;
           state.messages.push({ role: 'user', content: state.turn.results });
           state.turn = null;
         }
+        resumption = null;
         if (state.turns >= this.maxTurns)
           return this.fail('MAX_TURNS_EXCEEDED', `The run exceeded ${this.maxTurns} model turns.`);
         state.turns += 1;
@@ -171,7 +229,9 @@ export class NativeKernel implements AgentKernel {
             summary: (text || 'Completed.').slice(0, 4000),
             artifactIds: state.artifactIds,
           };
-        state.turn = { toolUses, results: [], index: 0, awaiting: null };
+        state.turn = { toolUses, results: [], index: 0, inFlight: null };
+        // The model turn is kept, so a continuation runs its tools instead of asking again.
+        await context.checkpoint(state, null);
       }
     } catch (error) {
       return { status: 'FAILED', error: asRuntimeFailure(error) };
@@ -183,14 +243,19 @@ export class NativeKernel implements AgentKernel {
     context: KernelContext,
     state: NativeKernelState,
     turn: PendingTurn,
+    resumption: Resumption | null,
   ): Promise<KernelOutcome | null> {
     while (turn.index < turn.toolUses.length) {
       const use = turn.toolUses[turn.index]!;
-      const step = await this.runTool(context, state, turn, use);
-      if (step.kind === 'paused') return { status: 'PAUSED', approvalId: step.approvalId, state };
+      // Only the call that was in progress is continued; later ones start fresh.
+      const step = await this.runTool(context, state, turn, use, turn.inFlight ? resumption : null);
+      resumption = null;
+      if (step.kind === 'paused')
+        return { status: 'PAUSED', approvalId: step.approvalId, stepId: step.stepId, state };
       turn.results.push(step.block);
-      turn.awaiting = null;
+      turn.inFlight = null;
       turn.index += 1;
+      await context.checkpoint(state, null);
     }
     return null;
   }
@@ -200,15 +265,24 @@ export class NativeKernel implements AgentKernel {
     state: NativeKernelState,
     turn: PendingTurn,
     use: ToolUse,
+    resumption: Resumption | null,
   ): Promise<Step> {
     const result = (content: string, isError: boolean): Step => ({
       kind: 'result',
       block: { type: 'tool_result', toolUseId: use.id, content, isError },
     });
     const tool = context.tools.find((candidate) => candidate.id === use.name);
-    const resumed = turn.awaiting;
+    const resumed = turn.inFlight;
     const stepId = resumed?.stepId ?? randomUUID();
     const toolCallId = resumed?.toolCallId ?? randomUUID();
+    // The step ended at the control plane after this checkpoint: the call finished there, and
+    // only its output was lost. It is never run a second time.
+    if (resumed && resumption?.openStepIds && !resumption.openStepIds.has(stepId))
+      return result(
+        `TOOL_OUTCOME_UNKNOWN: ${safeLabel(use.name)} finished before this runtime took over ` +
+          'the run, and its output was not kept. Check its effect before deciding to repeat it.',
+        true,
+      );
     if (!resumed)
       await context.emit(
         'step.started',
@@ -255,38 +329,46 @@ export class NativeKernel implements AgentKernel {
         new RuntimeFailure('TOOL_INPUT_INVALID', invalidInputMessage(parseError)),
         result,
       );
-    let requestId = resumed?.requestId ?? null;
+    const inFlight: InFlight = resumed ?? {
+      stepId,
+      toolCallId,
+      requestId: randomUUID(),
+      approvalId: null,
+    };
     if (!resumed) {
-      const action = tool.governedAction(input);
-      if (action) {
-        const decision = await context.requestAction({
-          correlation: { ...context.correlation, stepId, toolCallId },
-          action,
-          toolId: tool.id,
-          toolVersion: tool.version,
-          inputDigest,
-          summary: tool.summarize(input).slice(0, 500),
-          ...(tool.sendsParameters ? { parameters: input as Record<string, unknown> } : {}),
-        });
-        requestId = decision.requestId;
-        if (decision.decision === 'DENIED')
-          return this.toolFailed(
-            context,
-            stepId,
-            toolCallId,
-            0,
-            new RuntimeFailure('ACTION_DENIED', decision.reason),
-            result,
-          );
-        if (decision.decision === 'APPROVAL_REQUIRED') {
-          turn.awaiting = {
-            approvalId: decision.approvalId,
-            stepId,
-            toolCallId,
-            requestId: decision.requestId,
-          };
-          return { kind: 'paused', approvalId: decision.approvalId };
-        }
+      turn.inFlight = inFlight;
+      await context.checkpoint(state, stepId);
+    }
+    const action = tool.governedAction(input);
+    const requestId = action ? inFlight.requestId : null;
+    // A call whose approval is already known was decided before; the control plane checks the
+    // approval again when the action executes.
+    if (action && !inFlight.approvalId) {
+      const decision = await context.requestAction({
+        requestId: inFlight.requestId,
+        correlation: { ...context.correlation, stepId, toolCallId },
+        action,
+        toolId: tool.id,
+        toolVersion: tool.version,
+        inputDigest,
+        summary: tool.summarize(input).slice(0, 500),
+        ...(tool.sendsParameters ? { parameters: input as Record<string, unknown> } : {}),
+      });
+      if (decision.decision === 'DENIED')
+        return this.toolFailed(
+          context,
+          stepId,
+          toolCallId,
+          0,
+          new RuntimeFailure('ACTION_DENIED', decision.reason),
+          result,
+        );
+      if (decision.decision === 'APPROVAL_REQUIRED') {
+        inFlight.approvalId = decision.approvalId;
+        // Resumed by this very approval, but the pause was never checkpointed: carry on.
+        if (resumption?.approvalId !== decision.approvalId)
+          return { kind: 'paused', approvalId: decision.approvalId, stepId };
+        await context.checkpoint(state, stepId);
       }
     }
     await context.emit('tool.started', { toolCallId }, stepId);
@@ -296,7 +378,19 @@ export class NativeKernel implements AgentKernel {
         correlation: { ...context.correlation, stepId, toolCallId },
         manifest: context.manifest,
         artifacts: context.artifacts,
-        registerArtifact: (artifact) => context.emit('artifact.created', { artifact }, stepId),
+        registerArtifact: async (artifact) => {
+          try {
+            await context.emit('artifact.created', { artifact }, stepId);
+          } catch (error) {
+            // A repeated call returns the artifacts the first one already registered.
+            if (
+              !resumed ||
+              !(error instanceof ControlPlaneError) ||
+              error.code !== 'ARTIFACT_ALREADY_EXISTS'
+            )
+              throw error;
+          }
+        },
         signal: context.signal,
         ...(requestId
           ? {

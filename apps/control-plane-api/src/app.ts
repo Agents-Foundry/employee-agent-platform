@@ -15,6 +15,7 @@ import { configureTenancyRoutes } from './organization/tenancy-routes.js';
 import { configureExecutionRoutes } from './execution/execution-routes.js';
 import { configureCatalogRoutes } from './catalog/catalog-routes.js';
 import { configureRuntimeRoutes } from './runtime/runtime-routes.js';
+import { configureModelCredentialRoutes } from './secrets/model-credential-routes.js';
 import { configureSpendingRoutes } from './spending/spending-routes.js';
 import { configureWebhookRoutes } from './webhooks/webhook-routes.js';
 import { configureActionRoutes } from './actions/action-routes.js';
@@ -142,6 +143,7 @@ export function createApp(
     database.runtimeIdentities,
     database.runtimeTransport,
     database.credentials,
+    database.artifacts,
   );
   app.use(express.json({ limit: '64kb' }));
   app.use(
@@ -175,6 +177,7 @@ export function createApp(
   configureTenancyRoutes(app, database, auth);
   configureExecutionRoutes(app, database.execution, {
     genericRuntimeEnabled: database.genericRuntimeEnabled,
+    artifacts: database.artifacts,
     loadManifest: (agentId, organizationId, employeeId) =>
       database.getManifest(agentId, organizationId, employeeId),
     loadConversation: (conversationId, organizationId, employeeId) =>
@@ -183,6 +186,7 @@ export function createApp(
   configureCatalogRoutes(app, database.catalog, database.installations, database.quality, auth);
   configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
   configureCredentialRoutes(app, database.sourceControl, database.credentials, auth);
+  configureModelCredentialRoutes(app, database.modelCredentials, auth);
   configureSpendingRoutes(app, database.modelSpending, auth);
   configureWebhookRoutes(app, database.alertWebhooks, auth);
 

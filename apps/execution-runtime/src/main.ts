@@ -64,7 +64,8 @@ const service = new ExecutionService({
   artifacts: new ExecutionArtifactStore(join(root, 'artifacts')),
   workspaceRoot: root,
   allowUnsandboxed: process.env['EXECUTION_ALLOW_UNSANDBOXED'] === 'true',
-  ...(credentials ? { credentials } : {}),
+  // With an identity, evidence goes to the control plane's artifact store as well.
+  ...(credentials ? { credentials, evidence: credentials } : {}),
 });
 // Checkouts a previous process left unfinished are discarded and their leases ended.
 const recovered = await service.recover();
@@ -77,6 +78,7 @@ const server = createExecutionServer(service, provider).listen(port, host, () =>
       port,
       provider: provider.id,
       authenticatedCheckout: credentials !== undefined,
+      durableEvidence: credentials !== undefined,
       recoveredCheckouts: recovered,
     }),
   );

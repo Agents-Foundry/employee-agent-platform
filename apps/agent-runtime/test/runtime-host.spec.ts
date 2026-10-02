@@ -130,7 +130,7 @@ describe('runtime host and native kernel', () => {
       summary: 'Create Bug',
       correlation: { runId: subject.runId, stepId: controlPlane.events.at(-1)!.stepId },
     });
-    const checkpoint = await checkpoints.load(subject.runId);
+    const checkpoint = await checkpoints.load(subject);
     expect(checkpoint).toMatchObject({ approvalId, kernelId: 'native-v1' });
 
     controlPlane.resume(subject, approvalId);
@@ -152,7 +152,7 @@ describe('runtime host and native kernel', () => {
       'step.completed',
       'run.completed',
     ]);
-    expect(await checkpoints.load(subject.runId)).toBeNull();
+    expect(await checkpoints.load(subject)).toBeNull();
   });
 
   it('reports denied actions, unavailable tools and invalid input to the model without executing', async () => {

@@ -114,7 +114,7 @@ allow-list.
 | `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                                                        |
 | `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider                                               |
 | `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                         |
-| `EXECUTION_CONTROL_PLANE_URL`           | unset                     | Control plane to redeem credential leases from; set with the two variables below                         |
+| `EXECUTION_CONTROL_PLANE_URL`           | unset                     | Control plane to redeem credential leases from and upload evidence to; set with the two variables below  |
 | `EXECUTION_RUNTIME_ID`                  | unset                     | This runtime's identity, registered in the control plane with `"role": "execution"`                      |
 | `EXECUTION_RUNTIME_KEY_PATH`            | unset                     | Its Ed25519 private key (PKCS#8 PEM)                                                                     |
 | `EXECUTION_GIT_CA_FILE`                 | unset                     | A CA bundle git also trusts, for a git host with a private CA                                            |

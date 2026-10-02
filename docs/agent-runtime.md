@@ -13,7 +13,12 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
   - real tools: `artifact`, `issue-tracker` (executed by the control plane, Phase D), and
     `repository` and `browser` (executed by the execution runtime under signed grants, Phase E);
   - approval pause and resume;
-  - file checkpoints and a local artifact store.
+  - durable checkpoints, heartbeats and recovery by another runtime
+    ([ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md));
+  - artifacts stored in the control plane's artifact store
+    ([ADR 0033](adr/0033-durable-artifact-storage.md));
+  - organization model keys from the control plane's secret broker
+    ([ADR 0034](adr/0034-organization-managed-model-credentials.md)).
 - Not implemented yet:
   - connectors, MCP and the execution runtime (Phases D and E);
   - an employee UI for starting runs.
@@ -25,12 +30,13 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
 | `RuntimeHost`                  | `src/runtime-host.ts`                   | Claims commands, verifies manifests, owns the run lifecycle and event sequence |
 | `ControlPlaneClient`           | `src/transport/control-plane-client.ts` | Ed25519-signed HTTPS requests; strict parsing of responses                     |
 | `ManifestVerifier`             | `src/manifest-verifier.ts`              | Verifies v2 manifests against the **pinned** control-plane key                 |
-| `AgentKernel` / `NativeKernel` | `src/kernel/`                           | Bounded model ⇄ tool loop; checkpoints mid-turn on approval                    |
+| `AgentKernel` / `NativeKernel` | `src/kernel/`                           | Bounded model ⇄ tool loop; checkpoints after each model turn and tool call     |
 | `ModelGateway`                 | `src/models/model-gateway.ts`           | Routes the manifest's provider/model to an adapter; brokers credentials        |
 | `AnthropicProvider`            | `src/models/anthropic-provider.ts`      | Messages API over HTTPS, no SDK                                                |
 | `ScriptedProvider`             | `src/models/scripted-provider.ts`       | Deterministic replay for tests and offline demos (not a model)                 |
 | `ToolRegistry`, `ArtifactTool` | `src/tools/`                            | Tool implementations; the manifest narrows what is offered                     |
-| `FileCheckpointStore`          | `src/checkpoints.ts`                    | Owner-only JSON per paused run, written atomically                             |
+| `ControlPlaneCheckpointStore`  | `src/checkpoints.ts`                    | Durable checkpoints kept by the control plane; `FileCheckpointStore` for dev   |
+| `ControlPlaneArtifactStore`    | `src/tools/artifact-store.ts`           | Uploads artifact bytes to the control plane; `LocalArtifactStore` for dev      |
 
 ## Run flow
 
@@ -64,6 +70,11 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
 5. An administrator approves, and the runtime claims `run.resume`. It emits `run.resumed`
    naming the approval, runs the approved tool call without asking again, and continues.
    A rejection cancels the run instead, and the runtime receives `run.cancel`.
+6. While it executes runs, the runtime sends `POST /runtime/v1/heartbeat` every 30 seconds
+   (`AGENT_RUNTIME_HEARTBEAT_MS`). If it stops, its lease expires and another authorized
+   runtime is given `run.recover` (or `run.resume` for an approved run). That runtime loads
+   the latest checkpoint, verifies it, and continues without repeating finished tool calls.
+   See [ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md).
 
 ## Security properties
 
@@ -74,20 +85,28 @@ in [ADR 0011](adr/0011-runtime-transport-and-workload-identity.md).
   - missing credential or `EMPLOYEE_BYOK` → `MODEL_CREDENTIAL_UNAVAILABLE`;
   - tool not granted → `TOOL_NOT_AVAILABLE`;
   - invalid tool input → `TOOL_INPUT_INVALID`;
-  - checkpoint missing or mismatched → `RUNTIME_CHECKPOINT_MISSING`;
+  - checkpoint missing → `RUNTIME_CHECKPOINT_MISSING`; altered, in another format or bound
+    to something else → `RUNTIME_CHECKPOINT_INVALID`;
+  - a checkpoint that would contain a credential → `RUNTIME_CHECKPOINT_SECRET`;
+  - the run was taken over by another runtime → this one stops without recording anything;
   - runaway loops → `MAX_TURNS_EXCEEDED`.
 - **Model keys:**
-  - They are read from the operator environment (`AF_MODEL_API_KEY_<PROVIDER>`) per call, and
-    only for `ORGANIZATION_MANAGED`.
+  - They are fetched from the control plane for each call
+    (`POST /runtime/v1/models/credential`), which resolves the organization's `secret://`
+    reference through the secret broker, and only for `ORGANIZATION_MANAGED`.
+  - The operator environment (`AF_MODEL_API_KEY_<PROVIDER>`) is a development fallback, used
+    only with `AGENT_RUNTIME_ENV_MODEL_KEYS=true`.
   - They are never logged, checkpointed or emitted.
   - Provider error bodies are discarded.
 - **No self-approval:**
   - The runtime can neither create nor decide approvals.
   - Approvals are requested for the employee, who cannot approve their own.
-- **No shell, browser or filesystem tools** for the model. The artifact tool writes only under
-  the runtime's artifact root, with validated path segments.
-- **Local data:** checkpoints contain conversation content. They stay on the runtime host
-  (`AGENT_RUNTIME_STATE_DIR`, mode 0600) and are deleted when the run ends.
+- **No shell, browser or filesystem tools** for the model. The artifact tool uploads to the
+  control plane's artifact store; the runtime holds no object-store credentials.
+- **Checkpoints** contain conversation content. By default they are kept by the control plane,
+  under forced row-level security, and deleted when the run ends. With
+  `AGENT_RUNTIME_CHECKPOINT_STORE=local` they stay on the runtime host
+  (`AGENT_RUNTIME_STATE_DIR`, mode 0600).
 - **Logs:** they contain identifiers and error codes only.
 
 ## Running locally
@@ -126,7 +145,7 @@ accepted only for loopback addresses.
   git, shells or browsers itself.
 - There is no employee UI for starting or following generic runs. The API and the admin
   approvals panel work.
-- Checkpoints are local, so a paused run resumes only on the runtime that paused it.
-- Runs abandoned mid-execution by a crashed runtime are not reaped automatically. Only queued
-  runs whose lease expired before `run.started` are reassigned.
+- Recovery starts when the lease expires, ten minutes after the runtime's last heartbeat.
+- With the local checkpoint store, a paused run resumes only on the runtime that paused it,
+  and an abandoned running run is cancelled (`RUNTIME_LOST`).
 - There is no streaming, context condensation, memory provider or MCP client yet.

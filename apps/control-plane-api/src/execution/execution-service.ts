@@ -19,6 +19,8 @@ import type {
   TaskSpec,
   Thread,
   ThreadDetail,
+  AgentManifestV2Payload,
+  ArtifactRegistration,
   WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import {
@@ -100,6 +102,15 @@ export interface ExecutionServiceOptions {
    * that only made sense while it ran (credential leases, ADR 0031) ends with it.
    */
   onRunStopped?: (organizationId: string, runId: string, status: AgentRunStatus) => Promise<void>;
+  /**
+   * Called in the same transaction before an artifact is registered, so a reference to the
+   * control plane's artifact store is accepted only for bytes it holds (ADR 0033).
+   */
+  registerArtifact?: (
+    organizationId: string,
+    runId: string,
+    artifact: ArtifactRegistration,
+  ) => Promise<void>;
   /** Append an agent message to a conversation (caller's transaction). */
   conversationMessage?: (
     organizationId: string,
@@ -522,6 +533,7 @@ export class ExecutionService {
       const artifact = envelope.payload.artifact;
       if (await this.db.get('SELECT 1 FROM agent_artifacts WHERE id=?', artifact.id))
         throw new ExecutionError(409, 'ARTIFACT_ALREADY_EXISTS');
+      await this.options.registerArtifact?.(organizationId, run.id, artifact);
       await this.db.run(
         `INSERT INTO agent_artifacts (id,organization_id,thread_id,run_id,step_id,artifact_type,media_type,name,
          storage_reference,checksum_sha256,size_bytes,retention_policy,created_at,created_by)
@@ -592,6 +604,68 @@ export class ExecutionService {
       event: this.mapEvent((await this.db.get('SELECT * FROM agent_events WHERE id=?', id))!),
       duplicate: false,
     };
+  }
+
+  /**
+   * What a checkpoint of this run must be bound to (ADR 0032): the run's identity and state,
+   * and the manifest it runs under, which must still be the agent's current one.
+   */
+  runBinding(
+    organizationId: string,
+    runId: string,
+  ): Promise<{
+    threadId: string;
+    employeeId: string;
+    agentId: string;
+    status: AgentRunStatus;
+    runtimeSequence: number;
+    workflow: string | null;
+    manifestId: string;
+    manifestDigest: string;
+    /** The model selection the signed manifest pins. */
+    model: { provider: string; credentialMode: string };
+  }> {
+    return this.db.tenant(organizationId, async () => {
+      const run = await this.runRow(organizationId, runId);
+      if (!run.manifest || run.manifest.apiVersion !== 'agents-foundry/v2')
+        throw new ExecutionError(409, 'MANIFEST_INVALID');
+      let manifest: AnySignedAgentManifest;
+      try {
+        manifest = await this.loadManifest(run.agentId, organizationId, run.employeeId);
+      } catch {
+        throw new ExecutionError(409, 'MANIFEST_INVALID');
+      }
+      if (manifestSubject(manifest.payload).manifestId !== run.manifest.manifestId)
+        throw new ExecutionError(409, 'MANIFEST_INVALID');
+      return {
+        threadId: run.threadId,
+        employeeId: run.employeeId,
+        agentId: run.agentId,
+        status: run.status,
+        runtimeSequence: run.runtimeSequence,
+        workflow: run.task.workflow ?? null,
+        manifestId: run.manifest.manifestId,
+        manifestDigest: sha256(manifest.payload),
+        model: {
+          provider: (manifest.payload as AgentManifestV2Payload).model.provider,
+          credentialMode: (manifest.payload as AgentManifestV2Payload).model.credentialMode,
+        },
+      };
+    });
+  }
+
+  /** Steps of a run that are still in progress, oldest first. */
+  openSteps(organizationId: string, runId: string): Promise<string[]> {
+    return this.db.tenant(organizationId, async () =>
+      (
+        await this.db.all<{ id: string }>(
+          `SELECT id FROM agent_run_steps WHERE run_id=? AND organization_id=? AND status='RUNNING'
+           ORDER BY sequence`,
+          runId,
+          organizationId,
+        )
+      ).map((step) => step.id),
+    );
   }
 
   /** Build the `run.submit` command for a queued run. Only v2 manifests can be executed. */
@@ -674,7 +748,12 @@ export class ExecutionService {
         actor.organizationId,
       );
       const artifacts = await this.db.all(
-        'SELECT * FROM agent_artifacts WHERE run_id=? AND organization_id=? ORDER BY created_at, seq',
+        `SELECT a.*, o.state AS object_state, o.expires_at AS object_expires_at,
+          o.deleted_at AS object_deleted_at, o.deletion_reason AS object_deletion_reason
+         FROM agent_artifacts a
+         LEFT JOIN agent_artifact_objects o
+          ON o.artifact_id=a.id AND o.organization_id=a.organization_id
+         WHERE a.run_id=? AND a.organization_id=? ORDER BY a.created_at, a.seq`,
         run.id,
         actor.organizationId,
       );
@@ -692,6 +771,32 @@ export class ExecutionService {
           ...(row['expires_at'] ? { expiresAt: String(row['expires_at']) } : {}),
         })),
         artifacts: artifacts.map((row) => this.mapArtifact(row)),
+      };
+    });
+  }
+
+  /** An artifact of a run `actor` may read: the owning employee or an administrator. */
+  readableArtifact(
+    actor: Actor,
+    artifactId: string,
+  ): Promise<{ id: string; runId: string; name: string; mediaType: string }> {
+    return this.db.tenant(actor.organizationId, async () => {
+      const row = await this.db.get(
+        'SELECT id, run_id, name, media_type FROM agent_artifacts WHERE id=? AND organization_id=?',
+        artifactId,
+        actor.organizationId,
+      );
+      if (!row) throw new ExecutionError(404, 'ARTIFACT_NOT_FOUND');
+      try {
+        await this.readableRun(actor, String(row['run_id']), true);
+      } catch {
+        throw new ExecutionError(404, 'ARTIFACT_NOT_FOUND');
+      }
+      return {
+        id: String(row['id']),
+        runId: String(row['run_id']),
+        name: String(row['name']),
+        mediaType: String(row['media_type']),
       };
     });
   }
@@ -1081,6 +1186,19 @@ export class ExecutionService {
       retentionPolicy: String(row['retention_policy']) as ArtifactSummary['retentionPolicy'],
       createdAt: String(row['created_at']),
       createdBy: String(row['created_by']),
+      content: {
+        state:
+          row['object_state'] === 'REGISTERED'
+            ? 'AVAILABLE'
+            : row['object_state'] === 'DELETED'
+              ? 'DELETED'
+              : 'UNMANAGED',
+        expiresAt: row['object_expires_at'] ? String(row['object_expires_at']) : null,
+        deletedAt: row['object_deleted_at'] ? String(row['object_deleted_at']) : null,
+        deletionReason: row['object_deletion_reason']
+          ? String(row['object_deletion_reason'])
+          : null,
+      },
     };
   }
 }

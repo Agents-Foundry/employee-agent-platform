@@ -2,10 +2,13 @@
 // (control plane, runtimes); Angular clients import the pure types instead.
 import { z } from 'zod';
 import {
+  MAX_ARTIFACT_UPLOAD_BYTES,
   artifactRetentionPolicies,
   artifactStorageReferencePattern,
   artifactTypes,
   type ArtifactRegistration,
+  type ArtifactUpload,
+  type ArtifactUploadDescriptor,
 } from '../../artifacts.js';
 import { workflowDefinitionSchema } from '../../catalog-schemas.js';
 import {
@@ -32,7 +35,16 @@ import type {
   RuntimeActionExecuteRequest,
   RuntimeActionExecution,
   RuntimeActionRequest,
+  RuntimeArtifactUploadRequest,
+  RuntimeCheckpointAck,
+  RuntimeCheckpointLoadRequest,
+  RuntimeCheckpointRecord,
+  RuntimeCheckpointSaveRequest,
   RuntimeClaimResponse,
+  RuntimeHeartbeat,
+  RuntimeHeartbeatRequest,
+  RuntimeModelCredential,
+  RuntimeModelCredentialRequest,
   RuntimeModelReservation,
   RuntimeModelReservationRequest,
   RuntimeModelSettlementRequest,
@@ -51,6 +63,10 @@ export class RuntimeProtocolError extends Error {
       | 'RUNTIME_COMMAND_INVALID'
       | 'RUNTIME_ACTION_INVALID'
       | 'RUNTIME_MODEL_USAGE_INVALID'
+      | 'RUNTIME_HEARTBEAT_INVALID'
+      | 'RUNTIME_CHECKPOINT_INVALID'
+      | 'RUNTIME_CHECKPOINT_TOO_LARGE'
+      | 'RUNTIME_ARTIFACT_INVALID'
       | 'RUNTIME_RESPONSE_INVALID'
       | 'MANIFEST_INVALID',
     readonly issues: readonly string[] = [],
@@ -396,6 +412,15 @@ const commandSchema = z.discriminatedUnion('type', [
       reason: z.string().trim().min(1).max(500),
     })
     .strict(),
+  z
+    .object({
+      ...commandBase,
+      type: z.literal('run.recover'),
+      runId: uuid,
+      reason: z.literal('LEASE_EXPIRED'),
+      openStepIds: z.array(uuid).max(200),
+    })
+    .strict(),
 ]);
 
 /** Parse one control plane → runtime command (used by runtimes and by control-plane tests). */
@@ -595,5 +620,204 @@ export function parseRuntimeModelSettlementRequest(input: unknown): RuntimeModel
   const parsed = settlementRequestSchema.safeParse(input);
   if (!parsed.success)
     throw new RuntimeProtocolError('RUNTIME_MODEL_USAGE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+// Durable recovery (ADR 0032).
+const protocolOf = (input: unknown) => (input as { protocol?: unknown } | null)?.protocol;
+
+const heartbeatRequestSchema = z
+  .object({ protocol: z.literal(RUNTIME_PROTOCOL_V1), runIds: z.array(uuid).max(256) })
+  .strict();
+
+export function parseRuntimeHeartbeatRequest(input: unknown): RuntimeHeartbeatRequest {
+  if (protocolOf(input) !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = heartbeatRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_HEARTBEAT_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const heartbeatSchema = z
+  .object({ held: z.array(uuid).max(256), lost: z.array(uuid).max(256) })
+  .strict();
+
+export function parseRuntimeHeartbeat(input: unknown): RuntimeHeartbeat {
+  const parsed = heartbeatSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+/** Upper bound for one checkpoint body, in UTF-8 bytes. */
+export const MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024;
+
+const checkpointBinding = z
+  .object({
+    manifestId: recordId,
+    manifestDigest: digest,
+    workflow: slug.nullable(),
+    stepId: uuid.nullable(),
+    approvalId: uuid.nullable(),
+    kernelId: slug,
+    runtimeSequence: z.number().int().min(0).max(1_000_000),
+  })
+  .strict();
+const checkpointVersion = z.number().int().min(1).max(1_000_000);
+const checkpointBody = z.string().min(2);
+
+const checkpointSaveSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    correlation: correlationSchema,
+    sessionId: uuid,
+    version: checkpointVersion,
+    binding: checkpointBinding,
+    sha256: digest,
+    body: checkpointBody,
+  })
+  .strict();
+
+export function parseRuntimeCheckpointSaveRequest(input: unknown): RuntimeCheckpointSaveRequest {
+  if (protocolOf(input) !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = checkpointSaveSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_CHECKPOINT_INVALID', issues(parsed.error));
+  if (Buffer.byteLength(parsed.data.body, 'utf8') > MAX_CHECKPOINT_BYTES)
+    throw new RuntimeProtocolError('RUNTIME_CHECKPOINT_TOO_LARGE');
+  return parsed.data;
+}
+
+const checkpointLoadSchema = z
+  .object({ protocol: z.literal(RUNTIME_PROTOCOL_V1), correlation: correlationSchema })
+  .strict();
+
+export function parseRuntimeCheckpointLoadRequest(input: unknown): RuntimeCheckpointLoadRequest {
+  if (protocolOf(input) !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = checkpointLoadSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_CHECKPOINT_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const checkpointAckSchema = z.object({ runId: uuid, version: checkpointVersion }).strict();
+
+export function parseRuntimeCheckpointAck(input: unknown): RuntimeCheckpointAck {
+  const parsed = checkpointAckSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const checkpointRecordSchema = z
+  .object({
+    runId: uuid,
+    version: checkpointVersion,
+    binding: checkpointBinding,
+    sha256: digest,
+    body: checkpointBody,
+  })
+  .strict();
+
+/** Runtime-side validation of a loaded checkpoint; anything malformed is treated as corrupt. */
+export function parseRuntimeCheckpointRecord(input: unknown): RuntimeCheckpointRecord {
+  const parsed = checkpointRecordSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+// Model credentials (ADR 0034).
+const modelCredentialRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    correlation: correlationSchema,
+    provider: z.string().regex(/^[a-zA-Z0-9._-]{1,80}$/),
+  })
+  .strict();
+
+export function parseRuntimeModelCredentialRequest(input: unknown): RuntimeModelCredentialRequest {
+  if (protocolOf(input) !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = modelCredentialRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_MODEL_USAGE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const modelCredentialSchema = z
+  .object({
+    provider: z.string().regex(/^[a-zA-Z0-9._-]{1,80}$/),
+    apiKey: z.string().min(1).max(8192),
+  })
+  .strict();
+
+/** Runtime-side validation. Errors never include the response. */
+export function parseRuntimeModelCredential(input: unknown): RuntimeModelCredential {
+  const parsed = modelCredentialSchema.safeParse(input);
+  if (!parsed.success) throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID');
+  return parsed.data;
+}
+
+// Artifact uploads (ADR 0033).
+const artifactName = z
+  .string()
+  .min(1)
+  .max(120)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+  .refine((value) => !value.includes('..'), 'No dot segments.');
+
+export const artifactUploadDescriptorSchema = z
+  .object({
+    id: uuid,
+    mediaType: z.string().regex(/^[a-z0-9!#$&^_.+-]{1,64}\/[a-z0-9!#$&^_.+-]{1,64}$/i),
+    name: artifactName,
+    checksum: z.object({ algorithm: z.literal('sha256'), value: digest }).strict(),
+    sizeBytes: z.number().int().min(0).max(MAX_ARTIFACT_UPLOAD_BYTES),
+    retentionPolicy: z.enum(artifactRetentionPolicies),
+  })
+  .strict() satisfies z.ZodType<ArtifactUploadDescriptor>;
+
+/** Base64 of at most `MAX_ARTIFACT_UPLOAD_BYTES` bytes. */
+export const artifactContentSchema = z
+  .string()
+  .max(Math.ceil(MAX_ARTIFACT_UPLOAD_BYTES / 3) * 4)
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+
+const artifactUploadRequestSchema = z
+  .object({
+    protocol: z.literal(RUNTIME_PROTOCOL_V1),
+    correlation: correlationSchema.extend({ stepId: uuid }).strict(),
+    artifact: artifactUploadDescriptorSchema,
+    content: artifactContentSchema,
+  })
+  .strict();
+
+export function parseRuntimeArtifactUploadRequest(input: unknown): RuntimeArtifactUploadRequest {
+  if (protocolOf(input) !== RUNTIME_PROTOCOL_V1)
+    throw new RuntimeProtocolError('PROTOCOL_VERSION_UNSUPPORTED');
+  const parsed = artifactUploadRequestSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_ARTIFACT_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const artifactUploadSchema = z
+  .object({
+    artifactId: uuid,
+    storageReference: z.string().max(600).regex(artifactStorageReferencePattern),
+    checksum: z.object({ algorithm: z.literal('sha256'), value: digest }).strict(),
+    sizeBytes: z.number().int().min(0).max(MAX_ARTIFACT_UPLOAD_BYTES),
+  })
+  .strict();
+
+/** Runtime-side validation of an upload result. */
+export function parseArtifactUpload(input: unknown): ArtifactUpload {
+  const parsed = artifactUploadSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
   return parsed.data;
 }

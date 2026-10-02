@@ -2,6 +2,7 @@ import { Router, type Express } from 'express';
 import { z } from 'zod';
 import type { AgentRun, AnySignedAgentManifest } from '@agents-foundry/contracts';
 import { taskSpecSchema } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
+import type { ArtifactService } from '../artifacts/artifact-service.js';
 import { ExecutionError, type ExecutionService } from './execution-service.js';
 
 const eventQuery = z
@@ -31,6 +32,7 @@ export interface ExecutionRouteOptions {
     organizationId: string,
     employeeId: string,
   ) => Promise<AnySignedAgentManifest>;
+  artifacts: ArtifactService;
   /** The employee's own conversation; throws CONVERSATION_NOT_FOUND otherwise. */
   loadConversation: (
     conversationId: string,
@@ -112,6 +114,31 @@ export function configureExecutionRoutes(
         await service.cancelOwnRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')),
       ),
     );
+  });
+  // ADR 0033: content is fetched with a short-lived permission issued to the signed-in person.
+  router.post('/artifacts/:id/retrievals', async (req, res) => {
+    res
+      .status(201)
+      .json(
+        await options.artifacts.requestRetrieval(
+          res.locals['actor'],
+          id(req.params['id'], 'ARTIFACT_NOT_FOUND'),
+        ),
+      );
+  });
+  router.get('/artifact-content/:token', async (req, res) => {
+    const token = String(req.params['token'] ?? '');
+    if (token.length > 2048) throw new ExecutionError(403, 'ARTIFACT_RETRIEVAL_INVALID');
+    const artifact = await options.artifacts.retrieve(res.locals['actor'], token);
+    // Always a download, never rendered in the control plane's origin.
+    res.setHeader('Content-Type', artifact.mediaType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${artifact.name.replace(/[^A-Za-z0-9._-]/g, '_')}"`,
+    );
+    res.setHeader('Content-Length', String(artifact.content.byteLength));
+    res.status(200).end(artifact.content);
   });
   app.use('/api/execution/v1', router);
 }

@@ -145,3 +145,16 @@ export interface CredentialReleaseResponse {
   leaseId: string;
   status: CredentialLeaseStatus;
 }
+
+/**
+ * Which secret holds an organization's key for a model provider (ADR 0034). A reference only:
+ * no API ever returns the key.
+ */
+export interface ModelCredentialBinding {
+  provider: string;
+  secretRef: string;
+  status: 'ACTIVE' | 'DISABLED';
+  version: number;
+  updatedAt: string;
+  updatedBy: string;
+}

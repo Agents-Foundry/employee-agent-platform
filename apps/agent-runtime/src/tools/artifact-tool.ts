@@ -68,6 +68,9 @@ export class ArtifactTool implements RuntimeTool<ArtifactInput> {
       artifactId: id,
       name: input.name,
       content,
+      correlation: context.correlation,
+      mediaType: input.mediaType,
+      retentionPolicy: 'STANDARD_30D',
     });
     await context.registerArtifact({
       id,

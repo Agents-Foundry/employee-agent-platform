@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,7 +7,13 @@ import {
   runtimeAuthHeaders,
   runtimeSigningInput,
 } from '../../../packages/contracts/src/runtime/v1/transport.js';
-import { FileCheckpointStore } from '../src/checkpoints.js';
+import {
+  CheckpointConflict,
+  CheckpointInvalid,
+  FileCheckpointStore,
+  MemoryCheckpointStore,
+  type RunCheckpoint,
+} from '../src/checkpoints.js';
 import { ControlPlaneError, RuntimeFailure } from '../src/errors.js';
 import { AnthropicProvider } from '../src/models/anthropic-provider.js';
 import { LocalArtifactStore } from '../src/tools/artifact-store.js';
@@ -211,8 +217,9 @@ describe('runtime local state', () => {
   it('round-trips checkpoints atomically and rejects non-UUID run ids', async () => {
     const store = new FileCheckpointStore(root);
     const subject = correlation();
-    const checkpoint = {
-      version: 1 as const,
+    const checkpoint: RunCheckpoint = {
+      format: 2,
+      version: 1,
       runId: subject.runId,
       sessionId: subject.threadId,
       correlation: subject,
@@ -221,14 +228,71 @@ describe('runtime local state', () => {
       manifest: signedManifest(subject),
       kernelId: 'native-v1',
       kernelState: { any: 'thing' },
+      stepId: null,
       approvalId: subject.threadId,
+      runtimeSequence: 3,
     };
     await store.save(checkpoint);
-    expect(await store.load(subject.runId)).toEqual(checkpoint);
+    expect(await store.load(subject)).toEqual(checkpoint);
     expect(await readdir(root)).toEqual([`${subject.runId}.json`]);
     await store.delete(subject.runId);
-    expect(await store.load(subject.runId)).toBeNull();
-    await expect(store.load('../../etc/passwd')).rejects.toThrow('RUN_ID_INVALID');
+    expect(await store.load(subject)).toBeNull();
+    await expect(store.load({ ...subject, runId: '../../etc/passwd' })).rejects.toThrow(
+      'RUN_ID_INVALID',
+    );
+  });
+
+  it('orders checkpoint versions and fails closed on altered or foreign checkpoints', async () => {
+    const subject = correlation();
+    const first: RunCheckpoint = {
+      format: 2,
+      version: 1,
+      runId: subject.runId,
+      sessionId: subject.threadId,
+      correlation: subject,
+      task: { objective: 'x', inputs: {} },
+      runtimeProfile: 'standard-agent',
+      manifest: signedManifest(subject),
+      kernelId: 'native-v1',
+      kernelState: {},
+      stepId: null,
+      approvalId: null,
+      runtimeSequence: 0,
+    };
+    for (const store of [new FileCheckpointStore(root), new MemoryCheckpointStore()]) {
+      // A version that is not the next one is a second writer.
+      await expect(store.save({ ...first, version: 2 })).rejects.toBeInstanceOf(CheckpointConflict);
+      await store.save(first);
+      await expect(store.save(first)).rejects.toBeInstanceOf(CheckpointConflict);
+      await store.save({ ...first, version: 2 });
+      expect((await store.load(subject))?.version).toBe(2);
+      // Another run, tenant or employee cannot read it as its own.
+      await expect(store.load({ ...subject, organizationId: 'org-other' })).rejects.toBeInstanceOf(
+        CheckpointInvalid,
+      );
+      await expect(store.load({ ...subject, employeeId: 'emp-other' })).rejects.toBeInstanceOf(
+        CheckpointInvalid,
+      );
+    }
+    const path = join(root, `${subject.runId}.json`);
+    const stored = JSON.parse(await readFile(path, 'utf8')) as { sha256: string; body: string };
+    await writeFile(path, JSON.stringify({ ...stored, body: stored.body.replace('"x"', '"y"') }));
+    await expect(new FileCheckpointStore(root).load(subject)).rejects.toBeInstanceOf(
+      CheckpointInvalid,
+    );
+    await writeFile(path, '{not json');
+    await expect(new FileCheckpointStore(root).load(subject)).rejects.toBeInstanceOf(
+      CheckpointInvalid,
+    );
+    // A well-formed body of the wrong shape (an older format) is refused as well.
+    const body = JSON.stringify({ version: 1, runId: subject.runId });
+    await writeFile(
+      path,
+      JSON.stringify({ sha256: createHash('sha256').update(body).digest('hex'), body }),
+    );
+    await expect(new FileCheckpointStore(root).load(subject)).rejects.toBeInstanceOf(
+      CheckpointInvalid,
+    );
   });
 });
 

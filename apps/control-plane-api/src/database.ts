@@ -39,6 +39,9 @@ import { ActionGateway } from './actions/action-gateway.js';
 import { ActionPolicyService } from './actions/action-policy-service.js';
 import { ConnectorService } from './actions/connector-service.js';
 import { FileSecretStore, type SecretResolver } from './actions/secrets.js';
+import { ArtifactService } from './artifacts/artifact-service.js';
+import { ModelCredentialService } from './secrets/model-credentials.js';
+import { artifactStoreFromEnvironment, type ArtifactStore } from './artifacts/artifact-store.js';
 import { CatalogService, agentLabel } from './catalog/catalog-service.js';
 import { CredentialBroker, type CredentialBrokerOptions } from './credentials/credential-broker.js';
 import { SourceControlConnectionService } from './credentials/source-control-connections.js';
@@ -114,6 +117,13 @@ export interface ControlPlaneDatabaseOptions {
   secretProvider?: SecretProvider;
   /** ADR 0031: repository credential lease options (tests). */
   credentialBroker?: CredentialBrokerOptions;
+  /** ADR 0033: where artifact bytes are kept; defaults to `ARTIFACT_STORE`. */
+  artifactStore?: ArtifactStore;
+  /**
+   * ADR 0033: refuse artifacts whose bytes a runtime kept on its own host
+   * (`ARTIFACTS_REQUIRE_MANAGED`). Off by default so local runtimes keep working.
+   */
+  requireManagedArtifacts?: boolean;
 }
 
 /** PostgreSQL connection settings from the environment (ADR 0018). */
@@ -150,6 +160,8 @@ export class ControlPlaneDatabase {
   readonly secretBroker: SecretBroker;
   readonly sourceControl: SourceControlConnectionService;
   readonly credentials: CredentialBroker;
+  readonly artifacts: ArtifactService;
+  readonly modelCredentials: ModelCredentialService;
 
   /**
    * Connects to PostgreSQL, checks (or applies) the schema, registers the catalog and seeds
@@ -215,7 +227,10 @@ export class ControlPlaneDatabase {
         resolveWorkflow: (manifest, workflowId) => this.pinnedWorkflow(manifest, workflowId),
         onRunStopped: async (organizationId, runId, status) => {
           await this.credentials.revokeForRun(organizationId, runId, `RUN_${status}`);
+          await this.runtimeTransport.checkpoints.deleteForRun(organizationId, runId);
         },
+        registerArtifact: (organizationId, runId, artifact) =>
+          this.artifacts.registered(organizationId, runId, artifact),
         conversationMessage: async (organizationId, conversationId, content) => {
           await this.addMessage(conversationId, 'AGENT', content, organizationId);
         },
@@ -270,11 +285,34 @@ export class ControlPlaneDatabase {
     this.modelSpending = new ModelSpendingService(db, this.structure, audit, (org, alert, nowMs) =>
       this.alertWebhooks.enqueueAlert(org, alert, nowMs),
     );
+    this.modelCredentials = new ModelCredentialService(
+      db,
+      this.structure,
+      this.secretBroker,
+      audit,
+    );
     this.runtimeTransport = new RuntimeTransportService(db, this.execution, {
       gateway: this.actions,
       audit,
       spending: this.modelSpending,
+      modelCredentials: this.modelCredentials,
     });
+    this.artifacts = new ArtifactService(
+      db,
+      options.artifactStore ?? artifactStoreFromEnvironment(),
+      {
+        audit,
+        verifyGrant: (grant) => this.signer.verifyExecutionGrant(grant),
+        signRetrieval: (payload) => this.signer.signArtifactRetrieval(payload),
+        verifyRetrieval: (payload, signature) =>
+          this.signer.verifyArtifactRetrieval(payload, signature),
+        readableArtifact: (actor, artifactId) => this.execution.readableArtifact(actor, artifactId),
+        authorizeAgentUpload: (runtime, correlation) =>
+          this.runtimeTransport.authorizeStep(runtime, correlation),
+        requireManaged:
+          options.requireManagedArtifacts ?? process.env['ARTIFACTS_REQUIRE_MANAGED'] === 'true',
+      },
+    );
   }
 
   private get db(): PgStore {

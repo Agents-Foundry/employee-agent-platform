@@ -25,4 +25,16 @@ single-use credential leases that only an execution runtime can redeem; the agen
 the model never receive a credential
 ([ADR 0031](adr/0031-secret-and-credential-brokering.md)).
 
+Organization model keys are `secret://` references too. The secret broker resolves one only
+for the runtime holding a running run whose signed manifest names that provider; employee-held
+keys never pass through the control plane
+([ADR 0034](adr/0034-organization-managed-model-credentials.md)).
+
+Run checkpoints and artifact metadata are tenant-scoped under forced row-level security.
+Checkpoints never contain a credential and are deleted when the run ends
+([ADR 0032](adr/0032-durable-checkpoints-and-run-recovery.md)). Artifact bytes live in an
+artifact store only the control plane can reach, are verified against their SHA-256 on upload,
+registration and retrieval, and are downloaded through a 60-second permission bound to the
+signed-in person ([ADR 0033](adr/0033-durable-artifact-storage.md)).
+
 `llm_key_bindings.secret_ref` is an opaque pointer such as a cloud secret-manager resource name. Provider keys must be created, rotated, and read only through the vault integration. The API must never return secret material to either Angular application.

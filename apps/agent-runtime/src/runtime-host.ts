@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  RunRecoverCommand,
   RunResumeCommand,
   RunSubmitCommand,
   RuntimeCorrelation,
@@ -12,11 +13,16 @@ import type {
   WorkflowDefinition,
 } from '@agents-foundry/contracts';
 import { RUNTIME_PROTOCOL_V1 } from '../../../packages/contracts/src/runtime/v1/protocol.js';
-import type { CheckpointStore } from './checkpoints.js';
+import {
+  CheckpointConflict,
+  CheckpointInvalid,
+  type CheckpointStore,
+  type RunCheckpoint,
+} from './checkpoints.js';
 import { ControlPlaneError, RuntimeFailure, asRuntimeFailure } from './errors.js';
 import type { AgentKernel, KernelContext, KernelOutcome } from './kernel/agent-kernel.js';
 import type { ManifestVerifier } from './manifest-verifier.js';
-import type { ModelGateway, ModelUsageMeter } from './models/model-gateway.js';
+import type { CredentialBroker, ModelGateway, ModelUsageMeter } from './models/model-gateway.js';
 import type { ArtifactStore } from './tools/artifact-store.js';
 import type { ToolRegistry } from './tools/runtime-tool.js';
 import type { ControlPlanePort } from './transport/control-plane-client.js';
@@ -35,6 +41,19 @@ export const consoleLogger: RuntimeLogger = {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** What stays the same for a run across its checkpoints. */
+interface RunFrame {
+  sessionId: string;
+  task: TaskSpec;
+  workflow?: WorkflowDefinition;
+  runtimeProfile: string;
+  manifest: SignedAgentManifestV2;
+  /** Version of the last checkpoint saved or loaded; the next save is one more. */
+  checkpointVersion: number;
+  /** Credentials this process resolved for the run. A checkpoint containing one is refused. */
+  secrets: Set<string>;
+}
 
 /** Assigns contiguous sequence numbers and delivers events in order, retrying transient errors. */
 class RunEvents {
@@ -83,8 +102,15 @@ export interface RuntimeHostOptions {
   tools: ToolRegistry;
   artifacts: ArtifactStore;
   checkpoints: CheckpointStore;
+  /**
+   * Model credentials for one run (ADR 0034). When absent the gateway's own broker is used,
+   * which the host cannot watch for leaks.
+   */
+  modelCredentials?: (correlation: RuntimeCorrelation) => CredentialBroker;
   concurrency?: number;
   pollIntervalMs?: number;
+  /** How often the leases of the runs being executed are renewed. */
+  heartbeatIntervalMs?: number;
   logger?: RuntimeLogger;
 }
 
@@ -120,8 +146,8 @@ export class RuntimeHost {
     const controller = new AbortController();
     const done = (
       command.type === 'run.submit'
-        ? this.submit(command, claim.lease, controller.signal)
-        : this.resume(command, claim.lease, controller.signal)
+        ? this.submit(command, claim.lease, controller)
+        : this.continue(command, claim.lease, controller)
     )
       .catch((error: unknown) => this.onRunError(runId, error))
       .finally(() => this.active.delete(runId));
@@ -134,18 +160,48 @@ export class RuntimeHost {
     while (this.active.size) await Promise.all([...this.active.values()].map((run) => run.done));
   }
 
+  /**
+   * Renew the leases of the runs this host is executing, and stop any the control plane says
+   * it no longer holds: another runtime has taken it over (ADR 0032).
+   */
+  async heartbeatOnce(): Promise<void> {
+    const runIds = [...this.active.keys()];
+    if (!runIds.length) return;
+    const { lost } = await this.options.controlPlane.heartbeat({
+      protocol: RUNTIME_PROTOCOL_V1,
+      runIds,
+    });
+    for (const runId of lost) {
+      this.active
+        .get(runId)
+        ?.controller.abort(new RuntimeFailure('RUNTIME_LEASE_LOST', 'The run was taken over.'));
+      this.logger.warn('run lease lost', { runId });
+    }
+  }
+
   async start(): Promise<void> {
     this.stopped = false;
-    while (!this.stopped) {
-      let received = false;
-      try {
-        received = await this.pollOnce();
-      } catch (error) {
-        this.logger.warn('claim failed', {
-          code: error instanceof ControlPlaneError ? error.code : 'CLAIM_FAILED',
-        });
+    const heartbeat = setInterval(() => {
+      void this.heartbeatOnce().catch((error: unknown) =>
+        this.logger.warn('heartbeat failed', {
+          code: error instanceof ControlPlaneError ? error.code : 'HEARTBEAT_FAILED',
+        }),
+      );
+    }, this.options.heartbeatIntervalMs ?? 30_000);
+    try {
+      while (!this.stopped) {
+        let received = false;
+        try {
+          received = await this.pollOnce();
+        } catch (error) {
+          this.logger.warn('claim failed', {
+            code: error instanceof ControlPlaneError ? error.code : 'CLAIM_FAILED',
+          });
+        }
+        if (!received) await sleep(this.options.pollIntervalMs ?? 2000);
       }
-      if (!received) await sleep(this.options.pollIntervalMs ?? 2000);
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 
@@ -157,8 +213,9 @@ export class RuntimeHost {
   private async submit(
     command: RunSubmitCommand,
     lease: RuntimeLease,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<void> {
+    const { signal } = controller;
     const correlation = command.correlation;
     const events = new RunEvents(this.options.controlPlane, correlation, lease.runtimeSequence);
     let manifest: SignedAgentManifestV2 | null = null;
@@ -181,59 +238,172 @@ export class RuntimeHost {
       return;
     }
     const { task, workflow } = command.run;
-    const context = this.context(correlation, { task, workflow }, manifest, events, signal);
-    const outcome = await this.options.kernel.start(context);
-    await this.finish(events, outcome, signal, {
+    const frame: RunFrame = {
       sessionId: lease.sessionId,
       task,
       ...(workflow ? { workflow } : {}),
       runtimeProfile: command.run.runtimeProfile,
       manifest,
-    });
+      checkpointVersion: 0,
+      secrets: new Set(),
+    };
+    const context = this.context(events, frame, controller);
+    const outcome = await this.options.kernel.start(context);
+    await this.finish(events, outcome, controller, frame);
   }
 
-  private async resume(
-    command: RunResumeCommand,
+  /**
+   * Continue a run from its latest checkpoint: after an approval (`run.resume`), or because
+   * the runtime that held it stopped (`run.recover`). The checkpoint may have been written by
+   * another runtime; it is used only if it verifies against the run and the pinned manifest key.
+   */
+  private async continue(
+    command: RunResumeCommand | RunRecoverCommand,
     lease: RuntimeLease,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<void> {
+    const { signal } = controller;
     const correlation = command.correlation;
     const events = new RunEvents(this.options.controlPlane, correlation, lease.runtimeSequence);
-    const checkpoint = await this.options.checkpoints.load(command.runId);
-    await events.emit('run.resumed', { approvalId: command.approval.approvalId });
-    this.logger.info('run resumed', { runId: command.runId });
+    const approval = command.type === 'run.resume' ? command.approval : null;
+    let checkpoint: RunCheckpoint | null = null;
     let manifest: SignedAgentManifestV2 | null = null;
     let failure = new RuntimeFailure(
       'RUNTIME_CHECKPOINT_MISSING',
-      'This runtime has no checkpoint for the paused run.',
+      'There is no checkpoint to continue the run from.',
     );
-    if (checkpoint && checkpoint.approvalId === command.approval.approvalId) {
-      try {
-        manifest = this.options.verifier.verify(checkpoint.manifest, {
-          correlation,
-          runtimeProfile: checkpoint.runtimeProfile,
-        });
-      } catch (error) {
-        failure = asRuntimeFailure(error);
-      }
+    try {
+      checkpoint = await this.options.checkpoints.load(correlation);
+    } catch (error) {
+      if (!(error instanceof CheckpointInvalid)) throw error;
+      failure = new RuntimeFailure(
+        'RUNTIME_CHECKPOINT_INVALID',
+        'The run checkpoint could not be verified.',
+      );
     }
-    if (!checkpoint || !manifest || checkpoint.kernelId !== this.options.kernel.id) {
+    if (approval) {
+      await events.emit('run.resumed', { approvalId: approval.approvalId });
+      this.logger.info('run resumed', { runId: command.runId });
+    } else this.logger.info('run recovered', { runId: command.runId });
+    if (checkpoint) {
+      if (
+        checkpoint.kernelId !== this.options.kernel.id ||
+        checkpoint.runtimeSequence > lease.runtimeSequence ||
+        // A recorded pause must be the one this approval answers.
+        (approval && checkpoint.approvalId && checkpoint.approvalId !== approval.approvalId)
+      )
+        failure = new RuntimeFailure(
+          'RUNTIME_CHECKPOINT_INVALID',
+          'The run checkpoint does not match the run.',
+        );
+      else
+        try {
+          manifest = this.options.verifier.verify(checkpoint.manifest, {
+            correlation,
+            runtimeProfile: checkpoint.runtimeProfile,
+          });
+        } catch (error) {
+          failure = asRuntimeFailure(error);
+        }
+    }
+    if (!checkpoint || !manifest) {
       await events.emit('run.failed', { error: failure.toExecutionError(), retryable: false });
       await this.options.checkpoints.delete(command.runId);
       return;
     }
-    const context = this.context(
-      correlation,
-      { task: checkpoint.task, workflow: checkpoint.workflow },
+    const frame: RunFrame = {
+      sessionId: lease.sessionId,
+      task: checkpoint.task,
+      ...(checkpoint.workflow ? { workflow: checkpoint.workflow } : {}),
+      runtimeProfile: checkpoint.runtimeProfile,
       manifest,
-      events,
-      signal,
+      checkpointVersion: checkpoint.version,
+      secrets: new Set(),
+    };
+    let recovery;
+    if (command.type === 'run.recover') {
+      // Steps the previous runtime left open and the checkpoint does not account for.
+      for (const stepId of command.openStepIds)
+        if (stepId !== checkpoint.stepId)
+          await events.emit(
+            'step.failed',
+            {
+              error: {
+                code: 'RUNTIME_RECOVERED',
+                message: 'The runtime stopped during this step; the run continued elsewhere.',
+              },
+            },
+            stepId,
+          );
+      recovery = { openStepIds: new Set(command.openStepIds) };
+    }
+    const context = this.context(events, frame, controller);
+    const outcome = await this.options.kernel.resume(
+      context,
+      checkpoint.kernelState,
+      approval ? { approvalId: approval.approvalId, decision: approval.decision } : null,
+      recovery,
     );
-    const outcome = await this.options.kernel.resume(context, checkpoint.kernelState, {
-      approvalId: command.approval.approvalId,
-      decision: command.approval.decision,
-    });
-    await this.finish(events, outcome, signal, { ...checkpoint, sessionId: lease.sessionId });
+    await this.finish(events, outcome, controller, frame);
+  }
+
+  /**
+   * Save the run's next checkpoint. A checkpoint that holds a credential is never written. If
+   * another runtime has advanced the run, this one stops working on it.
+   */
+  private async checkpoint(
+    events: RunEvents,
+    frame: RunFrame,
+    controller: AbortController,
+    kernelState: unknown,
+    stepId: string | null,
+    approvalId: string | null,
+  ): Promise<void> {
+    const checkpoint: RunCheckpoint = {
+      format: 2,
+      version: frame.checkpointVersion + 1,
+      runId: events.correlation.runId,
+      sessionId: frame.sessionId,
+      correlation: events.correlation,
+      task: frame.task,
+      ...(frame.workflow ? { workflow: frame.workflow } : {}),
+      runtimeProfile: frame.runtimeProfile,
+      manifest: frame.manifest,
+      kernelId: this.options.kernel.id,
+      kernelState,
+      stepId,
+      approvalId,
+      runtimeSequence: events.sequence,
+    };
+    if (frame.secrets.size) {
+      const body = JSON.stringify(checkpoint);
+      for (const secret of frame.secrets)
+        if (body.includes(secret))
+          throw new RuntimeFailure(
+            'RUNTIME_CHECKPOINT_SECRET',
+            'The run state contains a credential and was not saved.',
+          );
+    }
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.options.checkpoints.save(checkpoint);
+        frame.checkpointVersion = checkpoint.version;
+        return;
+      } catch (error) {
+        if (error instanceof CheckpointConflict) {
+          const lost = new RuntimeFailure('RUNTIME_LEASE_LOST', 'The run was taken over.');
+          controller.abort(lost);
+          throw lost;
+        }
+        if ((error instanceof ControlPlaneError && error.final) || attempt >= 3)
+          throw new RuntimeFailure(
+            'RUNTIME_CHECKPOINT_UNAVAILABLE',
+            'The run state could not be saved.',
+            true,
+          );
+        await sleep(200 * 2 ** attempt);
+      }
+    }
   }
 
   private async cancel(runId: string, reason: string): Promise<void> {
@@ -279,24 +449,31 @@ export class RuntimeHost {
     };
   }
 
-  private context(
-    correlation: RuntimeCorrelation,
-    work: { task: TaskSpec; workflow: WorkflowDefinition | undefined },
-    manifest: SignedAgentManifestV2,
-    events: RunEvents,
-    signal: AbortSignal,
-  ): KernelContext {
+  private context(events: RunEvents, frame: RunFrame, controller: AbortController): KernelContext {
+    const { correlation } = events;
+    const { manifest } = frame;
+    const { signal } = controller;
+    const inner = this.options.modelCredentials?.(correlation);
+    const credentials: CredentialBroker | undefined = inner && {
+      resolve: async (scope) => {
+        const credential = await inner.resolve(scope);
+        frame.secrets.add(credential.apiKey);
+        return credential;
+      },
+    };
     return {
       correlation,
-      task: work.task,
-      ...(work.workflow ? { workflow: work.workflow } : {}),
+      task: frame.task,
+      ...(frame.workflow ? { workflow: frame.workflow } : {}),
       manifest,
       emit: (type, payload, stepId) => events.emit(type, payload, stepId),
+      checkpoint: (state, stepId) =>
+        this.checkpoint(events, frame, controller, state, stepId, null),
       requestAction: (request) =>
         this.options.controlPlane.requestAction({
           ...request,
           protocol: RUNTIME_PROTOCOL_V1,
-          requestId: randomUUID(),
+          requestId: request.requestId ?? randomUUID(),
         }),
       executeAction: (request) =>
         this.options.controlPlane.executeAction({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
@@ -304,7 +481,13 @@ export class RuntimeHost {
         this.options.controlPlane.requestGrant({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
       models: {
         complete: (runManifest, request, runSignal) =>
-          this.options.models.complete(runManifest, request, runSignal, this.meter(correlation)),
+          this.options.models.complete(
+            runManifest,
+            request,
+            runSignal,
+            this.meter(correlation),
+            credentials,
+          ),
       },
       tools: this.options.tools.forManifest(manifest),
       artifacts: this.options.artifacts,
@@ -315,15 +498,10 @@ export class RuntimeHost {
   private async finish(
     events: RunEvents,
     outcome: KernelOutcome,
-    signal: AbortSignal,
-    run: {
-      sessionId: string;
-      task: TaskSpec;
-      workflow?: WorkflowDefinition;
-      runtimeProfile: string;
-      manifest: SignedAgentManifestV2;
-    },
+    controller: AbortController,
+    frame: RunFrame,
   ): Promise<void> {
+    const { signal } = controller;
     const correlation = events.correlation;
     const runId = correlation.runId;
     if (signal.aborted) {
@@ -341,19 +519,23 @@ export class RuntimeHost {
         return;
       case 'PAUSED':
         // The control plane paused the run atomically with the approval request.
-        await this.options.checkpoints.save({
-          version: 1,
-          runId,
-          sessionId: run.sessionId,
-          correlation,
-          task: run.task,
-          ...(run.workflow ? { workflow: run.workflow } : {}),
-          runtimeProfile: run.runtimeProfile,
-          manifest: run.manifest,
-          kernelId: this.options.kernel.id,
-          kernelState: outcome.state,
-          approvalId: outcome.approvalId,
-        });
+        try {
+          await this.checkpoint(
+            events,
+            frame,
+            controller,
+            outcome.state,
+            outcome.stepId,
+            outcome.approvalId,
+          );
+        } catch (error) {
+          // Not recorded as paused here: whoever is given the run asks for the decision again.
+          this.logger.warn('pause checkpoint failed', {
+            runId,
+            code: asRuntimeFailure(error).code,
+          });
+          return;
+        }
         this.logger.info('run paused for approval', { runId, approvalId: outcome.approvalId });
         return;
       case 'FAILED':
