@@ -10,5 +10,10 @@
     "strict": true,
     "isolatedModules": false
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "../../packages/contracts/src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../../packages/contracts/src/**/*.ts",
+    "../../packages/telemetry/src/**/*.ts"
+  ]
 }

@@ -15,6 +15,8 @@
     "test/**/*.ts",
     "../../packages/contracts/src/**/*.ts",
     "../../packages/policy-engine/src/**/*.ts",
-    "../../packages/catalog/src/**/*.ts"
+    "../../packages/catalog/src/**/*.ts",
+    "../../packages/telemetry/src/**/*.ts",
+    "../../packages/readiness/src/**/*.ts"
   ]
 }
