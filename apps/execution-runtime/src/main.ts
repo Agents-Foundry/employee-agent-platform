@@ -11,6 +11,7 @@ import type { ExecutionProvider } from './providers/execution-provider.js';
 import { LocalExecutionProvider } from './providers/local-provider.js';
 import { createExecutionServer } from './server.js';
 import { StateStore } from './state-store.js';
+import { telemetryFromEnvironment } from '../../../packages/telemetry/src/index.js';
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -57,7 +58,12 @@ const provider: ExecutionProvider =
     : new LocalExecutionProvider(hostOptions);
 const state = new StateStore(join(root, 'state.db'));
 const credentials = ControlPlaneCredentialClient.fromEnvironment();
+// ADR 0035: traces and metrics for this process.
+const observability = telemetryFromEnvironment('execution-runtime');
+const stopTelemetry = observability.start();
+const metricsTokenPath = process.env['EXECUTION_METRICS_TOKEN_PATH']?.trim();
 const service = new ExecutionService({
+  telemetry: observability.telemetry,
   verifier: new GrantVerifier(required('EXECUTION_GRANT_VERIFICATION_KEY')),
   provider,
   state,
@@ -69,7 +75,13 @@ const service = new ExecutionService({
 });
 // Checkouts a previous process left unfinished are discarded and their leases ended.
 const recovered = await service.recover();
-const server = createExecutionServer(service, provider).listen(port, host, () => {
+const server = createExecutionServer(
+  service,
+  provider,
+  metricsTokenPath
+    ? { telemetry: observability.telemetry, tokenPath: metricsTokenPath }
+    : undefined,
+).listen(port, host, () => {
   console.log(
     JSON.stringify({
       level: 'info',
@@ -88,7 +100,7 @@ function shutdown(signal: string): void {
   console.log(JSON.stringify({ level: 'info', message: 'execution runtime stopping', signal }));
   server.close(() => {
     state.close();
-    process.exit(0);
+    void stopTelemetry().finally(() => process.exit(0));
   });
 }
 

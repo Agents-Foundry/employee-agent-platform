@@ -24,6 +24,7 @@ import {
   type RepositoryCredentialIssuer,
 } from './credential-issuers.js';
 import type { SourceControlConnectionService } from './source-control-connections.js';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
 
 /** How long an issued lease may wait to be redeemed and used (capped by the grant's expiry). */
 export const DEFAULT_LEASE_TTL_MS = 5 * 60_000;
@@ -32,6 +33,7 @@ export interface CredentialBrokerOptions {
   issuers?: readonly RepositoryCredentialIssuer[];
   leaseTtlMs?: number;
   now?: () => number;
+  telemetry?: Telemetry;
 }
 
 interface CheckoutLeaseInput {
@@ -63,6 +65,7 @@ export class CredentialBroker {
   private readonly outstanding = new Map<string, () => Promise<void>>();
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly telemetry: Telemetry | undefined;
 
   constructor(
     private readonly db: PgStore,
@@ -77,6 +80,12 @@ export class CredentialBroker {
       this.issuers.set(issuer.mode, issuer);
     this.ttlMs = options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.telemetry = options.telemetry;
+  }
+
+  /** Counted once the transaction that changed the lease has committed. */
+  private counted(event: string, code = 'none'): void {
+    this.db.afterCommit(() => this.telemetry?.count('af_credential_leases_total', { event, code }));
   }
 
   /**
@@ -135,6 +144,7 @@ export class CredentialBroker {
       },
       organizationId,
     );
+    this.counted('issued');
     return { leaseId: id, provider: connection.provider, gitHost: connection.gitHost };
   }
 
@@ -179,6 +189,7 @@ export class CredentialBroker {
           { leaseId: request.leaseId, code },
           organizationId,
         );
+        this.counted('refused', code);
         return { refused: code, status } as const;
       };
       const status = String(lease['status']);
@@ -228,6 +239,7 @@ export class CredentialBroker {
         { leaseId: request.leaseId, grantId: payload.grantId },
         organizationId,
       );
+      this.counted('redeemed');
       return { connection, lease };
     });
     if ('refused' in authorized) throw new ExecutionError(authorized.status, authorized.refused);
@@ -256,6 +268,7 @@ export class CredentialBroker {
           ? error.code
           : 'CREDENTIAL_UNAVAILABLE';
       await this.revokeLease(organizationId, request.leaseId, runtime.id, code);
+      this.telemetry?.count('af_credential_leases_total', { event: 'unavailable', code });
       throw new ExecutionError(502, 'CREDENTIAL_UNAVAILABLE');
     }
   }
@@ -475,6 +488,32 @@ export class CredentialBroker {
         id,
         organizationId,
       );
+    if (status === 'REDEEMED') return;
+    // The lease ended: one span from its issue to its end, under the grant that named it.
+    const event = status.toLowerCase();
+    const code = status === 'REVOKED' ? (details.reason ?? 'REVOKED') : (details.outcome ?? 'none');
+    this.counted(event, code);
+    this.db.afterCommit(() =>
+      this.telemetry?.span({
+        runId: String(lease['run_id']),
+        name: 'credential.lease',
+        subject: 'lease',
+        id,
+        parent: { subject: 'grant', id: String(lease['grant_id']) },
+        startTimeMs: Date.parse(String(lease['issued_at'])),
+        endTimeMs: Date.parse(nowIso),
+        status: status === 'RELEASED' ? 'OK' : 'ERROR',
+        attributes: {
+          'af.organization.id': organizationId,
+          'af.lease.id': id,
+          'af.grant.id': String(lease['grant_id']),
+          'af.request.id': String(lease['request_id']),
+          'af.provider': String(lease['provider']),
+          'af.status': status,
+          ...(status === 'RELEASED' ? {} : { 'error.code': code }),
+        },
+      }),
+    );
   }
 
   /** Withdraw a credential at its provider, if this instance issued one that can be. */

@@ -24,7 +24,8 @@ import type { AgentKernel, KernelContext, KernelOutcome } from './kernel/agent-k
 import type { ManifestVerifier } from './manifest-verifier.js';
 import type { CredentialBroker, ModelGateway, ModelUsageMeter } from './models/model-gateway.js';
 import type { ArtifactStore } from './tools/artifact-store.js';
-import type { ToolRegistry } from './tools/runtime-tool.js';
+import type { RuntimeTool, ToolRegistry } from './tools/runtime-tool.js';
+import { Telemetry } from '../../../packages/telemetry/src/index.js';
 import type { ControlPlanePort } from './transport/control-plane-client.js';
 
 export interface RuntimeLogger {
@@ -112,6 +113,13 @@ export interface RuntimeHostOptions {
   /** How often the leases of the runs being executed are renewed. */
   heartbeatIntervalMs?: number;
   logger?: RuntimeLogger;
+  /** Traces and metrics (ADR 0035). Identifiers and measurements only. */
+  telemetry?: Telemetry;
+  /**
+   * How requests that are safe to repeat (action decisions, executions and grants are all
+   * keyed by their request id) are retried when the control plane is unreachable or busy.
+   */
+  retry?: { attempts?: number; baseDelayMs?: number; inProgressTimeoutMs?: number };
 }
 
 /**
@@ -121,10 +129,84 @@ export interface RuntimeHostOptions {
 export class RuntimeHost {
   private readonly active = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private readonly logger: RuntimeLogger;
+  private readonly telemetry: Telemetry;
   private stopped = false;
 
   constructor(private readonly options: RuntimeHostOptions) {
     this.logger = options.logger ?? consoleLogger;
+    this.telemetry = options.telemetry ?? new Telemetry('agent-runtime');
+    this.telemetry.gauge('af_runtime_active_runs', async () => [{ value: this.active.size }]);
+  }
+
+  /**
+   * Repeat a request the control plane answers the same way every time for the same request
+   * id. A refusal is final. An unreachable or failing control plane is tried again a few
+   * times; an action it is still performing is waited for, never started a second time.
+   */
+  private async retried<T>(
+    operation: string,
+    signal: AbortSignal,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const {
+      attempts = 4,
+      baseDelayMs = 250,
+      inProgressTimeoutMs = 120_000,
+    } = this.options.retry ?? {};
+    const started = Date.now();
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await work();
+      } catch (error) {
+        signal.throwIfAborted();
+        const inProgress =
+          error instanceof ControlPlaneError && error.code === 'ACTION_EXECUTION_IN_PROGRESS';
+        if (inProgress) {
+          if (Date.now() - started > inProgressTimeoutMs) throw error;
+        } else if ((error instanceof ControlPlaneError && error.final) || attempt + 1 >= attempts)
+          throw error;
+        this.telemetry.count('af_runtime_control_plane_retries_total', { operation });
+        await sleep(Math.min(5000, baseDelayMs * 2 ** Math.min(attempt, 6)));
+      }
+    }
+  }
+
+  /** The tool, with each call timed and traced under its step. Nothing of its input is kept. */
+  private instrumented(tool: RuntimeTool): RuntimeTool {
+    const { telemetry } = this;
+    const execute: RuntimeTool['execute'] = async (input, context) => {
+      const started = Date.now();
+      let result = 'succeeded';
+      try {
+        return await tool.execute(input, context);
+      } catch (error) {
+        result = error instanceof RuntimeFailure ? error.code : 'TOOL_EXECUTION_FAILED';
+        throw error;
+      } finally {
+        const { correlation } = context;
+        telemetry.count('af_tool_calls_total', { tool: tool.id, result });
+        telemetry.observe('af_tool_duration_ms', Date.now() - started, { tool: tool.id, result });
+        telemetry.span({
+          runId: correlation.runId,
+          name: 'tool.call',
+          subject: 'tool',
+          id: correlation.toolCallId,
+          parent: { subject: 'step', id: correlation.stepId },
+          startTimeMs: started,
+          status: result === 'succeeded' ? 'OK' : 'ERROR',
+          attributes: {
+            'af.organization.id': correlation.organizationId,
+            'af.thread.id': correlation.threadId,
+            'af.step.id': correlation.stepId,
+            'af.tool_call.id': correlation.toolCallId,
+            'af.tool.id': tool.id,
+            ...(result === 'succeeded' ? {} : { 'error.code': result }),
+          },
+        });
+      }
+    };
+    // Everything else (identity, schema, parsing, the governed action) is the tool's own.
+    return Object.create(tool, { execute: { value: execute } }) as RuntimeTool;
   }
 
   get activeRuns(): number {
@@ -413,15 +495,20 @@ export class RuntimeHost {
   }
 
   /** Reserves and settles each of the run's model calls with the control plane (ADR 0021). */
-  private meter(correlation: RuntimeCorrelation): ModelUsageMeter {
+  private meter(
+    correlation: RuntimeCorrelation,
+    call: { reservationId: string | null } = { reservationId: null },
+  ): ModelUsageMeter {
     const controlPlane = this.options.controlPlane;
     return {
       async reserve(request) {
         let reservation;
+        const reservationId = randomUUID();
+        call.reservationId = reservationId;
         try {
           reservation = await controlPlane.reserveModelTokens({
             protocol: RUNTIME_PROTOCOL_V1,
-            reservationId: randomUUID(),
+            reservationId,
             correlation,
             ...request,
           });
@@ -461,35 +548,90 @@ export class RuntimeHost {
         return credential;
       },
     };
+    const { telemetry } = this;
+    const { controlPlane } = this.options;
+    // The model step in progress, so a model call is traced under it.
+    let modelStep: string | undefined;
     return {
       correlation,
       task: frame.task,
       ...(frame.workflow ? { workflow: frame.workflow } : {}),
       manifest,
-      emit: (type, payload, stepId) => events.emit(type, payload, stepId),
+      emit: (type, payload, stepId) => {
+        if (type === 'step.started' && (payload as { kind?: string }).kind === 'MODEL')
+          modelStep = stepId;
+        return events.emit(type, payload, stepId);
+      },
       checkpoint: (state, stepId) =>
         this.checkpoint(events, frame, controller, state, stepId, null),
-      requestAction: (request) =>
-        this.options.controlPlane.requestAction({
-          ...request,
-          protocol: RUNTIME_PROTOCOL_V1,
-          requestId: request.requestId ?? randomUUID(),
-        }),
-      executeAction: (request) =>
-        this.options.controlPlane.executeAction({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
-      requestGrant: (request) =>
-        this.options.controlPlane.requestGrant({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
-      models: {
-        complete: (runManifest, request, runSignal) =>
-          this.options.models.complete(
-            runManifest,
-            request,
-            runSignal,
-            this.meter(correlation),
-            credentials,
-          ),
+      requestAction: (request) => {
+        const requestId = request.requestId ?? randomUUID();
+        return this.retried('action.request', signal, () =>
+          controlPlane.requestAction({ ...request, protocol: RUNTIME_PROTOCOL_V1, requestId }),
+        );
       },
-      tools: this.options.tools.forManifest(manifest),
+      executeAction: (request) =>
+        this.retried('action.execute', signal, () =>
+          controlPlane.executeAction({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
+        ),
+      requestGrant: (request) =>
+        this.retried('action.grant', signal, () =>
+          controlPlane.requestGrant({ ...request, protocol: RUNTIME_PROTOCOL_V1 }),
+        ),
+      models: {
+        complete: async (runManifest, request, runSignal) => {
+          const { provider, model } = runManifest.payload.model;
+          const call = { reservationId: null as string | null };
+          const stepId = modelStep;
+          const started = Date.now();
+          let usage: { inputTokens: number; outputTokens: number } | undefined;
+          let result = 'succeeded';
+          try {
+            const completion = await this.options.models.complete(
+              runManifest,
+              request,
+              runSignal,
+              this.meter(correlation, call),
+              credentials,
+            );
+            usage = completion.response.usage;
+            telemetry.observe('af_model_latency_ms', completion.latencyMs, { provider, model });
+            return completion;
+          } catch (error) {
+            result = error instanceof RuntimeFailure ? error.code : 'MODEL_CALL_FAILED';
+            throw error;
+          } finally {
+            telemetry.count('af_model_calls_total', { provider, model, result });
+            // Named by its spending reservation, which the control plane traces under it.
+            telemetry.span({
+              runId: correlation.runId,
+              name: 'model.call',
+              subject: 'model',
+              id: call.reservationId ?? randomUUID(),
+              ...(stepId ? { parent: { subject: 'step' as const, id: stepId } } : {}),
+              startTimeMs: started,
+              status: result === 'succeeded' ? 'OK' : 'ERROR',
+              attributes: {
+                'af.organization.id': correlation.organizationId,
+                'af.thread.id': correlation.threadId,
+                ...(stepId ? { 'af.step.id': stepId } : {}),
+                ...(call.reservationId ? { 'af.reservation.id': call.reservationId } : {}),
+                'af.model.provider': provider,
+                'af.model.name': model,
+                'af.model.profile': runManifest.payload.model.profile,
+                ...(usage
+                  ? {
+                      'af.model.input_tokens': usage.inputTokens,
+                      'af.model.output_tokens': usage.outputTokens,
+                    }
+                  : {}),
+                ...(result === 'succeeded' ? {} : { 'error.code': result }),
+              },
+            });
+          }
+        },
+      },
+      tools: this.options.tools.forManifest(manifest).map((tool) => this.instrumented(tool)),
       artifacts: this.options.artifacts,
       signal,
     };

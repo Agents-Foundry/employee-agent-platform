@@ -18,10 +18,13 @@ import {
   bounded,
   failedProcess,
   inside,
+  playwrightArguments,
+  playwrightEvidenceDirectory,
   playwrightOutcome,
   processLogs,
   type LocalProviderOptions,
 } from './local-provider.js';
+import { EVIDENCE_RETENTION, collectPlaywrightEvidence } from './playwright-evidence.js';
 
 export interface ContainerProviderOptions extends LocalProviderOptions {
   /** Image for `command` operations; it must already be present (`--pull never`). */
@@ -43,6 +46,8 @@ export interface ContainerProviderOptions extends LocalProviderOptions {
    */
   allowUnrestrictedEgress?: boolean;
   dockerExecutable?: string;
+  /** Arguments placed before every docker command, for example `['--context', 'sandbox']`. */
+  dockerArguments?: readonly string[];
   /** User inside the container; the image's unprivileged user by default. */
   user?: string;
 }
@@ -166,9 +171,22 @@ interface EgressDecision {
 
 type Egress = 'none' | 'bridge' | { allowedHosts: readonly string[] };
 
-/** Adds the egress log as evidence and tells the model which destinations were blocked. */
-function withEgress(outcome: ProviderOutcome, decisions: EgressDecision[] | null): ProviderOutcome {
-  if (decisions === null) return outcome;
+/**
+ * Adds the egress log as evidence and tells the model which destinations were blocked. The log
+ * is the operation's network evidence: every destination it tried, allowed or refused, at
+ * most a thousand entries, and never a request body or header.
+ */
+function withEgress(
+  outcome: ProviderOutcome,
+  ran: { egress: EgressDecision[] | null; startupMs: number },
+): ProviderOutcome {
+  const decisions = ran.egress;
+  const measured = (denied: number) => ({
+    ...outcome.measurements,
+    sandboxStartupMs: ran.startupMs,
+    egressDenied: denied,
+  });
+  if (decisions === null) return { ...outcome, measurements: measured(0) };
   const denied = [
     ...new Set(
       decisions
@@ -182,18 +200,20 @@ function withEgress(outcome: ProviderOutcome, decisions: EgressDecision[] | null
   return {
     ...outcome,
     output: outcome.output + note,
+    measurements: measured(decisions.filter((entry) => entry.decision === 'DENY').length),
     artifacts: [
       ...outcome.artifacts,
       ...(decisions.length
         ? [
             {
               name: 'egress.log',
-              type: 'log' as const,
-              mediaType: 'text/plain' as const,
+              type: 'network_log' as const,
+              mediaType: 'application/x-ndjson',
               content: Buffer.from(
                 decisions.map((entry) => JSON.stringify(entry)).join('\n'),
                 'utf8',
               ),
+              retention: EVIDENCE_RETENTION.network_log,
             },
           ]
         : []),
@@ -338,7 +358,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         `${operation.command} is not an allowed command.`,
       );
     await inside(workspace.root, operation.cwd, true);
-    const { result, egress } = await this.run(
+    const ran = await this.run(
       workspace,
       this.options.image,
       operation.cwd,
@@ -348,9 +368,10 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       network,
       signal,
     );
+    const { result } = ran;
     const what = [operation.command, ...operation.args].join(' ');
     if (result.exitCode !== 0 || result.timedOut)
-      return withEgress(failedProcess(result, 'COMMAND_FAILED', what), egress);
+      return withEgress(failedProcess(result, 'COMMAND_FAILED', what), ran);
     return withEgress(
       {
         status: 'SUCCEEDED',
@@ -358,7 +379,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         ...bounded(`${what} succeeded.\n${result.stdout}`.trim()),
         artifacts: processLogs(result, 'command.log'),
       },
-      egress,
+      ran,
     );
   }
 
@@ -392,7 +413,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       );
     const cache = `.af-npm-cache-${randomUUID()}`;
     try {
-      const { result, egress } = await this.run(
+      const ran = await this.run(
         workspace,
         this.options.image,
         operation.path,
@@ -416,8 +437,9 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         network,
         signal,
       );
+      const { result } = ran;
       if (result.exitCode !== 0 || result.timedOut)
-        return withEgress(failedProcess(result, 'INSTALL_FAILED', 'npm ci'), egress);
+        return withEgress(failedProcess(result, 'INSTALL_FAILED', 'npm ci'), ran);
       return withEgress(
         {
           status: 'SUCCEEDED',
@@ -425,7 +447,7 @@ export class ContainerExecutionProvider implements ExecutionProvider {
           ...bounded(`npm ci succeeded.\n${result.stdout}`.trim()),
           artifacts: processLogs(result, 'install.log'),
         },
-        egress,
+        ran,
       );
     } finally {
       await rm(join(workspace.root, cache), { recursive: true, force: true }).catch(() => {});
@@ -453,23 +475,32 @@ export class ContainerExecutionProvider implements ExecutionProvider {
         'The project has no installed @playwright/test; install its dependencies first.',
       );
     }
-    const { result, egress } = await this.run(
-      workspace,
-      this.options.playwrightImage ?? this.options.image,
-      directory,
-      [
-        'node',
-        'node_modules/@playwright/test/cli.js',
-        'test',
-        `--project=${operation.project}`,
-        '--reporter=json',
-      ],
-      { BASE_URL: operation.baseUrl, PLAYWRIGHT_BASE_URL: operation.baseUrl },
-      limits,
-      network,
-      signal,
-    );
-    return withEgress(playwrightOutcome(result, operation), egress);
+    // Playwright writes its attachments into the workspace, the only writable mount.
+    const evidence = playwrightEvidenceDirectory();
+    const host = join(await inside(workspace.root, directory, true), evidence);
+    try {
+      const ran = await this.run(
+        workspace,
+        this.options.playwrightImage ?? this.options.image,
+        directory,
+        [
+          'node',
+          'node_modules/@playwright/test/cli.js',
+          'test',
+          ...playwrightArguments(operation, evidence),
+        ],
+        { BASE_URL: operation.baseUrl, PLAYWRIGHT_BASE_URL: operation.baseUrl },
+        limits,
+        network,
+        signal,
+      );
+      return withEgress(
+        playwrightOutcome(ran.result, operation, await collectPlaywrightEvidence(host)),
+        ran,
+      );
+    } finally {
+      await rm(host, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   private async run(
@@ -481,7 +512,8 @@ export class ContainerExecutionProvider implements ExecutionProvider {
     limits: ResourceLimits,
     egress: Egress,
     signal: AbortSignal,
-  ): Promise<{ result: ProcessResult; egress: EgressDecision[] | null }> {
+  ): Promise<{ result: ProcessResult; egress: EgressDecision[] | null; startupMs: number }> {
+    const began = Date.now();
     const docker = this.options.dockerExecutable ?? 'docker';
     const id = randomUUID();
     const name = `af-exec-${id}`;
@@ -513,8 +545,9 @@ export class ContainerExecutionProvider implements ExecutionProvider {
       env: clientEnv,
       maxOutputBytes: this.options.maxOutputBytes ?? 1024 * 1024,
     };
+    const prefix = this.options.dockerArguments ?? [];
     const client = (command: string[], timeoutMs = 30_000) =>
-      runProcess(docker, command, { ...options, timeoutMs });
+      runProcess(docker, [...prefix, ...command], { ...options, timeoutMs });
     try {
       if (proxied) {
         const created = await client(['network', 'create', '--internal', network]);
@@ -536,14 +569,15 @@ export class ContainerExecutionProvider implements ExecutionProvider {
           signal,
         );
       }
-      const result = await runProcess(docker, args, {
+      const startupMs = Date.now() - began;
+      const result = await runProcess(docker, [...prefix, ...args], {
         ...options,
         timeoutMs: limits.timeoutMs,
         signal,
       });
       if (result.exitCode === 125 && /No such image|pull access denied/i.test(result.stderr))
         throw new OperationFailure('SANDBOX_IMAGE_UNAVAILABLE', `Image ${image} is not present.`);
-      return { result, egress: proxied ? await this.decisions(client, proxy) : null };
+      return { result, egress: proxied ? await this.decisions(client, proxy) : null, startupMs };
     } finally {
       // Killing the docker client does not stop the container; remove it explicitly.
       await client(['rm', '--force', name]);

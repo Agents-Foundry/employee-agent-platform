@@ -17,7 +17,20 @@ export interface ArtifactStore {
   get(key: string): Promise<Buffer | null>;
   /** Removes the object. Removing one that is already gone succeeds. */
   delete(key: string): Promise<void>;
+  /**
+   * A request that stores exactly these bytes at `key` and nothing else (ADR 0037): the key,
+   * size, SHA-256 and media type are all covered by the signature, and it stops working within
+   * minutes. Stores that cannot issue one leave this out; the control plane then receives the
+   * bytes itself.
+   */
+  authorizePut?(
+    key: string,
+    upload: { mediaType: string; sizeBytes: number; sha256: string },
+  ): { url: string; headers: Record<string, string>; expiresAt: string };
 }
+
+/** How long the store accepts a signed request after it was signed (the SigV4 limit). */
+export const STORE_SIGNATURE_WINDOW_MS = 15 * 60_000;
 
 export class ArtifactStoreError extends Error {
   constructor(readonly code: 'ARTIFACT_KEY_INVALID' | 'ARTIFACT_STORE_UNAVAILABLE') {
@@ -205,10 +218,46 @@ export class S3ArtifactStore implements ArtifactStore {
     if (options.prefix !== undefined) assertArtifactKey(`${options.prefix}/x`);
   }
 
-  private async send(method: string, key: string, body?: Buffer, mediaType?: string) {
+  private url(key: string): URL {
     assertArtifactKey(key);
     const path = [this.options.bucket, this.options.prefix, key].filter(Boolean).join('/');
-    const url = new URL(`/${path}`, this.base);
+    return new URL(`/${path}`, this.base);
+  }
+
+  /**
+   * The headers of one `PUT`: the payload hash, length and type are signed, so the store
+   * rejects any other bytes, and the signature names this key only. The store's secret key
+   * stays here; the signature expires on the store's clock.
+   */
+  authorizePut(key: string, upload: { mediaType: string; sizeBytes: number; sha256: string }) {
+    if (!/^[a-f0-9]{64}$/.test(upload.sha256) || !Number.isSafeInteger(upload.sizeBytes))
+      throw new ArtifactStoreError('ARTIFACT_KEY_INVALID');
+    const url = this.url(key);
+    const now = this.options.now?.() ?? new Date();
+    let credentials: ObjectStoreCredentials;
+    try {
+      credentials = this.options.credentials();
+    } catch {
+      throw new ArtifactStoreError('ARTIFACT_STORE_UNAVAILABLE');
+    }
+    const headers = signObjectStoreRequest({
+      method: 'PUT',
+      url,
+      headers: { 'content-type': upload.mediaType, 'content-length': String(upload.sizeBytes) },
+      payloadSha256: upload.sha256,
+      region: this.options.region,
+      credentials,
+      now,
+    });
+    return {
+      url: url.href,
+      headers,
+      expiresAt: new Date(now.getTime() + STORE_SIGNATURE_WINDOW_MS).toISOString(),
+    };
+  }
+
+  private async send(method: string, key: string, body?: Buffer, mediaType?: string) {
+    const url = this.url(key);
     const headers = signObjectStoreRequest({
       method,
       url,

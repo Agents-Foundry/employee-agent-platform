@@ -23,6 +23,7 @@ import { configureCredentialRoutes } from './credentials/credential-routes.js';
 import { ExecutionError } from './execution/execution-service.js';
 import { RuntimeProtocolError } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 import { ExecutionProtocolError } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
+import { configureMetricsRoute } from './metrics-route.js';
 
 const provisioningSchema = z
   .object({
@@ -100,6 +101,8 @@ export function createApp(
 
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+  // Before the host check: a scraper reaches the process by address, with its own token.
+  configureMetricsRoute(app, database.telemetry);
   app.use(async (request, response, next) => {
     const host = request.hostname.toLowerCase().replace(/\.$/, '');
     const tenantId = await database.tenancy.resolveVerifiedDomain(host);
@@ -184,7 +187,13 @@ export function createApp(
       database.getConversation(conversationId, organizationId, employeeId),
   });
   configureCatalogRoutes(app, database.catalog, database.installations, database.quality, auth);
-  configureActionRoutes(app, database.connectors, database.actionPolicies, auth);
+  configureActionRoutes(
+    app,
+    database.connectors,
+    database.actionPolicies,
+    database.reconciliations,
+    auth,
+  );
   configureCredentialRoutes(app, database.sourceControl, database.credentials, auth);
   configureModelCredentialRoutes(app, database.modelCredentials, auth);
   configureSpendingRoutes(app, database.modelSpending, auth);

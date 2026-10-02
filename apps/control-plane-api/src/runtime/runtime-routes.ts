@@ -16,6 +16,7 @@ import { credentialTransportPaths } from '../../../../packages/contracts/src/cre
 import type { CredentialBroker } from '../credentials/credential-broker.js';
 import { MAX_ARTIFACT_UPLOAD_BYTES } from '../../../../packages/contracts/src/artifacts.js';
 import type { ArtifactService } from '../artifacts/artifact-service.js';
+import { MAX_DIRECT_ARTIFACT_BYTES } from '../../../../packages/contracts/src/artifacts.js';
 
 const RUNTIME_BASE = '/runtime/v1';
 const relative = (path: string) => path.slice(RUNTIME_BASE.length);
@@ -47,6 +48,11 @@ export function configureRuntimeRoutes(
       type: () => true,
       limit: Math.ceil(MAX_ARTIFACT_UPLOAD_BYTES / 3) * 4 + MAX_RUNTIME_MESSAGE_BYTES,
     }),
+  );
+  // Direct uploads the store cannot take itself arrive here as raw bytes (ADR 0037).
+  router.use(
+    relative(runtimeTransportPaths.artifactContent),
+    express.raw({ type: () => true, limit: MAX_DIRECT_ARTIFACT_BYTES }),
   );
   // Raw bytes are needed to verify the body digest in the signature.
   router.use(express.raw({ type: () => true, limit: MAX_RUNTIME_MESSAGE_BYTES + 1024 }));
@@ -146,6 +152,29 @@ export function configureRuntimeRoutes(
       response.status(201).json(await artifacts.uploadFromExecution(runtime, json(request)));
     },
   );
+  router.post(
+    relative(runtimeTransportPaths.artifactUploadAuthorize),
+    async (request, response) => {
+      const runtime = await authenticateExecution(request);
+      response.status(201).json(await artifacts.authorizeDirectUpload(runtime, json(request)));
+    },
+  );
+  router.put(
+    `${relative(runtimeTransportPaths.artifactContent)}/:token`,
+    async (request, response) => {
+      const runtime = await authenticateExecution(request);
+      await artifacts.receiveDirectContent(
+        runtime,
+        String(request.params['token']),
+        Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0),
+      );
+      response.status(204).end();
+    },
+  );
+  router.post(relative(runtimeTransportPaths.artifactUploadComplete), async (request, response) => {
+    const runtime = await authenticateExecution(request);
+    response.status(201).json(await artifacts.completeDirectUpload(runtime, json(request)));
+  });
   router.post(relative(credentialTransportPaths.redeem), async (request, response) => {
     const runtime = await authenticateExecution(request);
     response.json(await credentials.redeem(runtime, json(request)));

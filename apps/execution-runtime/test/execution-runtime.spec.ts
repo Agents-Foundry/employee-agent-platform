@@ -271,7 +271,13 @@ describe('execution runtime', () => {
       ]);
       const key = passing.artifacts[0]!.storageReference.replace('artifact://execution-local/', '');
       const report = JSON.parse(readFileSync(join(root, 'artifacts', ...key.split('/')), 'utf8'));
-      expect(report.args).toEqual(['test', '--project=smoke', '--reporter=json']);
+      expect(report.args).toEqual([
+        'test',
+        '--project=smoke',
+        '--reporter=json',
+        expect.stringMatching(/^--output=\.af-playwright-[0-9a-f-]{36}$/),
+        '--trace=retain-on-failure',
+      ]);
       expect(report.leaked).toBeNull();
 
       const failing = await run({
@@ -879,7 +885,10 @@ describe('architecture boundaries', () => {
             specifier!.startsWith('./') ||
             (specifier!.startsWith('../') &&
               !specifier!.includes('apps/') &&
-              (!specifier!.includes('packages/') || specifier!.includes('packages/contracts/'))),
+              (!specifier!.includes('packages/') ||
+                specifier!.includes('packages/contracts/') ||
+                // Provider-neutral tracing and metrics; it depends on nothing else here.
+                specifier!.includes('packages/telemetry/'))),
           `${file} imports ${specifier}`,
         ).toBe(true);
   });

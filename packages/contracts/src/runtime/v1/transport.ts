@@ -32,6 +32,11 @@ export const runtimeTransportPaths = {
   artifactUpload: '/runtime/v1/artifacts',
   /** For execution runtimes, which present the signed grant instead of holding a lease. */
   artifactUploadExecution: '/runtime/v1/artifacts/execution',
+  /** Direct upload to the artifact store (ADR 0037): permission, then confirmation. */
+  artifactUploadAuthorize: '/runtime/v1/artifacts/execution/authorize',
+  artifactUploadComplete: '/runtime/v1/artifacts/execution/complete',
+  /** Where the bytes go when the store cannot take them directly: `PUT <path>/<token>`. */
+  artifactContent: '/runtime/v1/artifact-content',
 } as const;
 
 /**

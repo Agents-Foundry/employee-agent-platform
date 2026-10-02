@@ -1,4 +1,8 @@
-import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
+import type {
+  ArtifactRetentionPolicy,
+  ExecutionOperation,
+  ResourceLimits,
+} from '@agents-foundry/contracts';
 import type { CheckoutCredential } from '../credential-client.js';
 
 export interface WorkspaceHandle {
@@ -11,9 +15,26 @@ export interface WorkspaceHandle {
 
 export interface ProducedArtifact {
   name: string;
-  type: 'log' | 'test_report';
-  mediaType: 'text/plain' | 'application/json';
+  type:
+    | 'log'
+    | 'test_report'
+    | 'console_log'
+    | 'network_log'
+    | 'screenshot'
+    | 'playwright_trace'
+    | 'video';
+  mediaType: string;
   content: Buffer;
+  /** How long the evidence is kept; 30 days when the provider does not say. */
+  retention?: ArtifactRetentionPolicy;
+}
+
+/** Measurements of one operation, for telemetry. Numbers only. */
+export interface OperationMeasurements {
+  /** Time spent preparing the sandbox (network, egress proxy) before the operation started. */
+  sandboxStartupMs?: number;
+  /** Connections the egress proxy refused. */
+  egressDenied?: number;
 }
 
 export interface ProviderOutcome {
@@ -24,6 +45,7 @@ export interface ProviderOutcome {
   output: string;
   truncated: boolean;
   artifacts: ProducedArtifact[];
+  measurements?: OperationMeasurements;
 }
 
 /** What the execution service hands a provider beyond the operation itself. */

@@ -1,4 +1,4 @@
-import { ConnectorError } from './connector-error.js';
+import { ConnectorError, writeFailure } from './connector-error.js';
 
 /** One file of a change set, repository-relative. */
 export interface ChangedFile {
@@ -74,29 +74,44 @@ export class GitHubSourceControlConnector implements SourceControlConnector {
       parents: [baseSha],
     });
     const commitSha = this.sha(commit.sha);
-    await this.call('POST', `${repo}/git/refs`, signal, {
-      ref: `refs/heads/${draft.headBranch}`,
-      sha: commitSha,
-    });
-    const pull = await this.call<{ number?: unknown; html_url?: unknown }>(
+    // Trees and commits are unreferenced objects nobody sees. From here on the repository
+    // changes visibly, so a request GitHub does not confirm may have been applied.
+    await this.call(
       'POST',
-      `${repo}/pulls`,
+      `${repo}/git/refs`,
       signal,
-      {
-        title: draft.title,
-        head: draft.headBranch,
-        base: draft.baseBranch,
-        body: draft.body,
-        draft: true,
-      },
+      { ref: `refs/heads/${draft.headBranch}`, sha: commitSha },
+      true,
     );
+    let pull: { number?: unknown; html_url?: unknown };
+    try {
+      pull = await this.call(
+        'POST',
+        `${repo}/pulls`,
+        signal,
+        {
+          title: draft.title,
+          head: draft.headBranch,
+          base: draft.baseBranch,
+          body: draft.body,
+          draft: true,
+        },
+        true,
+      );
+    } catch (error) {
+      // The branch exists whatever happened to the pull request: the change is part-published.
+      throw new ConnectorError(
+        'CONNECTOR_OUTCOME_UNKNOWN',
+        error instanceof ConnectorError ? error.status : undefined,
+      );
+    }
     if (
       typeof pull.number !== 'number' ||
       !Number.isInteger(pull.number) ||
       typeof pull.html_url !== 'string' ||
       !pull.html_url.startsWith('https://')
     )
-      throw new ConnectorError('CONNECTOR_RESPONSE_INVALID');
+      throw new ConnectorError('CONNECTOR_OUTCOME_UNKNOWN');
     return { number: pull.number, url: pull.html_url.slice(0, 500), commitSha };
   }
 
@@ -111,6 +126,8 @@ export class GitHubSourceControlConnector implements SourceControlConnector {
     path: string,
     signal: AbortSignal,
     body?: unknown,
+    /** The request changes something people can see in the repository. */
+    visible = false,
   ): Promise<T> {
     let response: Response;
     try {
@@ -131,13 +148,19 @@ export class GitHubSourceControlConnector implements SourceControlConnector {
         },
       );
     } catch {
-      throw new ConnectorError('CONNECTOR_REQUEST_FAILED');
+      throw new ConnectorError(visible ? 'CONNECTOR_OUTCOME_UNKNOWN' : 'CONNECTOR_REQUEST_FAILED');
     }
-    if (!response.ok) throw new ConnectorError('CONNECTOR_REQUEST_FAILED', response.status);
+    if (!response.ok)
+      throw visible
+        ? writeFailure(response.status)
+        : new ConnectorError('CONNECTOR_REQUEST_FAILED', response.status);
     try {
       return (await response.json()) as T;
     } catch {
-      throw new ConnectorError('CONNECTOR_RESPONSE_INVALID');
+      throw new ConnectorError(
+        visible ? 'CONNECTOR_OUTCOME_UNKNOWN' : 'CONNECTOR_RESPONSE_INVALID',
+        response.status,
+      );
     }
   }
 }

@@ -31,6 +31,8 @@ import { ConnectorError } from './connectors/jira.js';
 import type { ConnectorService } from './connector-service.js';
 import { SecretUnavailable, type SecretBroker } from '../secrets/secret-broker.js';
 import type { CredentialBroker } from '../credentials/credential-broker.js';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
+import type { ActionReconciliationService } from './action-reconciliation.js';
 
 export interface ActionGatewayDependencies {
   loadManifest: (
@@ -52,7 +54,20 @@ export interface ActionGatewayDependencies {
   /** Connector HTTP client (tests); defaults to global fetch. */
   fetch?: typeof fetch;
   dispatchTimeoutMs?: number;
+  /**
+   * How long after its start a dispatch that never recorded an outcome is taken to have been
+   * interrupted (the control plane stopped). Longer than any dispatch can run.
+   */
+  staleDispatchMs?: number;
+  /** Writes whose outcome is unknown, and what blocks repeating them (ADR 0036). */
+  reconciliations: ActionReconciliationService;
+  telemetry: Telemetry;
 }
+
+const OUTCOME_UNKNOWN_CODES = new Set(['CONNECTOR_OUTCOME_UNKNOWN', 'DISPATCH_INTERRUPTED']);
+const OUTCOME_UNKNOWN_MESSAGE =
+  'The external system did not confirm this action, so it may or may not have happened. ' +
+  'Do not repeat it: an administrator must check the external system first.';
 
 interface Assessment {
   outcome: 'ALLOW' | 'REQUIRE_APPROVAL' | 'DENY';
@@ -88,6 +103,8 @@ export interface PendingDispatch {
   connection: ConnectorConnection;
   secret: string;
   changes: ChangeSet | null;
+  /** Digest of the validated parameters, for reconciliation. */
+  payloadDigest: string;
 }
 
 /** Limits on a published change set; larger changes are denied, never truncated. */
@@ -129,8 +146,29 @@ export class ActionGateway {
     requestHash: string,
   ): Promise<RuntimeActionDecision> {
     const organizationId = String(run['organization_id']);
+    const started = Date.now();
+    const { telemetry } = this.deps;
     return this.db.tenant(organizationId, async () => {
-      const verdict = await this.assess(run, request);
+      let verdict = await this.assess(run, request);
+      // A write whose earlier attempt has an unknown outcome is not decided again until a
+      // person has reconciled it: allowing it could perform the same write twice.
+      if (
+        verdict.outcome !== 'DENY' &&
+        verdict.handler?.effect === 'write' &&
+        verdict.parameters &&
+        (await this.deps.reconciliations.blocks(
+          organizationId,
+          String(run['thread_id']),
+          request.action,
+          digest(verdict.parameters),
+        ))
+      )
+        verdict = {
+          ...verdict,
+          outcome: 'DENY',
+          reason: 'ACTION_RECONCILIATION_REQUIRED',
+          policy: null,
+        };
       const now = new Date();
       const approvalId = verdict.outcome === 'REQUIRE_APPROVAL' ? randomUUID() : null;
       const summary = verdict.summary ?? request.summary;
@@ -217,6 +255,34 @@ export class ActionGateway {
         },
         organizationId,
       );
+      this.db.afterCommit(() => {
+        telemetry.count('af_action_decisions_total', {
+          action: request.action,
+          decision: decision.toLowerCase(),
+        });
+        telemetry.span({
+          runId: String(run['id']),
+          name: 'action.decision',
+          subject: 'action',
+          id: request.requestId,
+          parent: { subject: 'tool', id: request.correlation.toolCallId },
+          startTimeMs: started,
+          status: decision === 'DENIED' ? 'ERROR' : 'OK',
+          attributes: {
+            'af.organization.id': organizationId,
+            'af.thread.id': String(run['thread_id']),
+            'af.step.id': request.correlation.stepId,
+            'af.tool_call.id': request.correlation.toolCallId,
+            'af.request.id': request.requestId,
+            'af.tool.id': request.toolId,
+            'af.action': request.action,
+            'af.decision': decision,
+            'af.risk': verdict.risk,
+            ...(approvalId ? { 'af.approval.id': approvalId } : {}),
+            ...(decision === 'DENIED' ? { 'error.code': verdict.reason } : {}),
+          },
+        });
+      });
       return this.storedDecision(
         (await this.db.get(
           'SELECT * FROM agent_action_requests WHERE id=? AND organization_id=?',
@@ -270,12 +336,40 @@ export class ActionGateway {
         organizationId,
       );
       if (existing) {
-        if (existing['status'] === 'DISPATCHING')
+        if (existing['status'] !== 'DISPATCHING')
+          return { kind: 'done', execution: this.storedExecution(existing) };
+        if (Date.parse(String(existing['started_at'])) + this.staleDispatchMs > nowMs)
           throw new ExecutionError(409, 'ACTION_EXECUTION_IN_PROGRESS');
-        return { kind: 'done', execution: this.storedExecution(existing) };
+        // The control plane that was dispatching this stopped: nobody knows what happened.
+        await this.interrupt({
+          requestId,
+          organizationId,
+          runId: String(run['id']),
+          agentId: String(run['agent_id']),
+          action: handler.action,
+          effect: handler.effect,
+          parameters: request['parameters'] ? String(request['parameters']) : null,
+        });
+        return {
+          kind: 'done',
+          execution: this.storedExecution(
+            (await this.db.get(
+              'SELECT * FROM agent_action_executions WHERE request_id=? AND organization_id=?',
+              requestId,
+              organizationId,
+            ))!,
+          ),
+        };
       }
       const nowIso = new Date(nowMs).toISOString();
       const refuse = async (code: string, message: string): Promise<ExecutionPlan> => {
+        this.db.afterCommit(() =>
+          this.deps.telemetry.count('af_action_executions_total', {
+            action: handler.action,
+            status: 'refused',
+            code,
+          }),
+        );
         await this.db.run(
           `INSERT INTO agent_action_executions (request_id, organization_id, run_id, status, error_code, started_at, completed_at)
            VALUES (?,?,?,'FAILED',?,?,?)`,
@@ -339,6 +433,20 @@ export class ActionGateway {
       // A pull request publishes exactly the approved change set; later writes need a new request.
       if ((approvedChanges?.digest ?? null) !== (current.changes?.digest ?? null))
         return refuse('CHANGE_SET_CHANGED', 'The workspace changed after the decision.');
+      const payloadDigest = digest(current.parameters);
+      if (
+        handler.effect === 'write' &&
+        (await this.deps.reconciliations.blocks(
+          organizationId,
+          String(run['thread_id']),
+          handler.action,
+          payloadDigest,
+        ))
+      )
+        return refuse(
+          'ACTION_RECONCILIATION_REQUIRED',
+          'An earlier attempt at this action has an unknown outcome and must be reconciled first.',
+        );
       let secret: string;
       try {
         secret = (await this.deps.secrets.resolve(organizationId, connection.secretRef)).reveal();
@@ -368,13 +476,113 @@ export class ActionGateway {
           connection,
           secret,
           changes: approvedChanges,
+          payloadDigest,
         },
       };
     });
   }
 
+  private get staleDispatchMs(): number {
+    return this.deps.staleDispatchMs ?? (this.deps.dispatchTimeoutMs ?? 30_000) + 30_000;
+  }
+
+  /**
+   * Close a dispatch that never recorded an outcome. For a write, a person must then check the
+   * external system; a read is simply failed. Caller's transaction.
+   */
+  private async interrupt(execution: {
+    requestId: string;
+    organizationId: string;
+    runId: string;
+    agentId: string;
+    action: string;
+    effect: 'read' | 'write';
+    parameters: string | null;
+  }): Promise<boolean> {
+    const closed = await this.db.run(
+      `UPDATE agent_action_executions SET status='FAILED', error_code='DISPATCH_INTERRUPTED', completed_at=?
+       WHERE request_id=? AND organization_id=? AND status='DISPATCHING'`,
+      new Date().toISOString(),
+      execution.requestId,
+      execution.organizationId,
+    );
+    if (closed.changes !== 1) return false;
+    await this.deps.audit(
+      execution.agentId,
+      'action.execution.interrupted',
+      'agent_run',
+      execution.runId,
+      { action: execution.action, requestId: execution.requestId },
+      execution.organizationId,
+    );
+    if (execution.effect === 'write' && execution.parameters)
+      await this.deps.reconciliations.require({
+        organizationId: execution.organizationId,
+        requestId: execution.requestId,
+        runId: execution.runId,
+        agentId: execution.agentId,
+        action: execution.action,
+        payloadDigest: digest(JSON.parse(execution.parameters)),
+        reason: 'DISPATCH_INTERRUPTED',
+      });
+    this.db.afterCommit(() =>
+      this.deps.telemetry.count('af_action_executions_total', {
+        action: execution.action,
+        status: 'failed',
+        code: 'DISPATCH_INTERRUPTED',
+      }),
+    );
+    return true;
+  }
+
+  /**
+   * Close every dispatch a stopped control plane left open, in every organization, so its
+   * run is told the outcome is unknown instead of waiting for ever.
+   */
+  reconcileInterrupted(nowMs = Date.now()): Promise<number> {
+    return this.db.platform(async () => {
+      const stale = await this.db.all<{
+        request_id: string;
+        organization_id: string;
+        run_id: string;
+        agent_id: string;
+        action: string;
+        parameters: string | null;
+      }>(
+        `SELECT e.request_id, e.organization_id, e.run_id, r.agent_id, q.action, q.parameters
+         FROM agent_action_executions e
+         JOIN agent_action_requests q ON q.id=e.request_id AND q.organization_id=e.organization_id
+         JOIN agent_runs r ON r.id=e.run_id AND r.organization_id=e.organization_id
+         WHERE e.status='DISPATCHING' AND e.started_at < ? ORDER BY e.started_at LIMIT 100`,
+        new Date(nowMs - this.staleDispatchMs).toISOString(),
+      );
+      let closed = 0;
+      for (const row of stale) {
+        const handler = controlPlaneAction(row.action);
+        if (
+          await this.interrupt({
+            requestId: row.request_id,
+            organizationId: row.organization_id,
+            runId: row.run_id,
+            agentId: row.agent_id,
+            action: row.action,
+            effect: handler?.effect ?? 'write',
+            parameters: row.parameters === null ? null : String(row.parameters),
+          })
+        )
+          closed += 1;
+      }
+      return closed;
+    });
+  }
+
   /** Second half: the connector call, outside any database transaction. */
   async dispatch(pending: PendingDispatch): Promise<RuntimeActionExecution> {
+    const started = Date.now();
+    const { telemetry } = this.deps;
+    const provider = pending.connection.provider;
+    let outcome: RuntimeActionExecution;
+    let httpStatus: number | undefined;
     try {
       const result = await pending.handler.dispatch(
         {
@@ -387,17 +595,56 @@ export class ActionGateway {
         pending.parameters as never,
         pending.changes,
       );
-      return { requestId: pending.requestId, status: 'SUCCEEDED', result };
+      outcome = { requestId: pending.requestId, status: 'SUCCEEDED', result };
     } catch (error) {
-      const code = error instanceof ConnectorError ? error.code : 'CONNECTOR_FAILED';
-      const status =
-        error instanceof ConnectorError && error.status ? ` (HTTP ${error.status})` : '';
-      return {
+      // Anything unexpected while a write was in flight leaves its outcome unknown.
+      const code =
+        error instanceof ConnectorError
+          ? pending.handler.effect === 'read' && error.code === 'CONNECTOR_OUTCOME_UNKNOWN'
+            ? 'CONNECTOR_REQUEST_FAILED'
+            : error.code
+          : pending.handler.effect === 'write'
+            ? 'CONNECTOR_OUTCOME_UNKNOWN'
+            : 'CONNECTOR_FAILED';
+      httpStatus = error instanceof ConnectorError ? error.status : undefined;
+      const status = httpStatus ? ` (HTTP ${httpStatus})` : '';
+      outcome = {
         requestId: pending.requestId,
         status: 'FAILED',
-        error: { code, message: `The ${pending.connection.provider} connector failed${status}.` },
+        error: {
+          code,
+          message: OUTCOME_UNKNOWN_CODES.has(code)
+            ? OUTCOME_UNKNOWN_MESSAGE
+            : `The ${provider} connector failed${status}.`,
+        },
       };
     }
+    const code = outcome.error?.code;
+    telemetry.observe('af_connector_duration_ms', Date.now() - started, {
+      provider,
+      action: pending.action,
+      outcome: code ?? 'succeeded',
+    });
+    if (code)
+      telemetry.count('af_connector_errors_total', { provider, action: pending.action, code });
+    telemetry.span({
+      runId: pending.runId,
+      name: 'connector.dispatch',
+      subject: 'dispatch',
+      id: pending.requestId,
+      parent: { subject: 'action', id: pending.requestId },
+      startTimeMs: started,
+      status: code ? 'ERROR' : 'OK',
+      attributes: {
+        'af.organization.id': pending.organizationId,
+        'af.request.id': pending.requestId,
+        'af.action': pending.action,
+        'af.connector.provider': provider,
+        ...(httpStatus ? { 'af.http.status': httpStatus } : {}),
+        ...(code ? { 'error.code': code } : {}),
+      },
+    });
+    return outcome;
   }
 
   /** Record the outcome of a dispatch (caller's transaction). */
@@ -406,15 +653,41 @@ export class ActionGateway {
     outcome: RuntimeActionExecution,
   ): Promise<RuntimeActionExecution> {
     return this.db.tenant(pending.organizationId, async () => {
-      await this.db.run(
+      const recorded = await this.db.run(
         `UPDATE agent_action_executions SET status=?, result=?, error_code=?, completed_at=?
-         WHERE request_id=? AND organization_id=?`,
+         WHERE request_id=? AND organization_id=? AND status='DISPATCHING'`,
         outcome.status,
         outcome.result ? JSON.stringify(outcome.result) : null,
         outcome.error?.code ?? null,
         new Date().toISOString(),
         pending.requestId,
         pending.organizationId,
+      );
+      // The dispatch took so long that it was already closed as interrupted: that stands.
+      if (recorded.changes !== 1)
+        return this.storedExecution(
+          (await this.db.get(
+            'SELECT * FROM agent_action_executions WHERE request_id=? AND organization_id=?',
+            pending.requestId,
+            pending.organizationId,
+          ))!,
+        );
+      if (pending.handler.effect === 'write' && outcome.error?.code === 'CONNECTOR_OUTCOME_UNKNOWN')
+        await this.deps.reconciliations.require({
+          organizationId: pending.organizationId,
+          requestId: pending.requestId,
+          runId: pending.runId,
+          agentId: pending.agentId,
+          action: pending.action,
+          payloadDigest: pending.payloadDigest,
+          reason: 'CONNECTOR_OUTCOME_UNKNOWN',
+        });
+      this.db.afterCommit(() =>
+        this.deps.telemetry.count('af_action_executions_total', {
+          action: pending.action,
+          status: outcome.status.toLowerCase(),
+          code: outcome.error?.code ?? 'none',
+        }),
       );
       await this.deps.audit(
         pending.agentId,
@@ -449,6 +722,8 @@ export class ActionGateway {
     nowMs = Date.now(),
   ): Promise<SignedExecutionGrant> {
     const organizationId = String(run['organization_id']);
+    const started = Date.now();
+    const { telemetry } = this.deps;
     return this.db.tenant(organizationId, async () => {
       await this.expireDue(nowMs, organizationId);
       const request = await this.db.get(
@@ -462,6 +737,8 @@ export class ActionGateway {
         throw new ExecutionError(409, 'RUNTIME_CORRELATION_MISMATCH');
       if (!executionAction(String(request['action'])))
         throw new ExecutionError(409, 'ACTION_NOT_GRANTABLE');
+      const granted = (result: string, operation = String(request['action'])) =>
+        telemetry.count('af_execution_grants_total', { operation, result });
       const nowIso = new Date(nowMs).toISOString();
       const existing = await this.db.get<{ signed_grant: string; expires_at: string }>(
         'SELECT signed_grant, expires_at FROM agent_execution_grants WHERE request_id=? AND organization_id=?',
@@ -471,9 +748,12 @@ export class ActionGateway {
       if (existing) {
         // One grant per request: redelivery is safe because execution runtimes use it once.
         if (existing.expires_at <= nowIso) throw new ExecutionError(409, 'GRANT_EXPIRED');
+        this.db.afterCommit(() => granted('reused'));
         return JSON.parse(existing.signed_grant) as SignedExecutionGrant;
       }
       const refuse = async (code: string, status = 403) => {
+        // Counted now: the refusal is thrown, so its transaction does not commit.
+        granted(code);
         await this.deps.audit(
           String(run['agent_id']),
           'action.grant.refused',
@@ -581,6 +861,28 @@ export class ActionGateway {
         },
         organizationId,
       );
+      this.db.afterCommit(() => {
+        granted('issued', operation.kind);
+        telemetry.span({
+          runId: String(run['id']),
+          name: 'execution.grant',
+          subject: 'grant',
+          id: grantId,
+          parent: { subject: 'action', id: requestId },
+          startTimeMs: started,
+          attributes: {
+            'af.organization.id': organizationId,
+            'af.step.id': correlation.stepId,
+            'af.tool_call.id': correlation.toolCallId,
+            'af.request.id': requestId,
+            'af.grant.id': grantId,
+            'af.action': String(request['action']),
+            'af.operation.kind': operation.kind,
+            'af.isolation': current.execution!.isolation,
+            ...(credential ? { 'af.lease.id': credential.leaseId } : {}),
+          },
+        });
+      });
       return grant;
     });
   }
@@ -594,8 +896,13 @@ export class ActionGateway {
   expireDue(nowMs = Date.now(), organizationId?: string): Promise<number> {
     const nowIso = new Date(nowMs).toISOString();
     const sweep = async () => {
-      const due = await this.db.all<{ id: string; organization_id: string }>(
-        `SELECT id, organization_id FROM approvals WHERE status='PENDING' AND expires_at IS NOT NULL AND expires_at<=?
+      const due = await this.db.all<{
+        id: string;
+        organization_id: string;
+        action: string;
+        created_at: string;
+      }>(
+        `SELECT id, organization_id, action, created_at FROM approvals WHERE status='PENDING' AND expires_at IS NOT NULL AND expires_at<=?
          ${organizationId ? 'AND organization_id=?' : ''} ORDER BY expires_at, seq`,
         nowIso,
         ...(organizationId ? [organizationId] : []),
@@ -615,6 +922,15 @@ export class ActionGateway {
           {},
           approval.organization_id,
         );
+        this.db.afterCommit(() => {
+          const labels = { action: approval.action, status: 'expired' };
+          this.deps.telemetry.count('af_approvals_total', labels);
+          this.deps.telemetry.observe(
+            'af_approval_wait_ms',
+            nowMs - Date.parse(String(approval.created_at)),
+            labels,
+          );
+        });
       }
       return due.length;
     };
@@ -828,7 +1144,9 @@ export class ActionGateway {
         ? {
             error: {
               code: String(row['error_code'] ?? 'ACTION_FAILED'),
-              message: 'The action did not succeed.',
+              message: OUTCOME_UNKNOWN_CODES.has(String(row['error_code']))
+                ? OUTCOME_UNKNOWN_MESSAGE
+                : 'The action did not succeed.',
             },
           }
         : {}),

@@ -4,6 +4,7 @@ import {
   artifactContentSchema,
   artifactRegistrationSchema,
   artifactUploadDescriptorSchema,
+  directArtifactDescriptorSchema,
 } from '../../runtime/v1/schemas.js';
 import type { ExecutionOperation } from '../../execution.js';
 import {
@@ -324,6 +325,28 @@ const executionArtifactUploadSchema = z
     content: artifactContentSchema,
   })
   .strict();
+
+const executionArtifactAuthorizeSchema = z
+  .object({ grant: z.unknown(), artifact: directArtifactDescriptorSchema })
+  .strict();
+
+export function parseExecutionArtifactAuthorizeRequest(input: unknown) {
+  const parsed = executionArtifactAuthorizeSchema.safeParse(input);
+  if (!parsed.success)
+    throw new ExecutionProtocolError('EXECUTION_REQUEST_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
+const executionArtifactCompleteSchema = z
+  .object({ grant: z.unknown(), artifactId: z.uuid() })
+  .strict();
+
+export function parseExecutionArtifactCompleteRequest(input: unknown) {
+  const parsed = executionArtifactCompleteSchema.safeParse(input);
+  if (!parsed.success)
+    throw new ExecutionProtocolError('EXECUTION_REQUEST_INVALID', issues(parsed.error));
+  return parsed.data;
+}
 
 /** The grant is returned unparsed: the caller verifies its shape and signature. */
 export function parseExecutionArtifactUploadRequest(

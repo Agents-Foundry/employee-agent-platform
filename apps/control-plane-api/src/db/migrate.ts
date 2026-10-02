@@ -15,6 +15,7 @@ import { repositoryCredentialsSql } from './migrations/0011-repository-credentia
 import { runRecoverySql } from './migrations/0012-run-recovery.js';
 import { artifactObjectsSql } from './migrations/0013-artifact-objects.js';
 import { modelCredentialsSql } from './migrations/0014-model-credentials.js';
+import { actionReconciliationSql } from './migrations/0015-action-reconciliation.js';
 
 /** PostgreSQL migrations (ADR 0018). Released entries are immutable; add new versions only. */
 export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
@@ -32,6 +33,7 @@ export const POSTGRES_MIGRATIONS: readonly { version: number; name: string; sql:
   { version: 12, name: 'run-recovery', sql: runRecoverySql },
   { version: 13, name: 'artifact-objects', sql: artifactObjectsSql },
   { version: 14, name: 'model-credentials', sql: modelCredentialsSql },
+  { version: 15, name: 'action-reconciliation', sql: actionReconciliationSql },
 ];
 
 export const SCHEMA_VERSION = POSTGRES_MIGRATIONS.at(-1)!.version;

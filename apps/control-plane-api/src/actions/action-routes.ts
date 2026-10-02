@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AuthConfig } from '../auth.js';
 import type { ActionPolicyService } from './action-policy-service.js';
 import type { ConnectorService } from './connector-service.js';
+import type { ActionReconciliationService } from './action-reconciliation.js';
 
 const actionParam = z.string().regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,5}$/);
 
@@ -14,6 +15,7 @@ export function configureActionRoutes(
   app: Express,
   connectors: ConnectorService,
   policies: ActionPolicyService,
+  reconciliations: ActionReconciliationService,
   config: AuthConfig,
 ): void {
   const passwordOnly = () => {
@@ -50,6 +52,22 @@ export function configureActionRoutes(
     res.status(204).end();
   });
 
+  // ADR 0036: writes whose outcome is unknown, for an administrator to check and resolve.
+  const reconciliation = passwordOnly();
+  reconciliation.get('/', async (_req, res) =>
+    res.json(await reconciliations.list(res.locals['actor'])),
+  );
+  reconciliation.post('/:requestId/resolution', async (req, res) =>
+    res.json(
+      await reconciliations.resolve(
+        res.locals['actor'],
+        z.uuid().parse(req.params['requestId']),
+        req.body,
+      ),
+    ),
+  );
+
+  app.use('/api/organization/action-reconciliations', reconciliation);
   app.use('/api/organization/connector-connections', connections);
   app.use('/api/organization/action-policies', actionPolicies);
 }

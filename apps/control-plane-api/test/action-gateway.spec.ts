@@ -766,8 +766,9 @@ describe('connectors and secrets', () => {
       url: 'https://jira.example.com/browse/QA-1',
     });
     expect(calls[0]!['authorization']).toBe('Bearer t');
+    // Jira accepted the request; an answer that cannot be trusted leaves the outcome unknown.
     await expect(connector({ key: '../evil' }).createIssue(issue, signal)).rejects.toThrow(
-      'CONNECTOR_RESPONSE_INVALID',
+      'CONNECTOR_OUTCOME_UNKNOWN',
     );
   });
 

@@ -49,3 +49,39 @@ export function signedRuntimePost(
     })
     .send(text);
 }
+
+/** One signed runtime request with a raw body, as an execution runtime sends artifact bytes. */
+export function signedRuntimePut(
+  app: Express,
+  runtimeId: string,
+  key: KeyObject,
+  path: string,
+  body: Buffer,
+  contentType: string,
+) {
+  const timestamp = new Date().toISOString();
+  const nonce = randomUUID();
+  const signature = sign(
+    null,
+    Buffer.from(
+      runtimeSigningInput({
+        method: 'PUT',
+        path,
+        timestamp,
+        nonce,
+        bodySha256: createHash('sha256').update(body).digest('hex'),
+      }),
+    ),
+    key,
+  ).toString('base64');
+  return request(app)
+    .put(path)
+    .set({
+      'content-type': contentType,
+      [runtimeAuthHeaders.runtimeId]: runtimeId,
+      [runtimeAuthHeaders.timestamp]: timestamp,
+      [runtimeAuthHeaders.nonce]: nonce,
+      [runtimeAuthHeaders.signature]: signature,
+    })
+    .send(body);
+}

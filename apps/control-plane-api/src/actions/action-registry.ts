@@ -29,6 +29,11 @@ export interface DispatchContext {
  */
 export interface ControlPlaneAction<P = Record<string, unknown>> {
   action: string;
+  /**
+   * A `write` changes the external system. One whose outcome is unknown is never dispatched
+   * again until a person has reconciled it (ADR 0036). A `read` can simply be asked again.
+   */
+  effect: 'read' | 'write';
   connectorProvider: ConnectorProvider;
   /** Connector capability the agent's manifest must grant for this provider. */
   requiredCapability: string;
@@ -87,6 +92,7 @@ type IssueDraftParameters = z.infer<typeof issueDraft>;
 
 const jiraIssueCreate: ControlPlaneAction<IssueDraftParameters> = {
   action: 'jira.issue.create',
+  effect: 'write',
   connectorProvider: 'jira',
   requiredCapability: 'issueTracker.write',
   parameters: issueDraft,
@@ -111,6 +117,7 @@ type IssueReferenceParameters = z.infer<typeof issueReference>;
 /** Read one work item (Phase F): the story a QA run validates. Allowed projects only. */
 const jiraRead: ControlPlaneAction<IssueReferenceParameters> = {
   action: 'jira.read',
+  effect: 'read',
   connectorProvider: 'jira',
   requiredCapability: 'issueTracker.read',
   parameters: issueReference,
@@ -171,6 +178,7 @@ function configuredRepository(configuration: Configuration, repository: string):
  */
 const pullRequestCreate: ControlPlaneAction<PullRequestParameters> = {
   action: 'repository.pull_request.create',
+  effect: 'write',
   connectorProvider: 'github',
   requiredCapability: 'sourceControl.write',
   parameters: pullRequest,

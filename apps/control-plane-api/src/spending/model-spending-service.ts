@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
 import type {
   Actor,
   ModelUsageReport,
@@ -104,6 +105,7 @@ export class ModelSpendingService {
     private readonly structure: OrganizationStructureService,
     private readonly audit: Audit,
     onAlert?: ConstructorParameters<typeof ModelBudgetAlertService>[3],
+    private readonly telemetry?: Telemetry,
   ) {
     this.prices = new ModelPriceService(db, structure);
     this.alerts = new ModelBudgetAlertService(db, structure, audit, onAlert);
@@ -155,6 +157,13 @@ export class ModelSpendingService {
           ...remaining,
         },
         organizationId,
+      );
+      // Counted now: nothing is written for a denial that must survive a retry.
+      this.db.afterCommit(() =>
+        this.telemetry?.count('af_model_budget_decisions_total', {
+          decision: 'denied',
+          code: scope === 'PRICE' ? 'PRICE_UNAVAILABLE' : `${scope}_LIMIT`,
+        }),
       );
       // The runtime protocol has one denial code; the reason and the audit say which limit.
       return {
@@ -235,6 +244,28 @@ export class ModelSpendingService {
       price ? costMicros(price, request.estimatedInputTokens, granted) : null,
     );
     await this.checkAlerts(organizationId, runtimeId, period, budget, nowMs);
+    this.db.afterCommit(() => {
+      this.telemetry?.count('af_model_budget_decisions_total', {
+        decision: 'allowed',
+        code: granted < request.maxOutputTokens ? 'REDUCED' : 'none',
+      });
+      // Under the model call the runtime reports for the same reservation.
+      this.telemetry?.span({
+        runId,
+        name: 'model.budget.reserve',
+        subject: 'reservation',
+        id: request.reservationId,
+        parent: { subject: 'model', id: request.reservationId },
+        startTimeMs: nowMs,
+        attributes: {
+          'af.organization.id': organizationId,
+          'af.reservation.id': request.reservationId,
+          'af.model.provider': request.provider,
+          'af.model.name': request.model,
+          'af.decision': 'ALLOWED',
+        },
+      });
+    });
     return { reservationId: request.reservationId, decision: 'ALLOWED', maxOutputTokens: granted };
   }
 
@@ -264,12 +295,32 @@ export class ModelSpendingService {
       return { reservationId: request.reservationId, status: 'SETTLED' };
     }
     const price = row['price_id'] == null ? null : await this.priceOf(organizationId, row);
+    const settledCost = price ? costMicros(price, request.inputTokens, request.outputTokens) : null;
+    this.db.afterCommit(() => {
+      const model = { provider: String(row['provider']), model: String(row['model']) };
+      this.telemetry?.count(
+        'af_model_tokens_total',
+        { ...model, direction: 'input' },
+        request.inputTokens,
+      );
+      this.telemetry?.count(
+        'af_model_tokens_total',
+        { ...model, direction: 'output' },
+        request.outputTokens,
+      );
+      if (settledCost !== null)
+        this.telemetry?.count(
+          'af_model_cost_micros_total',
+          { ...model, currency: String(row['currency']) },
+          settledCost,
+        );
+    });
     await this.db.run(
       `UPDATE model_usage_reservations SET status='SETTLED', input_tokens=?, output_tokens=?, cost_micros=?, settled_at=?
        WHERE id=? AND organization_id=? AND status='RESERVED'`,
       request.inputTokens,
       request.outputTokens,
-      price ? costMicros(price, request.inputTokens, request.outputTokens) : null,
+      settledCost,
       new Date(nowMs).toISOString(),
       request.reservationId,
       organizationId,

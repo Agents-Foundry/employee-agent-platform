@@ -4,6 +4,12 @@ import { dirname, join, resolve, sep } from 'node:path';
 import type { ExecutionOperation, ResourceLimits } from '@agents-foundry/contracts';
 import { runProcess, type ProcessResult } from '../process-runner.js';
 import { startLocalEgressProxy, type EgressOverrides, type LocalEgressProxy } from './egress.js';
+import {
+  EVIDENCE_RETENTION,
+  collectPlaywrightEvidence,
+  type CollectedEvidence,
+} from './playwright-evidence.js';
+import { randomUUID } from 'node:crypto';
 import type {
   ExecutionProvider,
   OperationContext,
@@ -274,6 +280,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
     if (clone.exitCode !== 0 || clone.timedOut || signal.aborted) {
       await discard();
       const failure = failedProcess(clone, 'GIT_CHECKOUT_FAILED', 'git clone');
+      if (proxy) failure.measurements = { egressDenied: proxy.denied.length };
       if (proxy?.denied.length && failure.error && !clone.timedOut)
         failure.error = {
           code: 'EGRESS_DENIED',
@@ -300,6 +307,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
       output: `Checked out ${operation.ref} of ${operation.repositoryUrl} into ${operation.path} at ${commit}.${submodules}`,
       truncated: false,
       artifacts: processLogs(clone, 'git-checkout.log'),
+      ...(proxy ? { measurements: { egressDenied: proxy.denied.length } } : {}),
     };
   }
 
@@ -404,22 +412,52 @@ export class LocalExecutionProvider implements ExecutionProvider {
         'The project has no installed @playwright/test; the local provider cannot install dependencies.',
       );
     }
-    const result = await runProcess(
-      this.options.nodeExecutable ?? process.execPath,
-      [cli, 'test', `--project=${operation.project}`, '--reporter=json'],
-      {
-        cwd: directory,
-        env: await this.environment(workspace, {
-          BASE_URL: operation.baseUrl,
-          PLAYWRIGHT_BASE_URL: operation.baseUrl,
-        }),
-        timeoutMs: limits.timeoutMs,
-        maxOutputBytes: this.options.maxOutputBytes ?? 1024 * 1024,
-        signal,
-      },
-    );
-    return playwrightOutcome(result, operation);
+    const evidence = playwrightEvidenceDirectory();
+    try {
+      const result = await runProcess(
+        this.options.nodeExecutable ?? process.execPath,
+        [cli, 'test', ...playwrightArguments(operation, evidence)],
+        {
+          cwd: directory,
+          env: await this.environment(workspace, {
+            BASE_URL: operation.baseUrl,
+            PLAYWRIGHT_BASE_URL: operation.baseUrl,
+          }),
+          timeoutMs: limits.timeoutMs,
+          maxOutputBytes: this.options.maxOutputBytes ?? 1024 * 1024,
+          signal,
+        },
+      );
+      return playwrightOutcome(
+        result,
+        operation,
+        await collectPlaywrightEvidence(join(directory, evidence)),
+      );
+    } finally {
+      await rm(join(directory, evidence), { recursive: true, force: true }).catch(() => {});
+    }
   }
+}
+
+/** A fresh directory name for one run's Playwright output, inside the project directory. */
+export function playwrightEvidenceDirectory(): string {
+  return `.af-playwright-${randomUUID()}`;
+}
+
+/**
+ * The Playwright arguments of every run: the JSON report on standard output, attachments in
+ * the run's own output directory, and a trace kept for each test that fails.
+ */
+export function playwrightArguments(
+  operation: Extract<ExecutionOperation, { kind: 'playwright.run' }>,
+  evidenceDirectory: string,
+): string[] {
+  return [
+    `--project=${operation.project}`,
+    '--reporter=json',
+    `--output=${evidenceDirectory}`,
+    '--trace=retain-on-failure',
+  ];
 }
 
 /** Replace every occurrence of each secret; longest first so no fragment survives. */
@@ -467,34 +505,66 @@ export function failedProcess(result: ProcessResult, code: string, what: string)
 export function playwrightOutcome(
   result: ProcessResult,
   operation: Extract<ExecutionOperation, { kind: 'playwright.run' }>,
+  evidence: CollectedEvidence = { artifacts: [], omitted: 0 },
 ): ProviderOutcome {
-  if (result.timedOut) return failedProcess(result, 'PLAYWRIGHT_FAILED', 'Playwright');
+  // Whatever the browser left behind is evidence, also of a run that timed out or crashed.
+  const collected = (outcome: ProviderOutcome): ProviderOutcome => ({
+    ...outcome,
+    artifacts: [...outcome.artifacts, ...evidence.artifacts],
+  });
+  if (result.timedOut) return collected(failedProcess(result, 'PLAYWRIGHT_FAILED', 'Playwright'));
   let stats: { expected?: number; unexpected?: number; flaky?: number; skipped?: number } = {};
   try {
     stats = (JSON.parse(result.stdout) as { stats?: typeof stats }).stats ?? {};
   } catch {
-    return failedProcess(result, 'PLAYWRIGHT_REPORT_INVALID', 'Playwright');
+    return collected(failedProcess(result, 'PLAYWRIGHT_REPORT_INVALID', 'Playwright'));
   }
+  const count = (type: ProducedArtifact['type']) =>
+    evidence.artifacts.filter((artifact) => artifact.type === type).length;
+  const kept = [
+    [count('playwright_trace'), 'trace'],
+    [count('screenshot'), 'screenshot'],
+    [count('video'), 'video'],
+  ]
+    .filter(([number]) => Number(number) > 0)
+    .map(([number, label]) => `${number} ${label}${number === 1 ? '' : 's'}`);
   const summary =
     `Playwright project ${operation.project} against ${new URL(operation.baseUrl).origin}: ` +
     `${stats.expected ?? 0} passed, ${stats.unexpected ?? 0} failed, ` +
     `${stats.flaky ?? 0} flaky, ${stats.skipped ?? 0} skipped.`;
+  const note =
+    (kept.length ? ` Evidence stored: ${kept.join(', ')}.` : '') +
+    (evidence.omitted
+      ? ` ${evidence.omitted} evidence file(s) were over the size or count limits and were not kept.`
+      : '');
   const artifacts: ProducedArtifact[] = [
     {
       name: 'playwright-report.json',
       type: 'test_report',
       mediaType: 'application/json',
       content: Buffer.from(result.stdout, 'utf8'),
+      retention: EVIDENCE_RETENTION.test_report,
     },
-    ...(result.stderr ? processLogs({ ...result, stdout: '' }, 'playwright-stderr.log') : []),
+    // What the test process itself printed; the browser's console is inside each trace.
+    ...(result.stderr
+      ? [
+          {
+            name: 'playwright-console.log',
+            type: 'console_log' as const,
+            mediaType: 'text/plain',
+            content: Buffer.from(result.stderr, 'utf8'),
+            retention: EVIDENCE_RETENTION.console_log,
+          },
+        ]
+      : []),
   ];
   const failed = result.exitCode !== 0 || (stats.unexpected ?? 0) > 0;
-  return {
+  return collected({
     status: failed ? 'FAILED' : 'SUCCEEDED',
     ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
     ...(failed ? { error: { code: 'PLAYWRIGHT_TESTS_FAILED', message: summary } } : {}),
-    output: summary,
+    output: summary + note,
     truncated: result.truncated,
     artifacts,
-  };
+  });
 }

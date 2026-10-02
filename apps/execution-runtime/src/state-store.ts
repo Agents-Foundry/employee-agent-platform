@@ -63,6 +63,41 @@ export class StateStore {
         started_at TEXT NOT NULL
       );
     `);
+    // Added later: what an unfinished grant was for, so a restart can close it.
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(grants)').all() as { name: string }[]).map(
+        (column) => column.name,
+      ),
+    );
+    for (const column of ['request_id', 'workspace_id'])
+      if (!columns.has(column)) this.db.exec(`ALTER TABLE grants ADD COLUMN ${column} TEXT`);
+  }
+
+  /** Which request and workspace a claimed grant is working for. */
+  bindGrant(grantId: string, requestId: string, workspaceId: string): void {
+    this.db
+      .prepare(
+        `UPDATE grants SET request_id=?, workspace_id=? WHERE grant_id=? AND state='RUNNING'`,
+      )
+      .run(requestId, workspaceId, grantId);
+  }
+
+  /** Grants a previous process claimed and never finished. */
+  unfinishedGrants(): { grantId: string; requestId: string | null; workspaceId: string | null }[] {
+    return (
+      this.db
+        .prepare(`SELECT grant_id, request_id, workspace_id FROM grants WHERE state='RUNNING'`)
+        .all() as Record<string, string | null>[]
+    ).map((row) => ({
+      grantId: row['grant_id']!,
+      requestId: row['request_id'] ?? null,
+      workspaceId: row['workspace_id'] ?? null,
+    }));
+  }
+
+  /** Forget a claim under which nothing ran, so the grant can still be used. */
+  releaseGrant(grantId: string): void {
+    this.db.prepare(`DELETE FROM grants WHERE grant_id=? AND state='RUNNING'`).run(grantId);
   }
 
   /** Claim a grant for execution. Returns the stored response for a completed replay. */
