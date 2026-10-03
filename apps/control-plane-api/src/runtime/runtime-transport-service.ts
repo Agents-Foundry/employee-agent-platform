@@ -37,6 +37,7 @@ import {
   ModelCredentialRefused,
   type ModelCredentialService,
 } from '../secrets/model-credentials.js';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
 import { RunCheckpoints, sha256Text } from './run-checkpoints.js';
 import { servesOrganization, type RuntimeIdentity } from './runtime-identity.js';
 
@@ -58,6 +59,7 @@ export interface RuntimeTransportDependencies {
   audit: Audit;
   spending: ModelSpendingService;
   modelCredentials: ModelCredentialService;
+  telemetry: Telemetry;
 }
 
 /**
@@ -191,6 +193,14 @@ export class RuntimeTransportService {
         );
         (touched.changes === 1 ? held : lost).push(runId);
       }
+      if (lost.length)
+        this.db.afterCommit(() =>
+          this.deps.telemetry.count(
+            'af_runtime_leases_expired_total',
+            { status: 'reported_lost' },
+            lost.length,
+          ),
+        );
       return { held, lost };
     });
   }
@@ -237,6 +247,44 @@ export class RuntimeTransportService {
     nowMs = Date.now(),
   ): Promise<RuntimeCheckpointAck> {
     const request = parseRuntimeCheckpointSaveRequest(body);
+    const { telemetry } = this.deps;
+    const started = Date.now();
+    try {
+      const ack = await this.storeCheckpoint(runtime, request, nowMs);
+      telemetry.count('af_checkpoint_writes_total', { result: 'saved' });
+      telemetry.observe('af_checkpoint_bytes', Buffer.byteLength(request.body));
+      telemetry.span({
+        runId: request.correlation.runId,
+        name: 'checkpoint.save',
+        subject: 'checkpoint',
+        id: `${request.correlation.runId}/${request.version}`,
+        ...(request.binding.stepId
+          ? { parent: { subject: 'step' as const, id: request.binding.stepId } }
+          : {}),
+        startTimeMs: started,
+        attributes: {
+          'af.organization.id': request.correlation.organizationId,
+          'af.thread.id': request.correlation.threadId,
+          'af.runtime.id': runtime.id,
+          'af.checkpoint.version': request.version,
+          'af.checkpoint.bytes': Buffer.byteLength(request.body),
+        },
+      });
+      return ack;
+    } catch (error) {
+      // A conflict, a stale session, a digest or binding mismatch: each is its own result.
+      telemetry.count('af_checkpoint_writes_total', {
+        result: error instanceof ExecutionError ? error.message : 'error',
+      });
+      throw error;
+    }
+  }
+
+  private async storeCheckpoint(
+    runtime: RuntimeIdentity,
+    request: ReturnType<typeof parseRuntimeCheckpointSaveRequest>,
+    nowMs: number,
+  ): Promise<RuntimeCheckpointAck> {
     const { correlation, binding } = request;
     const organizationId = await this.leaseOrganization(runtime, correlation.runId);
     return this.db.tenant(organizationId, async () => {
@@ -294,6 +342,23 @@ export class RuntimeTransportService {
     body: unknown,
   ): Promise<RuntimeCheckpointRecord | null> {
     const { correlation } = parseRuntimeCheckpointLoadRequest(body);
+    const read = (result: string) =>
+      this.deps.telemetry.count('af_checkpoint_reads_total', { result });
+    try {
+      const record = await this.readCheckpoint(runtime, correlation);
+      read(record ? 'loaded' : 'missing');
+      return record;
+    } catch (error) {
+      // CHECKPOINT_CORRUPT: the stored body no longer matches its digest.
+      read(error instanceof ExecutionError ? error.message : 'error');
+      throw error;
+    }
+  }
+
+  private async readCheckpoint(
+    runtime: RuntimeIdentity,
+    correlation: RuntimeCorrelation,
+  ): Promise<RuntimeCheckpointRecord | null> {
     const organizationId = await this.leaseOrganization(runtime, correlation.runId);
     return this.db.tenant(organizationId, async () => {
       const { run } = await this.heldRun(runtime, correlation, [
@@ -413,6 +478,27 @@ export class RuntimeTransportService {
       nowIso,
     );
     if (moved.changes !== 1) return null;
+    this.db.afterCommit(() => {
+      const command = running ? 'run.recover' : 'run.resume';
+      this.deps.telemetry.count('af_runtime_leases_expired_total', {
+        status: String(lease['status']),
+      });
+      this.deps.telemetry.count('af_run_recoveries_total', { command });
+      this.deps.telemetry.span({
+        runId,
+        name: 'run.recovery',
+        subject: 'checkpoint',
+        id: `${runId}/recovery/${sessionId}`,
+        startTimeMs: Date.parse(String(lease['lease_expires_at'])),
+        endTimeMs: nowMs,
+        attributes: {
+          'af.organization.id': organizationId,
+          'af.runtime.id': runtime.id,
+          'af.command': command,
+          'af.recoveries': Number(lease['recoveries']) + (running ? 1 : 0),
+        },
+      });
+    });
     await this.deps.audit(
       runtime.id,
       'runtime.run.recovered',
@@ -458,6 +544,7 @@ export class RuntimeTransportService {
   ): Promise<void> {
     await this.execution.cancelRun(organizationId, runId, code, null);
     await this.closeLease(runId, nowIso);
+    this.db.afterCommit(() => this.deps.telemetry.count('af_runs_abandoned_total', { code }));
     await this.deps.audit(
       'control-plane',
       'runtime.run.abandoned',
@@ -497,8 +584,51 @@ export class RuntimeTransportService {
           await this.closeLease(envelope.runId, new Date(nowMs).toISOString());
         else await this.touchLease(envelope.runId, nowMs);
       }
+      if (!duplicate && (envelope.type === 'step.completed' || envelope.type === 'step.failed'))
+        await this.traceStep(organizationId, envelope.runId, envelope.threadId, envelope.stepId!);
       return { eventId: event.id, sequence: event.sequence, duplicate };
     });
+  }
+
+  /** One span per finished step, under the run, from the times the control plane recorded. */
+  private async traceStep(
+    organizationId: string,
+    runId: string,
+    threadId: string,
+    stepId: string,
+  ): Promise<void> {
+    const step = await this.db.get<{
+      kind: string;
+      status: string;
+      started_at: string | null;
+      created_at: string;
+      completed_at: string | null;
+    }>(
+      `SELECT kind, status, started_at, created_at, completed_at FROM agent_run_steps
+       WHERE id=? AND run_id=? AND organization_id=?`,
+      stepId,
+      runId,
+      organizationId,
+    );
+    if (!step) return;
+    this.db.afterCommit(() =>
+      this.deps.telemetry.span({
+        runId,
+        name: 'run.step',
+        subject: 'step',
+        id: stepId,
+        startTimeMs: Date.parse(String(step.started_at ?? step.created_at)),
+        endTimeMs: step.completed_at ? Date.parse(String(step.completed_at)) : Date.now(),
+        status: step.status === 'COMPLETED' ? 'OK' : 'ERROR',
+        attributes: {
+          'af.organization.id': organizationId,
+          'af.thread.id': threadId,
+          'af.step.id': stepId,
+          'af.step.kind': step.kind,
+          'af.status': step.status,
+        },
+      }),
+    );
   }
 
   /** Decide a governed action through the Action Gateway (ADR 0005, ADR 0012). */
@@ -723,8 +853,9 @@ export class RuntimeTransportService {
       id: string;
       organization_id: string;
       leased: string | null;
+      created_at: string;
     }>(
-      `SELECT r.id, r.organization_id, l.run_id AS leased FROM agent_runs r
+      `SELECT r.id, r.organization_id, r.created_at, l.run_id AS leased FROM agent_runs r
        LEFT JOIN agent_run_leases l ON l.run_id=r.id
        WHERE r.status='QUEUED' AND r.status_reason IS NULL AND r.runtime_sequence=0
        AND r.manifest_api_version='agents-foundry/v2'
@@ -770,6 +901,12 @@ export class RuntimeTransportService {
         candidate.id,
         { runtimeId: runtime.id, sessionId },
         candidate.organization_id,
+      );
+      this.db.afterCommit(() =>
+        this.deps.telemetry.observe(
+          'af_run_queue_wait_ms',
+          nowMs - Date.parse(String(candidate.created_at)),
+        ),
       );
       return { command, lease: { sessionId, runtimeSequence: 0, leaseExpiresAt: expires } };
     }

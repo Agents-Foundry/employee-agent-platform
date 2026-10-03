@@ -534,7 +534,15 @@ artifact store with verified hashes, short-lived authorized retrieval and enforc
 ([ADR 0033](adr/0033-durable-artifact-storage.md)). Organization model keys are resolved
 through the secret broker
 ([ADR 0034](adr/0034-organization-managed-model-credentials.md)).
-The highest-value follow-up is a production pilot's remaining blockers: verifying the Vault
-provider and the object-store adapter against live services, an admin console for
-source-control connections, credential leases, model credentials and artifact downloads, and
-observability (metrics and traces) for runs, recoveries and storage.
+Every run is one trace across the control plane and both runtimes, with metrics for each
+dependency ([ADR 0035](adr/0035-observability.md)). Failure drills prove the outcome of each
+component failure, and a write whose outcome is unknown waits for an administrator
+([ADR 0036](adr/0036-failure-drills-and-reconciliation.md)). Browser runs keep traces,
+screenshots and network evidence, uploaded directly to the artifact store when large
+([ADR 0037](adr/0037-direct-artifact-upload-and-browser-evidence.md)). Readiness for a pilot is
+computed from test results on every build
+([ADR 0038](adr/0038-pilot-readiness-assessment.md)).
+The highest-value follow-up is the pilot itself and what the readiness report still lists:
+verifying the Vault provider, the object-store adapter and the telemetry exporters against
+live services, and screens for reconciliation, source-control connections, credential leases,
+model credentials and artifact downloads.

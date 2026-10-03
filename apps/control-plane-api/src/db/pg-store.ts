@@ -18,6 +18,8 @@ export type Scope = { kind: 'tenant'; organizationId: string } | { kind: 'platfo
 interface Transaction {
   scope: Scope;
   client: pg.PoolClient;
+  /** Run once the transaction has committed; dropped if it does not. */
+  afterCommit: (() => void)[];
 }
 
 export class DatabaseScopeError extends Error {}
@@ -40,6 +42,40 @@ export function constraintKind(error: unknown): ConstraintKind | undefined {
 /** Serialization failures and deadlocks: the whole transaction is retried. */
 const RETRYABLE = new Set(['40001', '40P01']);
 const MAX_ATTEMPTS = 8;
+/**
+ * A lost or refused connection: the server restarted, failed over or closed the session.
+ * Nothing of the transaction was kept, so it is run again, a few times, over about three
+ * seconds. The exception is a connection lost while COMMIT was in flight: the outcome is
+ * unknown, so that is never retried here and the caller's own idempotency decides.
+ */
+const CONNECTION_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  '57P01',
+  '57P02',
+  '57P03',
+  '08000',
+  '08001',
+  '08003',
+  '08004',
+  '08006',
+  '08007',
+]);
+const CONNECTION_MESSAGE =
+  /Connection terminated|connection error|timeout exceeded when trying to connect|not queryable/i;
+const CONNECTION_DELAYS_MS = [100, 300, 900, 1700];
+const commitUnknown = new WeakSet<object>();
+
+export function isConnectionFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return (
+    (typeof code === 'string' && CONNECTION_CODES.has(code)) ||
+    (typeof message === 'string' && CONNECTION_MESSAGE.test(message))
+  );
+}
 /** Unreachable servers fail fast instead of hanging requests or CLI runs. */
 export const CONNECT_TIMEOUT_MS = 10_000;
 
@@ -124,6 +160,8 @@ export class PgStore {
   private readonly current = new AsyncLocalStorage<Transaction>();
   private closed = false;
   private readonly listeners = new Set<() => Promise<void>>();
+  /** Told about every transaction that is run again, and why (telemetry). */
+  onRetry: ((reason: 'serialization' | 'connection') => void) | undefined;
 
   private constructor(
     private readonly tenantPool: pg.Pool,
@@ -183,6 +221,22 @@ export class PgStore {
   /** The scope of the current transaction, if any. */
   scope(): Scope | undefined {
     return this.current.getStore()?.scope;
+  }
+
+  /**
+   * Run `effect` once the current transaction has committed, or now if there is none. For
+   * things that must not happen for a transaction that is rolled back or run again, such as
+   * counting it. Errors from `effect` are swallowed.
+   */
+  afterCommit(effect: () => void): void {
+    const transaction = this.current.getStore();
+    if (transaction) transaction.afterCommit.push(effect);
+    else
+      try {
+        effect();
+      } catch {
+        // Never fails the caller.
+      }
   }
 
   async get<T extends Row = Row>(sql: string, ...params: SqlParam[]): Promise<T | undefined> {
@@ -271,14 +325,28 @@ export class PgStore {
       );
     }
     if (this.closed) throw new DatabaseScopeError('DATABASE_CLOSED');
+    let reconnects = 0;
     for (let attempt = 1; ; attempt++) {
       try {
         return await this.attempt(scope, work);
       } catch (error) {
         const code = (error as { code?: unknown }).code;
-        if (typeof code !== 'string' || !RETRYABLE.has(code) || attempt >= MAX_ATTEMPTS)
+        if (typeof code === 'string' && RETRYABLE.has(code) && attempt < MAX_ATTEMPTS) {
+          this.onRetry?.('serialization');
+          await new Promise((resolve) => setTimeout(resolve, Math.random() * 10 * attempt));
+          continue;
+        }
+        const delay = CONNECTION_DELAYS_MS[reconnects];
+        if (
+          delay === undefined ||
+          this.closed ||
+          !isConnectionFailure(error) ||
+          commitUnknown.has(error as object)
+        )
           throw error;
-        await new Promise((resolve) => setTimeout(resolve, Math.random() * 10 * attempt));
+        reconnects += 1;
+        this.onRetry?.('connection');
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   }
@@ -286,17 +354,32 @@ export class PgStore {
   private async attempt<T>(scope: Scope, work: () => Promise<T>): Promise<T> {
     const pool = scope.kind === 'tenant' ? this.tenantPool : this.platformPool;
     const client = await pool.connect();
+    // A connection lost while it is in use emits 'error' as well as failing the query. With no
+    // listener Node would end the process; the failed query is what the caller handles.
+    const lost = () => undefined;
+    client.on('error', lost);
     let broken: Error | undefined;
+    let committing = false;
     try {
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
       if (scope.kind === 'tenant')
         await client.query("SELECT set_config('app.organization_id', $1, true)", [
           scope.organizationId,
         ]);
-      const result = await this.current.run({ scope, client }, work);
+      const transaction: Transaction = { scope, client, afterCommit: [] };
+      const result = await this.current.run(transaction, work);
+      committing = true;
       await client.query('COMMIT');
+      for (const effect of transaction.afterCommit)
+        try {
+          effect();
+        } catch {
+          // An effect never undoes a committed transaction.
+        }
       return result;
     } catch (error) {
+      if (committing && isConnectionFailure(error) && error && typeof error === 'object')
+        commitUnknown.add(error);
       try {
         await client.query('ROLLBACK');
       } catch (rollback) {
@@ -304,6 +387,7 @@ export class PgStore {
       }
       throw error;
     } finally {
+      client.off('error', lost);
       client.release(broken);
     }
   }

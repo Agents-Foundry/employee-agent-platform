@@ -142,7 +142,14 @@ off by default (`GENERIC_AGENT_RUNTIME_ENABLED`).
   [0031](docs/adr/0031-secret-and-credential-brokering.md),
   [0032](docs/adr/0032-durable-checkpoints-and-run-recovery.md),
   [0033](docs/adr/0033-durable-artifact-storage.md),
-  [0034](docs/adr/0034-organization-managed-model-credentials.md)
+  [0034](docs/adr/0034-organization-managed-model-credentials.md),
+  [0035](docs/adr/0035-observability.md),
+  [0036](docs/adr/0036-failure-drills-and-reconciliation.md),
+  [0037](docs/adr/0037-direct-artifact-upload-and-browser-evidence.md),
+  [0038](docs/adr/0038-pilot-readiness-assessment.md)
+- Operating it: [observability](docs/observability.md),
+  [failure handling and reconciliation](docs/failure-handling.md),
+  [pilot readiness](docs/pilot-readiness.md)
 - Agent runtime (Phase C): [docs/agent-runtime.md](docs/agent-runtime.md)
 - Action Gateway (Phase D): [docs/action-gateway.md](docs/action-gateway.md)
 - Execution runtime (Phase E): [docs/execution-runtime.md](docs/execution-runtime.md)

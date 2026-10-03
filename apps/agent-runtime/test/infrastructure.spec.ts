@@ -320,7 +320,10 @@ describe('architecture boundaries', () => {
           specifier.startsWith('./') ||
           (specifier.startsWith('../') &&
             !specifier.includes('apps/') &&
-            (!specifier.includes('packages/') || specifier.includes('packages/contracts/')));
+            (!specifier.includes('packages/') ||
+              specifier.includes('packages/contracts/') ||
+              // Provider-neutral tracing and metrics; it depends on nothing else here.
+              specifier.includes('packages/telemetry/')));
         expect(allowed, `${relative(source, file)} imports ${specifier}`).toBe(true);
       }
     }

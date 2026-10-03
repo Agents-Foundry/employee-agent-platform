@@ -61,6 +61,8 @@ import { buildManifestPayload, type ManifestIssue } from './agents/manifest-v2.j
 import { manifestSubject } from '../../../packages/contracts/src/manifest.js';
 import { parseSignedManifest } from '../../../packages/contracts/src/runtime/v1/schemas.js';
 import { PgStore, type PgStoreConfig, type Row } from './db/pg-store.js';
+import { Telemetry } from '../../../packages/telemetry/src/index.js';
+import { ActionReconciliationService } from './actions/action-reconciliation.js';
 import { assertSchemaCurrent, migrate } from './db/migrate.js';
 
 const ORGANIZATION_ID = 'org_agents_foundry';
@@ -124,6 +126,12 @@ export interface ControlPlaneDatabaseOptions {
    * (`ARTIFACTS_REQUIRE_MANAGED`). Off by default so local runtimes keep working.
    */
   requireManagedArtifacts?: boolean;
+  /** ADR 0035: traces and metrics; defaults to metrics only, with no exporter. */
+  telemetry?: Telemetry;
+  /** ADR 0036: how long a connector call may run before its outcome is taken as unknown. */
+  connectorTimeoutMs?: number;
+  /** ADR 0036: when an unfinished dispatch counts as interrupted (tests). */
+  staleDispatchMs?: number;
 }
 
 /** PostgreSQL connection settings from the environment (ADR 0018). */
@@ -162,6 +170,8 @@ export class ControlPlaneDatabase {
   readonly credentials: CredentialBroker;
   readonly artifacts: ArtifactService;
   readonly modelCredentials: ModelCredentialService;
+  readonly reconciliations: ActionReconciliationService;
+  readonly telemetry: Telemetry;
 
   /**
    * Connects to PostgreSQL, checks (or applies) the schema, registers the catalog and seeds
@@ -206,6 +216,36 @@ export class ControlPlaneDatabase {
     options: ControlPlaneDatabaseOptions,
   ) {
     const db = store;
+    const telemetry = (this.telemetry = options.telemetry ?? new Telemetry('control-plane'));
+    store.onRetry = (reason) => telemetry.count('af_database_retries_total', { reason });
+    telemetry.gauge('af_runs', () =>
+      db.platform(async () => {
+        const counts = new Map(
+          ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'].map((status) => [status, 0]),
+        );
+        for (const row of await db.all<{ status: string; count: number }>(
+          `SELECT status, count(*)::int AS count FROM agent_runs
+           WHERE status IN ('QUEUED','RUNNING','WAITING_FOR_APPROVAL') GROUP BY status`,
+        ))
+          counts.set(row.status, Number(row.count));
+        return [...counts].map(([status, value]) => ({ labels: { status }, value }));
+      }),
+    );
+    telemetry.gauge('af_runtime_leases', () =>
+      db.platform(async () => {
+        const row = (await db.get<{ active: number; expired: number }>(
+          `SELECT count(*) FILTER (WHERE lease_expires_at >= ?)::int AS active,
+            count(*) FILTER (WHERE lease_expires_at < ?)::int AS expired
+           FROM agent_run_leases WHERE state='ACTIVE'`,
+          now(),
+          now(),
+        ))!;
+        return [
+          { labels: { state: 'active' }, value: Number(row.active) },
+          { labels: { state: 'expired' }, value: Number(row.expired) },
+        ];
+      }),
+    );
     this.genericRuntimeEnabled =
       options.genericRuntime ?? process.env['GENERIC_AGENT_RUNTIME_ENABLED'] === 'true';
     this.qaGenericRuntimeEnabled =
@@ -234,6 +274,7 @@ export class ControlPlaneDatabase {
         conversationMessage: async (organizationId, conversationId, content) => {
           await this.addMessage(conversationId, 'AGENT', content, organizationId);
         },
+        telemetry,
       },
     );
     const audit = (
@@ -251,6 +292,7 @@ export class ControlPlaneDatabase {
     const developmentSecrets = options.secrets ?? new FileSecretStore();
     this.secretBroker = new SecretBroker(
       options.secretProvider ?? secretProviderFromEnvironment(developmentSecrets),
+      telemetry,
     );
     this.sourceControl = new SourceControlConnectionService(db, this.structure, audit, {
       allowPrivateNetwork: options.allowPrivateConnectorUrls ?? false,
@@ -262,9 +304,16 @@ export class ControlPlaneDatabase {
       this.structure,
       (grant) => this.signer.verifyExecutionGrant(grant),
       audit,
-      options.credentialBroker,
+      { ...options.credentialBroker, telemetry },
     );
+    this.reconciliations = new ActionReconciliationService(db, this.structure, audit, telemetry);
     this.actions = new ActionGateway(db, this.execution, {
+      telemetry,
+      reconciliations: this.reconciliations,
+      ...(options.connectorTimeoutMs ? { dispatchTimeoutMs: options.connectorTimeoutMs } : {}),
+      ...(options.staleDispatchMs !== undefined
+        ? { staleDispatchMs: options.staleDispatchMs }
+        : {}),
       loadManifest: (agentId, organizationId, employeeId) =>
         this.getManifest(agentId, organizationId, employeeId),
       bundle: (blueprintId, version) => this.catalog.bundle(blueprintId, version, 404),
@@ -282,8 +331,12 @@ export class ControlPlaneDatabase {
       allowPrivateNetwork: options.allowPrivateWebhookUrls ?? false,
       ...(options.webhookSend ? { send: options.webhookSend } : {}),
     });
-    this.modelSpending = new ModelSpendingService(db, this.structure, audit, (org, alert, nowMs) =>
-      this.alertWebhooks.enqueueAlert(org, alert, nowMs),
+    this.modelSpending = new ModelSpendingService(
+      db,
+      this.structure,
+      audit,
+      (org, alert, nowMs) => this.alertWebhooks.enqueueAlert(org, alert, nowMs),
+      telemetry,
     );
     this.modelCredentials = new ModelCredentialService(
       db,
@@ -296,6 +349,7 @@ export class ControlPlaneDatabase {
       audit,
       spending: this.modelSpending,
       modelCredentials: this.modelCredentials,
+      telemetry,
     });
     this.artifacts = new ArtifactService(
       db,
@@ -306,6 +360,9 @@ export class ControlPlaneDatabase {
         signRetrieval: (payload) => this.signer.signArtifactRetrieval(payload),
         verifyRetrieval: (payload, signature) =>
           this.signer.verifyArtifactRetrieval(payload, signature),
+        signUpload: (payload) => this.signer.signArtifactUpload(payload),
+        verifyUpload: (payload, signature) => this.signer.verifyArtifactUpload(payload, signature),
+        telemetry,
         readableArtifact: (actor, artifactId) => this.execution.readableArtifact(actor, artifactId),
         authorizeAgentUpload: (runtime, correlation) =>
           this.runtimeTransport.authorizeStep(runtime, correlation),
@@ -1925,6 +1982,36 @@ export class ControlPlaneDatabase {
         organizationId,
       );
       await this.execution.onApprovalDecided(organizationId, id, status, actorId);
+      const link = await this.db.get<{ run_id: string | null; step_id: string | null }>(
+        'SELECT run_id, step_id FROM approvals WHERE id=? AND organization_id=?',
+        id,
+        organizationId,
+      );
+      this.db.afterCommit(() => {
+        const labels = { action: approval.action, status: status.toLowerCase() };
+        const createdMs = Date.parse(approval.createdAt);
+        this.telemetry.count('af_approvals_total', labels);
+        this.telemetry.observe('af_approval_wait_ms', Date.parse(timestamp) - createdMs, labels);
+        // How long a person took: a span under the step that waited for them.
+        if (link?.run_id)
+          this.telemetry.span({
+            runId: link.run_id,
+            name: 'approval.wait',
+            subject: 'approval',
+            id,
+            ...(link.step_id ? { parent: { subject: 'step' as const, id: link.step_id } } : {}),
+            startTimeMs: createdMs,
+            endTimeMs: Date.parse(timestamp),
+            status: status === 'APPROVED' ? 'OK' : 'ERROR',
+            attributes: {
+              'af.organization.id': organizationId,
+              'af.approval.id': id,
+              'af.action': approval.action,
+              'af.risk': approval.risk,
+              'af.decision': status,
+            },
+          });
+      });
       await this.audit(
         actorId,
         `approval.${status.toLowerCase()}`,

@@ -1,4 +1,4 @@
-import { ConnectorError } from './connector-error.js';
+import { ConnectorError, writeFailure } from './connector-error.js';
 
 export { ConnectorError };
 
@@ -143,17 +143,19 @@ export class JiraIssueTrackerConnector implements IssueTrackerConnector {
         signal,
       });
     } catch {
-      throw new ConnectorError('CONNECTOR_REQUEST_FAILED');
+      // No answer: the request may have reached Jira and created the issue.
+      throw new ConnectorError('CONNECTOR_OUTCOME_UNKNOWN');
     }
-    if (!response.ok) throw new ConnectorError('CONNECTOR_REQUEST_FAILED', response.status);
+    if (!response.ok) throw writeFailure(response.status);
+    // Jira accepted the request; an answer that cannot be read does not undo that.
     let key: unknown;
     try {
       key = ((await response.json()) as { key?: unknown }).key;
     } catch {
-      throw new ConnectorError('CONNECTOR_RESPONSE_INVALID');
+      throw new ConnectorError('CONNECTOR_OUTCOME_UNKNOWN', response.status);
     }
     if (typeof key !== 'string' || !/^[A-Z][A-Z0-9]{0,19}-\d{1,9}$/.test(key))
-      throw new ConnectorError('CONNECTOR_RESPONSE_INVALID');
+      throw new ConnectorError('CONNECTOR_OUTCOME_UNKNOWN', response.status);
     return { key, url: `${base}/browse/${key}` };
   }
 }

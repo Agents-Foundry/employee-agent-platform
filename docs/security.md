@@ -37,4 +37,15 @@ artifact store only the control plane can reach, are verified against their SHA-
 registration and retrieval, and are downloaded through a 60-second permission bound to the
 signed-in person ([ADR 0033](adr/0033-durable-artifact-storage.md)).
 
+Telemetry carries identifiers and measurements only: attribute names are a closed list and
+values must look like identifiers, so prompts, model output, documents, connector payloads and
+secrets cannot be attached to a span or a metric. `/metrics` needs the operator's bearer token
+([ADR 0035](adr/0035-observability.md)).
+
+A governed write whose outcome is unknown is never sent again until an administrator has
+reconciled it ([ADR 0036](adr/0036-failure-drills-and-reconciliation.md)). A permission to
+upload an artifact directly is a signature for one key, size, hash and media type that expires
+within minutes; object-store credentials never leave the control plane
+([ADR 0037](adr/0037-direct-artifact-upload-and-browser-evidence.md)).
+
 `llm_key_bindings.secret_ref` is an opaque pointer such as a cloud secret-manager resource name. Provider keys must be created, rotated, and read only through the vault integration. The API must never return secret material to either Angular application.

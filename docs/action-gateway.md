@@ -110,11 +110,25 @@ Migration 009 adds:
 - `organization_action_policies`;
 - `agent_action_executions` (single use; its status changes only once, from `DISPATCHING`).
 
+Migration 0015 adds `agent_action_reconciliations`: writes whose outcome is unknown and what
+an administrator found ([ADR 0036](adr/0036-failure-drills-and-reconciliation.md)).
+
+## Unknown outcomes
+
+Each action is a read or a write. When a connector does not confirm a write (no response, a
+server error, an unreadable answer) the execution fails with `CONNECTOR_OUTCOME_UNKNOWN`; a
+dispatch that a stopped control plane left open is closed as `DISPATCH_INTERRUPTED`. Either
+way the same action is denied (`ACTION_RECONCILIATION_REQUIRED`) for that thread, and for that
+payload anywhere in the organization, until an administrator resolves it at
+`/api/organization/action-reconciliations`. See
+[failure handling](failure-handling.md).
+
 ## Limitations
 
 - One control-plane action and one connector: Jira Cloud issue creation. Azure DevOps, Linear,
   GitHub and GitLab connectors follow the same registry shape.
 - Egress protection is URL validation only. There is no DNS-rebinding defence or egress proxy
   yet.
-- A dispatch interrupted by a crash stays `DISPATCHING` and needs manual reconciliation.
+- Reconciliation of an unknown outcome is manual, through the API; no provider idempotency
+  keys are used yet.
 - Secrets come from an operator file; a managed vault integration is future work.

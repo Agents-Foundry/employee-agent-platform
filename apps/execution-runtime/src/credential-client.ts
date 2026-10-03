@@ -7,7 +7,11 @@ import type {
   RepositoryCredential,
   SignedExecutionGrant,
 } from '@agents-foundry/contracts';
-import { parseArtifactUpload } from '../../../packages/contracts/src/runtime/v1/schemas.js';
+import {
+  parseArtifactUpload,
+  parseArtifactUploadAuthorization,
+} from '../../../packages/contracts/src/runtime/v1/schemas.js';
+import { directUploadMediaTypes } from '../../../packages/contracts/src/artifacts.js';
 import { credentialTransportPaths } from '../../../packages/contracts/src/credentials.js';
 import { parseCredentialRedeemResponse } from '../../../packages/contracts/src/execution-runtime/v1/schemas.js';
 import {
@@ -91,7 +95,15 @@ export interface ControlPlaneCredentialClientOptions {
   timeoutMs?: number;
   uploadTimeoutMs?: number;
   fetch?: typeof fetch;
+  /**
+   * Artifacts larger than this are uploaded directly to the artifact store (ADR 0037) when
+   * their media type allows it; smaller ones travel inside the signed request.
+   */
+  directUploadThresholdBytes?: number;
 }
+
+/** Above this, base64 inside a JSON request stops being practical. */
+export const DIRECT_UPLOAD_THRESHOLD_BYTES = 4 * 1024 * 1024;
 
 export class ControlPlaneCredentialClient implements CredentialSource, EvidenceUploader {
   private readonly base: URL;
@@ -152,12 +164,19 @@ export class ControlPlaneCredentialClient implements CredentialSource, EvidenceU
     artifact: ArtifactUploadDescriptor,
     content: Buffer,
   ): Promise<ArtifactUpload> {
-    const body = await this.post(
-      runtimeTransportPaths.artifactUploadExecution,
-      { grant, artifact, content: content.toString('base64') },
-      AbortSignal.timeout(this.options.uploadTimeoutMs ?? 120_000),
-      this.options.uploadTimeoutMs ?? 120_000,
-    );
+    const timeoutMs = this.options.uploadTimeoutMs ?? 120_000;
+    const direct =
+      content.byteLength >
+        (this.options.directUploadThresholdBytes ?? DIRECT_UPLOAD_THRESHOLD_BYTES) &&
+      (directUploadMediaTypes as readonly string[]).includes(artifact.mediaType);
+    const body = direct
+      ? await this.uploadDirectly(grant, artifact, content, timeoutMs)
+      : await this.post(
+          runtimeTransportPaths.artifactUploadExecution,
+          { grant, artifact, content: content.toString('base64') },
+          AbortSignal.timeout(timeoutMs),
+          timeoutMs,
+        );
     let stored: ArtifactUpload;
     try {
       stored = parseArtifactUpload(body);
@@ -173,20 +192,112 @@ export class ControlPlaneCredentialClient implements CredentialSource, EvidenceU
     return stored;
   }
 
-  private async post(
+  /**
+   * Ask for permission to store exactly these bytes, send them where the permission says,
+   * then have the control plane read them back and accept them. The permission is a
+   * signature for one object; this runtime never holds a store credential.
+   */
+  private async uploadDirectly(
+    grant: SignedExecutionGrant,
+    artifact: ArtifactUploadDescriptor,
+    content: Buffer,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    let permission;
+    try {
+      permission = parseArtifactUploadAuthorization(
+        await this.post(
+          runtimeTransportPaths.artifactUploadAuthorize,
+          { grant, artifact },
+          AbortSignal.timeout(this.options.timeoutMs ?? 15_000),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof CredentialRefused) throw error;
+      throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+    }
+    if (permission.artifactId !== artifact.id)
+      throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+    if (permission.target === 'CONTROL_PLANE') {
+      // Only ever this control plane's own upload path.
+      if (!permission.url.startsWith(`${runtimeTransportPaths.artifactContent}/`))
+        throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+      await this.send(
+        'PUT',
+        permission.url,
+        content,
+        artifact.mediaType,
+        AbortSignal.timeout(timeoutMs),
+        timeoutMs,
+      );
+    } else {
+      let target: URL;
+      try {
+        target = new URL(permission.url);
+      } catch {
+        throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+      }
+      if (
+        target.protocol !== 'https:' &&
+        !['localhost', '127.0.0.1', '[::1]'].includes(target.hostname)
+      )
+        throw new CredentialRefused('ARTIFACT_RESPONSE_INVALID');
+      let response: Response;
+      try {
+        response = await (this.options.fetch ?? fetch)(target, {
+          method: 'PUT',
+          headers: permission.headers,
+          body: new Uint8Array(content),
+          redirect: 'error',
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        await response.arrayBuffer().catch(() => undefined);
+      } catch {
+        throw new CredentialRefused('ARTIFACT_STORE_UNREACHABLE');
+      }
+      // Never repeat what the store answered: it could name the bucket or echo a header.
+      if (!response.ok) throw new CredentialRefused('ARTIFACT_STORE_REFUSED');
+    }
+    return this.post(
+      runtimeTransportPaths.artifactUploadComplete,
+      { grant, artifactId: artifact.id },
+      AbortSignal.timeout(timeoutMs),
+      timeoutMs,
+    );
+  }
+
+  private post(
     path: string,
     body: unknown,
     signal: AbortSignal,
     timeoutMs = this.options.timeoutMs ?? 15_000,
   ): Promise<unknown> {
-    const bytes = Buffer.from(JSON.stringify(body), 'utf8');
+    return this.send(
+      'POST',
+      path,
+      Buffer.from(JSON.stringify(body), 'utf8'),
+      'application/json',
+      signal,
+      timeoutMs,
+    );
+  }
+
+  /** One request signed with this runtime's workload key; the signature covers the body. */
+  private async send(
+    method: 'POST' | 'PUT',
+    path: string,
+    bytes: Buffer,
+    contentType: string,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<unknown> {
     const timestamp = new Date().toISOString();
     const nonce = randomUUID();
     const signature = sign(
       null,
       Buffer.from(
         runtimeSigningInput({
-          method: 'POST',
+          method,
           path,
           timestamp,
           nonce,
@@ -198,15 +309,15 @@ export class ControlPlaneCredentialClient implements CredentialSource, EvidenceU
     let response: Response;
     try {
       response = await (this.options.fetch ?? fetch)(new URL(path, this.base), {
-        method: 'POST',
+        method,
         headers: {
-          'content-type': 'application/json',
+          'content-type': contentType,
           [runtimeAuthHeaders.runtimeId]: this.options.runtimeId,
           [runtimeAuthHeaders.timestamp]: timestamp,
           [runtimeAuthHeaders.nonce]: nonce,
           [runtimeAuthHeaders.signature]: signature,
         },
-        body: bytes,
+        body: new Uint8Array(bytes),
         redirect: 'error',
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       });

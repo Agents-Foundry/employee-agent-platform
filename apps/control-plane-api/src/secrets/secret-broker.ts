@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { inspect } from 'node:util';
 import { secretReferencePattern } from '../../../../packages/contracts/src/actions.js';
 import type { SecretResolver } from '../actions/secrets.js';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
 
 const REDACTED = '[REDACTED]';
 
@@ -58,7 +59,10 @@ export interface SecretProvider {
  * and returned as `SecretValue`.
  */
 export class SecretBroker {
-  constructor(private readonly provider: SecretProvider) {}
+  constructor(
+    private readonly provider: SecretProvider,
+    private readonly telemetry?: Telemetry,
+  ) {}
 
   get providerId(): string {
     return this.provider.id;
@@ -69,8 +73,15 @@ export class SecretBroker {
     reference: string,
     signal?: AbortSignal,
   ): Promise<SecretValue> {
-    if (!organizationId || !secretReferencePattern.test(reference))
+    const provider = this.provider.id;
+    // Counts say whether the store answered, never which secret was asked for.
+    const counted = (result: string) =>
+      this.telemetry?.count('af_secret_resolutions_total', { provider, result });
+    if (!organizationId || !secretReferencePattern.test(reference)) {
+      counted('invalid_reference');
       throw new SecretUnavailable('SECRET_REFERENCE_INVALID');
+    }
+    const started = Date.now();
     let value: string | null;
     try {
       value = await this.provider.resolve(
@@ -79,10 +90,16 @@ export class SecretBroker {
         signal,
       );
     } catch {
+      counted('provider_unavailable');
+      throw new SecretUnavailable('SECRET_UNRESOLVED');
+    } finally {
+      this.telemetry?.observe('af_secret_resolution_ms', Date.now() - started, { provider });
+    }
+    if (typeof value !== 'string' || value.length === 0) {
+      counted('not_found');
       throw new SecretUnavailable('SECRET_UNRESOLVED');
     }
-    if (typeof value !== 'string' || value.length === 0)
-      throw new SecretUnavailable('SECRET_UNRESOLVED');
+    counted('resolved');
     return new SecretValue(value);
   }
 }

@@ -130,6 +130,26 @@ export class ManifestSigner {
     }
   }
 
+  /** Direct-upload permissions for the control plane's own upload path (ADR 0037). */
+  signArtifactUpload(payload: string): string {
+    return sign(null, Buffer.from(`AF-ARTIFACT-UPLOAD-V1\n${payload}`), this.privateKey).toString(
+      'base64url',
+    );
+  }
+
+  verifyArtifactUpload(payload: string, signature: string): boolean {
+    try {
+      return verify(
+        null,
+        Buffer.from(`AF-ARTIFACT-UPLOAD-V1\n${payload}`),
+        this.publicKey,
+        Buffer.from(signature, 'base64url'),
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Webhook deliveries share the key but sign a domain-separated input (ADR 0024). */
   signWebhook(deliveryId: string, timestamp: number, body: string): string {
     return sign(

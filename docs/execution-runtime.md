@@ -107,30 +107,47 @@ allow-list.
 
 ## Configuration
 
-| Variable                                | Default                   | Purpose                                                                                                  |
-| --------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `EXECUTION_GRANT_VERIFICATION_KEY`      | required                  | Control-plane public key (base64 SPKI from `GET /api/manifest-key`)                                      |
-| `EXECUTION_RUNTIME_HOST` / `_PORT`      | `127.0.0.1` / `4500`      | Listen address; keep it on loopback or behind mTLS                                                       |
-| `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                                                        |
-| `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider                                               |
-| `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                         |
-| `EXECUTION_CONTROL_PLANE_URL`           | unset                     | Control plane to redeem credential leases from and upload evidence to; set with the two variables below  |
-| `EXECUTION_RUNTIME_ID`                  | unset                     | This runtime's identity, registered in the control plane with `"role": "execution"`                      |
-| `EXECUTION_RUNTIME_KEY_PATH`            | unset                     | Its Ed25519 private key (PKCS#8 PEM)                                                                     |
-| `EXECUTION_GIT_CA_FILE`                 | unset                     | A CA bundle git also trusts, for a git host with a private CA                                            |
-| `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                   |
-| `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                           |
-| `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`; `sandbox/playwright.Dockerfile` builds one          |
-| `EXECUTION_EGRESS_PROXY`                | `true`                    | Container provider: enforce grant host allow-lists with the egress proxy                                 |
-| `EXECUTION_EGRESS_PROXY_IMAGE`          | the sandbox image         | Image that runs the egress proxy; it needs `node`                                                        |
-| `EXECUTION_EGRESS_PROXY_DIR`            | the package's `sandbox/`  | Directory containing `egress-proxy.mjs`                                                                  |
-| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS`   | `false`                   | Without the proxy: run grants that need network on the bridge network (no allow-list)                    |
-| `EXECUTION_RUNTIME_URL` (agent runtime) | unset                     | When set, the agent runtime offers the workspace tools (`repository`, `browser`, `code-editor`, `build`) |
+| Variable                                | Default                   | Purpose                                                                                                            |
+| --------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `EXECUTION_GRANT_VERIFICATION_KEY`      | required                  | Control-plane public key (base64 SPKI from `GET /api/manifest-key`)                                                |
+| `EXECUTION_RUNTIME_HOST` / `_PORT`      | `127.0.0.1` / `4500`      | Listen address; keep it on loopback or behind mTLS                                                                 |
+| `EXECUTION_RUNTIME_STATE_DIR`           | `.data/execution-runtime` | Workspaces, scratch, artifacts and state database                                                                  |
+| `EXECUTION_ALLOW_UNSANDBOXED`           | `false`                   | Accept grants that require a sandbox on the local provider                                                         |
+| `EXECUTION_ALLOW_FILE_REPOSITORIES`     | `false`                   | Allow `file://` repositories (mirrors and tests)                                                                   |
+| `EXECUTION_CONTROL_PLANE_URL`           | unset                     | Control plane to redeem credential leases from and upload evidence to; set with the two variables below            |
+| `EXECUTION_RUNTIME_ID`                  | unset                     | This runtime's identity, registered in the control plane with `"role": "execution"`                                |
+| `EXECUTION_RUNTIME_KEY_PATH`            | unset                     | Its Ed25519 private key (PKCS#8 PEM)                                                                               |
+| `EXECUTION_GIT_CA_FILE`                 | unset                     | A CA bundle git also trusts, for a git host with a private CA                                                      |
+| `EXECUTION_PROVIDER`                    | `local`                   | `local` or `container`                                                                                             |
+| `EXECUTION_SANDBOX_IMAGE`               | required for `container`  | Image for project scripts, for example `node:22-bookworm-slim`                                                     |
+| `EXECUTION_PLAYWRIGHT_IMAGE`            | the sandbox image         | Image with Playwright browsers for `playwright.run`; `sandbox/playwright.Dockerfile` builds one                    |
+| `EXECUTION_EGRESS_PROXY`                | `true`                    | Container provider: enforce grant host allow-lists with the egress proxy                                           |
+| `EXECUTION_EGRESS_PROXY_IMAGE`          | the sandbox image         | Image that runs the egress proxy; it needs `node`                                                                  |
+| `EXECUTION_EGRESS_PROXY_DIR`            | the package's `sandbox/`  | Directory containing `egress-proxy.mjs`                                                                            |
+| `EXECUTION_ALLOW_UNRESTRICTED_EGRESS`   | `false`                   | Without the proxy: run grants that need network on the bridge network (no allow-list)                              |
+| `EXECUTION_METRICS_TOKEN_PATH`          | unset                     | File with the bearer token for `GET /metrics`; unset, the route does not exist ([observability](observability.md)) |
+| `EXECUTION_RUNTIME_URL` (agent runtime) | unset                     | When set, the agent runtime offers the workspace tools (`repository`, `browser`, `code-editor`, `build`)           |
 
 ```bash
 npm run dev:execution   # execution runtime
 npm run dev:runtime     # agent runtime with EXECUTION_RUNTIME_URL=http://127.0.0.1:4500
 ```
+
+## Browser evidence
+
+`playwright.run` keeps more than the report
+([ADR 0037](adr/0037-direct-artifact-upload-and-browser-evidence.md)): a trace for each failed
+test, screenshots and videos the project produced, the test process's console output and, with
+the container provider, the egress log as network evidence. Each kind has a size and count
+limit and a retention class; anything over a limit is left out and the result says so.
+Artifacts over 4 MiB are uploaded directly to the artifact store with a permission for exactly
+those bytes.
+
+## Restarts
+
+At startup the runtime closes every grant the previous process was working under with
+`OPERATION_INTERRUPTED`, discards unfinished credentialed checkouts and releases their leases
+([ADR 0036](adr/0036-failure-drills-and-reconciliation.md)).
 
 ## Limitations
 

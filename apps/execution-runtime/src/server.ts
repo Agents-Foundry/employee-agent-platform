@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { executionPaths } from '../../../packages/contracts/src/execution-runtime/v1/protocol.js';
 import { ExecutionRefused, type ExecutionService } from './execution-service.js';
 import type { ExecutionProvider } from './providers/execution-provider.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import type { Telemetry } from '../../../packages/telemetry/src/index.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -27,8 +30,34 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 export function createExecutionServer(
   service: ExecutionService,
   provider: ExecutionProvider,
+  /**
+   * `GET /metrics` (ADR 0035), for the operator's scraper: the telemetry to report and the
+   * file holding the bearer token it must present. Without it the route does not exist.
+   */
+  metrics?: { telemetry: Telemetry; tokenPath: string },
 ): Server {
+  const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
   return createServer(async (request, response) => {
+    if (metrics && request.method === 'GET' && request.url === '/metrics') {
+      let expected = '';
+      try {
+        expected = readFileSync(metrics.tokenPath, 'utf8').trim();
+      } catch {
+        // No readable token: nobody is let in.
+      }
+      const presented = /^Bearer (.+)$/.exec(String(request.headers['authorization'] ?? ''))?.[1];
+      if (expected.length < 32 || !timingSafeEqual(digest(presented ?? ''), digest(expected))) {
+        response.writeHead(401, { 'www-authenticate': 'Bearer', 'cache-control': 'no-store' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': 'text/plain; version=0.0.4',
+        'cache-control': 'no-store',
+      });
+      response.end(await metrics.telemetry.metrics.prometheus());
+      return;
+    }
     const send = (status: number, body: unknown) => {
       response.writeHead(status, {
         'content-type': 'application/json',

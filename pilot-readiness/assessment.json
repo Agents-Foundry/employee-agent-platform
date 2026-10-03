@@ -1,0 +1,553 @@
+{
+  "version": 1,
+  "description": "What must be proven before the first controlled organization pilot (ADR 0038). Statuses are not written here: scripts/pilot-readiness.mjs computes them from the test results of the commit being assessed. A capability is GREEN only when every proof ran and passed and no open limitation is linked to it.",
+  "capabilities": [
+    {
+      "id": "tenant-isolation",
+      "title": "Tenant isolation",
+      "minimum": "GREEN",
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/row-level-security.spec.ts",
+          "test": "forces row-level security with a tenant policy on every table that has an organization"
+        },
+        {
+          "file": "apps/control-plane-api/test/row-level-security.spec.ts",
+          "test": "shows a tenant exactly its own rows in every tenant table"
+        },
+        {
+          "file": "apps/control-plane-api/test/row-level-security.spec.ts",
+          "test": "refuses writes that name another tenant, even with its identifiers"
+        },
+        {
+          "file": "apps/control-plane-api/test/row-level-security.spec.ts",
+          "test": "fails closed on scope misuse and on a tenant role that could bypass row security"
+        },
+        {
+          "file": "apps/control-plane-api/test/durable-artifacts.spec.ts",
+          "test": "keeps one tenant from reaching or overwriting another tenant’s objects"
+        },
+        {
+          "file": "apps/control-plane-api/test/run-recovery-e2e.spec.ts",
+          "test": "keeps checkpoints inside their tenant, their lease and their version order"
+        }
+      ]
+    },
+    {
+      "id": "manifest-integrity",
+      "title": "Manifest and signature integrity",
+      "minimum": "GREEN",
+      "proofs": [
+        {
+          "file": "apps/agent-runtime/test/runtime-host.spec.ts",
+          "test": "fails closed on manifests with a bad signature, key, subject or profile"
+        },
+        {
+          "file": "apps/control-plane-api/test/runtime-protocol.spec.ts",
+          "test": "fails closed on unknown or missing manifest versions"
+        },
+        {
+          "file": "apps/control-plane-api/test/catalog.spec.ts",
+          "test": "pins released versions: a mutated version fails startup, new versions register"
+        },
+        {
+          "file": "apps/control-plane-api/test/catalog-reload.spec.ts",
+          "test": "never serves a stored version it cannot verify"
+        },
+        {
+          "file": "apps/control-plane-api/test/catalog-reload.spec.ts",
+          "test": "refuses bundles this release cannot interpret, even with a matching digest"
+        },
+        {
+          "file": "apps/control-plane-api/test/execution-grants.spec.ts",
+          "test": "issues one signed, operation-bound grant for an allowed in-scope operation"
+        },
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "refuses forged, expired, mismatched and replayed-while-running grants before any work"
+        }
+      ]
+    },
+    {
+      "id": "policy-approval",
+      "title": "Policy and approval controls",
+      "minimum": "AMBER",
+      "limitations": ["reconciliation-api-only"],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/action-gateway.spec.ts",
+          "test": "denies requests that are unconfigured, out of scope, mismatched or under-granted"
+        },
+        {
+          "file": "apps/control-plane-api/test/action-gateway.spec.ts",
+          "test": "pauses with a payload-bound expiring approval, then executes exactly once after approval"
+        },
+        {
+          "file": "apps/control-plane-api/test/action-gateway.spec.ts",
+          "test": "expires unanswered approvals, cancels the run and rejects late decisions"
+        },
+        {
+          "file": "apps/control-plane-api/test/action-gateway.spec.ts",
+          "test": "only ever keeps or tightens the platform decision"
+        },
+        {
+          "file": "apps/control-plane-api/test/row-level-security.spec.ts",
+          "test": "lets exactly one of two simultaneous approval decisions succeed"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "12. stops for reconciliation when a connector times out after the remote system may have accepted (manual reconciliation)"
+        }
+      ]
+    },
+    {
+      "id": "model-budget",
+      "title": "Model budget controls",
+      "minimum": "GREEN",
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/model-spending.spec.ts",
+          "test": "caps output at what the run may still use, then denies and audits"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-spending.spec.ts",
+          "test": "serializes concurrent reservations, so the last tokens are granted once"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-spending.spec.ts",
+          "test": "lets only the runtime holding a running run reserve, and settle only its own reservations"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-spending-runtime.spec.ts",
+          "test": "makes no model call once the limit is reached, and fails the run"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "1. recovers when the runtime dies during a model call (recovery)"
+        }
+      ]
+    },
+    {
+      "id": "credential-isolation",
+      "title": "Credential isolation",
+      "minimum": "AMBER",
+      "limitations": ["vault-not-live", "employee-byok-unavailable"],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/credential-broker.spec.ts",
+          "test": "never prints, serializes or inspects a secret value"
+        },
+        {
+          "file": "apps/control-plane-api/test/credential-broker.spec.ts",
+          "test": "reads Vault KV v2 under the organization path and trusts nothing else"
+        },
+        {
+          "file": "apps/control-plane-api/test/credential-broker.spec.ts",
+          "test": "gives the credential once, to an execution runtime holding the exact grant"
+        },
+        {
+          "file": "apps/control-plane-api/test/credential-broker.spec.ts",
+          "test": "refuses another tenant, another grant, another operation and a forged grant"
+        },
+        {
+          "file": "apps/control-plane-api/test/credential-broker.spec.ts",
+          "test": "stores no credential in any table: events, audit, alerts, webhooks or quality results"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-credentials.spec.ts",
+          "test": "gives the key only to the runtime holding a running run that names the provider"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-credentials.spec.ts",
+          "test": "still fails closed for employee-held keys"
+        },
+        {
+          "file": "apps/control-plane-api/test/model-credentials.spec.ts",
+          "test": "runs a real runtime on the brokered key without the key reaching any durable record"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "8. fails closed when the secret store is unavailable (fail closed, then safe retry)"
+        }
+      ]
+    },
+    {
+      "id": "private-repositories",
+      "title": "Private repositories",
+      "minimum": "GREEN",
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/private-checkout-e2e.spec.ts",
+          "test": "checks out a private repository without the credential reaching anything but git"
+        },
+        {
+          "file": "apps/control-plane-api/test/private-checkout-e2e.spec.ts",
+          "test": "checks out nothing once the lease is revoked"
+        },
+        {
+          "file": "apps/execution-runtime/test/private-checkout.spec.ts",
+          "test": "clones a private repository and leaves no trace of the credential"
+        },
+        {
+          "file": "apps/execution-runtime/test/private-checkout.spec.ts",
+          "test": "never falls back to an anonymous clone"
+        },
+        {
+          "file": "apps/execution-runtime/test/private-checkout.spec.ts",
+          "test": "redacts the credential from git errors, output and evidence"
+        },
+        {
+          "file": "apps/execution-runtime/test/private-checkout.spec.ts",
+          "test": "cleans up after a crash: partial checkout removed, lease ended, grant closed"
+        }
+      ]
+    },
+    {
+      "id": "execution-sandboxing",
+      "title": "Execution sandboxing and egress control",
+      "minimum": "AMBER",
+      "limitations": ["checkout-on-host"],
+      "proofs": [
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "builds a locked-down docker run with only the given environment"
+        },
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "builds a locked-down egress proxy that runs only the mounted proxy script"
+        },
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "writes files inside the workspace only, never through links or into .git"
+        },
+        {
+          "file": "apps/execution-runtime/test/egress-proxy.spec.ts",
+          "test": "forwards plain HTTP and CONNECT tunnels to allowed hosts only"
+        },
+        {
+          "file": "apps/execution-runtime/test/egress-proxy.spec.ts",
+          "test": "refuses allowed names that resolve to blocked or unknown addresses"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "11. never starts the sandbox when the egress proxy fails to start (fail closed)"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "11b. never starts the sandbox when its private network cannot be created, or no proxy is configured"
+        }
+      ],
+      "operationalProofs": [
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "runs project scripts with no network, no secrets and a read-only root filesystem"
+        },
+        {
+          "file": "apps/execution-runtime/test/execution-runtime.spec.ts",
+          "test": "lets networked grants reach only their allowed hosts, through the egress proxy"
+        },
+        {
+          "file": "apps/execution-runtime/test/playwright-egress.spec.ts",
+          "test": "runs real Chromium against the allowed QA host and nothing else"
+        }
+      ]
+    },
+    {
+      "id": "recovery",
+      "title": "Recovery from component failures",
+      "minimum": "AMBER",
+      "limitations": ["recovery-latency", "checkpoints-not-encrypted"],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/run-recovery-e2e.spec.ts",
+          "test": "lets runtime B finish the run runtime A abandoned, without repeating the external action"
+        },
+        {
+          "file": "apps/control-plane-api/test/run-recovery-e2e.spec.ts",
+          "test": "fails closed when the stored checkpoint was altered"
+        },
+        {
+          "file": "apps/control-plane-api/test/run-recovery-e2e.spec.ts",
+          "test": "reaps abandoned runs nothing can continue, and stops endless recovery"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "1. recovers when the runtime dies during a model call (recovery)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "2. recovers when the runtime dies immediately before a tool (recovery)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "3. reuses the recorded result when the runtime dies after a governed action succeeded (idempotent reuse)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "4. reuses the execution result when the runtime dies after the operation but before its checkpoint (idempotent reuse)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "5. recovers when the runtime dies during an artifact upload, and removes what it left (recovery)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "6a. lets active runs continue after the control plane restarts (recovery)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "6b. stops for reconciliation when the control plane dies while dispatching a write (manual reconciliation)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "6c. closes dispatches a stopped control plane left open, without its runtime asking"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "7. closes the operation a stopped runtime was in the middle of, and never runs it twice (fail closed)"
+        },
+        {
+          "file": "apps/execution-runtime/test/private-checkout.spec.ts",
+          "test": "cleans up after a crash: partial checkout removed, lease ended, grant closed"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "10. rides out lost database connections (safe retry)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "12b. treats a server error and an unreadable answer to a write as unknown, and a refusal as final"
+        }
+      ]
+    },
+    {
+      "id": "artifacts",
+      "title": "Durable artifacts and evidence",
+      "minimum": "AMBER",
+      "limitations": [
+        "object-store-not-live",
+        "artifact-retrieval-buffered",
+        "artifact-download-api-only"
+      ],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/durable-artifacts.spec.ts",
+          "test": "stores uploaded bytes outside PostgreSQL and registers only what it verified"
+        },
+        {
+          "file": "apps/control-plane-api/test/durable-artifacts.spec.ts",
+          "test": "enforces hashes and sizes on upload and refuses runtimes that do not hold the run"
+        },
+        {
+          "file": "apps/control-plane-api/test/durable-artifacts.spec.ts",
+          "test": "retrieves content only for the right person, briefly, and only if the hash still holds"
+        },
+        {
+          "file": "apps/control-plane-api/test/durable-artifacts.spec.ts",
+          "test": "enforces retention: bytes are deleted and the lifecycle is recorded"
+        },
+        {
+          "file": "apps/control-plane-api/test/artifact-store.spec.ts",
+          "test": "signs S3 requests exactly as AWS Signature Version 4 specifies"
+        },
+        {
+          "file": "apps/control-plane-api/test/direct-artifact-upload.spec.ts",
+          "test": "authorizes exactly one object, accepts it only after reading it back, and serves it"
+        },
+        {
+          "file": "apps/control-plane-api/test/direct-artifact-upload.spec.ts",
+          "test": "removes and records bytes that are not what was declared, however they got there"
+        },
+        {
+          "file": "apps/control-plane-api/test/direct-artifact-upload.spec.ts",
+          "test": "authorizes only execution runtimes, for recorded grants, allowed types and sizes, within the run quota"
+        },
+        {
+          "file": "apps/control-plane-api/test/direct-artifact-upload.spec.ts",
+          "test": "takes the bytes on a signed, single-purpose path and checks them before storing"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "stores a failed run with its trace, screenshot, console output and report, each with a retention class"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "collects traces and screenshots within limits and nothing else"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "9. keeps the run going when the artifact store is unavailable, and stores again when it returns (safe retry)"
+        }
+      ]
+    },
+    {
+      "id": "observability",
+      "title": "Observability",
+      "minimum": "AMBER",
+      "limitations": ["telemetry-not-live", "no-dashboards"],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "is one connected trace per run, named by the platform’s own identifiers, with no content in it"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "counts refusals, conflicts and corrupt checkpoints"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "keeps only listed attributes with identifier-like values"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "never lets an exporter or a collector fail the work being measured"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "bounds metric labels and series, and renders counters, gauges and histograms"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "exports spans and metrics as OTLP over HTTPS, and drops them when the collector is down"
+        },
+        {
+          "file": "apps/control-plane-api/test/observability.spec.ts",
+          "test": "serves metrics only to a caller with the operator token"
+        },
+        {
+          "file": "apps/execution-runtime/test/failure-drills.spec.ts",
+          "test": "serves metrics only to a caller with the operator token"
+        }
+      ]
+    },
+    {
+      "id": "evaluation-health",
+      "title": "Evaluation health",
+      "minimum": "AMBER",
+      "limitations": ["model-quality-not-in-ci"],
+      "proofs": [
+        {
+          "file": "apps/control-plane-api/test/evaluations.spec.ts",
+          "test": "covers every role version with at least one scenario"
+        },
+        {
+          "file": "apps/control-plane-api/test/quality-evaluations.spec.ts",
+          "test": "runs a task through the real platform, approves what the task allows, and grades it"
+        },
+        {
+          "file": "apps/control-plane-api/test/quality-evaluations.spec.ts",
+          "test": "fails a task whose gate misses, whatever the score: a denied action is out of scope"
+        },
+        {
+          "file": "apps/control-plane-api/test/quality-evaluations.spec.ts",
+          "test": "gives every role at least one quality task"
+        },
+        {
+          "file": "apps/control-plane-api/test/quality-evaluations.spec.ts",
+          "test": "gates every quality task on staying in scope and finishing the run"
+        },
+        {
+          "file": "apps/control-plane-api/test/qa-generic-runtime.spec.ts",
+          "test": "runs validate-story end to end with governed reads, execution and approved writes"
+        },
+        {
+          "file": "apps/control-plane-api/test/frontend-engineer.spec.ts",
+          "test": "names no role outside the catalog, except the documented legacy QA compatibility"
+        }
+      ],
+      "proofSuites": [
+        {
+          "file": "apps/control-plane-api/test/evaluations.spec.ts",
+          "describe": "role governance evaluations",
+          "minimumTests": 10
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    {
+      "id": "object-store-not-live",
+      "severity": "ACCEPTED",
+      "summary": "The S3-compatible adapter is proven against the AWS signing example and a simulated bucket that checks signatures, not against a live S3, GCS or MinIO service.",
+      "beforePilot": "Run an upload, direct upload, retrieval and retention pass against the pilot bucket."
+    },
+    {
+      "id": "vault-not-live",
+      "severity": "ACCEPTED",
+      "summary": "The Vault provider is proven against a simulated KV v2 API, not against a live Vault.",
+      "beforePilot": "Resolve one connector secret and one model key through the pilot Vault."
+    },
+    {
+      "id": "employee-byok-unavailable",
+      "severity": "ACCEPTED",
+      "summary": "Employee-held model keys are refused (fail closed). The desktop-local runtime that would use them is designed, not built.",
+      "beforePilot": "Pilot with organization-managed model credentials only."
+    },
+    {
+      "id": "checkout-on-host",
+      "severity": "ACCEPTED",
+      "summary": "git.checkout runs on the execution runtime's host behind the egress proxy, not inside the sandbox container. It executes no repository code.",
+      "beforePilot": "Run execution runtimes on hosts dedicated to the pilot organization."
+    },
+    {
+      "id": "recovery-latency",
+      "severity": "ACCEPTED",
+      "summary": "A run abandoned by its runtime is picked up after its lease expires: up to ten minutes.",
+      "beforePilot": "Tell pilot users; alert on af_runtime_leases{state=\"expired\"}."
+    },
+    {
+      "id": "checkpoints-not-encrypted",
+      "severity": "ACCEPTED",
+      "summary": "Checkpoint bodies hold conversation content and are not encrypted by the application; they rely on database encryption at rest and row-level security.",
+      "beforePilot": "Confirm encryption at rest on the pilot database."
+    },
+    {
+      "id": "artifact-retrieval-buffered",
+      "severity": "ACCEPTED",
+      "summary": "An artifact is read fully into memory to verify its hash before it is served or accepted: up to 128 MiB per request.",
+      "beforePilot": "Size the control plane's memory for concurrent trace downloads."
+    },
+    {
+      "id": "artifact-download-api-only",
+      "severity": "ACCEPTED",
+      "summary": "Artifact download, model credentials and source-control connections have APIs but no screens in the web or desktop applications.",
+      "beforePilot": "Give pilot administrators the API runbook."
+    },
+    {
+      "id": "reconciliation-api-only",
+      "severity": "ACCEPTED",
+      "summary": "Writes with an unknown outcome are reconciled by an administrator through the API; there is no screen and no notification beyond the metric and audit event.",
+      "beforePilot": "Alert on af_action_reconciliations_total{event=\"required\"} and document the runbook."
+    },
+    {
+      "id": "telemetry-not-live",
+      "severity": "ACCEPTED",
+      "summary": "The OTLP exporter and the Prometheus endpoints are proven in tests, not against a live collector or scraper.",
+      "beforePilot": "Point the pilot deployment at its collector and confirm one run's trace arrives whole."
+    },
+    {
+      "id": "no-dashboards",
+      "severity": "ACCEPTED",
+      "summary": "No dashboards or alert rules are shipped; the metrics catalog is the input for them.",
+      "beforePilot": "Create alerts for run failures, lease expiry, budget denials, store and secret failures, and reconciliations."
+    },
+    {
+      "id": "model-quality-not-in-ci",
+      "severity": "ACCEPTED",
+      "summary": "Live model-quality evaluation spends real tokens, so it runs weekly or by hand, not on every commit. Governance evaluations run on every commit.",
+      "beforePilot": "Run the model-quality workflow for the pilot's model and review the scores."
+    },
+    {
+      "id": "no-mcp-client",
+      "severity": "INFORMATIONAL",
+      "summary": "There is no MCP client: tools are the runtime's own implementations of catalog tool definitions.",
+      "beforePilot": "None for the engineering roles shipped."
+    },
+    {
+      "id": "skills-are-guidance",
+      "severity": "INFORMATIONAL",
+      "summary": "There is no Skill Runtime: skills are catalog data that shape the prompt and name the tools; they do not execute.",
+      "beforePilot": "None for the engineering roles shipped."
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import { ControlPlaneCheckpointStore, FileCheckpointStore } from './checkpoints.js';
 import { loadRuntimeConfig, statePaths } from './config.js';
+import { telemetryFromEnvironment } from '../../../packages/telemetry/src/index.js';
 import { NativeKernel } from './kernel/native-kernel.js';
 import { ManifestVerifier } from './manifest-verifier.js';
 import { AnthropicProvider } from './models/anthropic-provider.js';
@@ -39,8 +40,12 @@ const controlPlane = new ControlPlaneClient({
   privateKey: config.privateKey,
 });
 const environmentKeys = new EnvironmentCredentialBroker();
+// ADR 0035: this process has no HTTP server, so it pushes its traces and metrics.
+const observability = telemetryFromEnvironment('agent-runtime');
+const stopTelemetry = observability.start();
 const host = new RuntimeHost({
   controlPlane,
+  telemetry: observability.telemetry,
   verifier: new ManifestVerifier(config.manifestVerificationKey),
   kernel: new NativeKernel(),
   // Calls are made with the per-run broker below; this one is never the default path.
@@ -101,7 +106,10 @@ void host.start();
 
 function shutdown(signal: string): void {
   consoleLogger.info('agent runtime stopping', { signal });
-  void host.stop().then(() => process.exit(0));
+  void host
+    .stop()
+    .then(() => stopTelemetry())
+    .then(() => process.exit(0));
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

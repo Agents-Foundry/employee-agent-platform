@@ -142,11 +142,14 @@ Each identity has a `role` (ADR 0031). The routes above are for `agent` identiti
 default. Two more routes are for `execution` identities only, and the wrong role gets
 `403 RUNTIME_ROLE_FORBIDDEN`:
 
-| Route                                  | Response                                                                                                                           |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /runtime/v1/credentials/redeem`  | `{ leaseId, credential, expiresAt }` once, for `{ leaseId, grant }` where the signed grant names that lease and everything matches |
-| `POST /runtime/v1/credentials/release` | `{ leaseId, status }` for `{ leaseId, grantId, outcome }`; only the runtime that redeemed the lease may release it                 |
-| `POST /runtime/v1/artifacts/execution` | `201` upload result for `{ grant, artifact, content }`; evidence for the signed grant's run and step (ADR 0033)                    |
+| Route                                            | Response                                                                                                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /runtime/v1/credentials/redeem`            | `{ leaseId, credential, expiresAt }` once, for `{ leaseId, grant }` where the signed grant names that lease and everything matches   |
+| `POST /runtime/v1/credentials/release`           | `{ leaseId, status }` for `{ leaseId, grantId, outcome }`; only the runtime that redeemed the lease may release it                   |
+| `POST /runtime/v1/artifacts/execution`           | `201` upload result for `{ grant, artifact, content }`; evidence for the signed grant's run and step (ADR 0033)                      |
+| `POST /runtime/v1/artifacts/execution/authorize` | `201 { artifactId, target, url, headers, expiresAt }` for `{ grant, artifact }`: permission to upload exactly those bytes (ADR 0037) |
+| `PUT /runtime/v1/artifact-content/:token`        | `204`; the raw bytes, when the permission's target is the control plane                                                              |
+| `POST /runtime/v1/artifacts/execution/complete`  | `201` upload result for `{ grant, artifactId }` once the control plane has read the object back and verified it                      |
 
 Leases (`agent_run_leases`) bind a run to one runtime and session, and last 10 minutes past
 the runtime's last event, heartbeat or checkpoint. After that, a queued run that never started

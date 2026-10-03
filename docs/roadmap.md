@@ -46,8 +46,10 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Isolated execution per approved operation (implemented: the separate execution runtime runs
   each operation under a signed, single-use grant; repository code runs in locked-down
   containers behind an egress proxy)
-- Playwright runs captured as artifacts (implemented); trace, screenshot, console and network
-  evidence beyond the run output (pending)
+- Playwright runs captured as artifacts, with traces, screenshots, console output and bounded
+  network evidence, each under a retention class; large evidence is uploaded directly to the
+  artifact store (implemented,
+  [ADR 0037](adr/0037-direct-artifact-upload-and-browser-evidence.md))
 - Durable artifact storage, retention enforcement and short-lived authorized downloads
   (implemented, [ADR 0033](adr/0033-durable-artifact-storage.md))
 - Pre/post-release sanity packs (pending)
@@ -57,7 +59,13 @@ See `customer-onboarding.md` for the first slice and its rollout limits.
 - Human-approved Jira issue creation and draft GitHub pull requests (implemented, Phases D
   and G)
 - Governance evaluation suites and model-quality evaluations (implemented, ADRs 0019, 0020 and 0025)
-- Failure drills, observability and the QA team pilot (pending)
+- Failure drills, with manual reconciliation of writes whose outcome is unknown (implemented,
+  [ADR 0036](adr/0036-failure-drills-and-reconciliation.md))
+- Traces and metrics across the control plane and both runtimes (implemented,
+  [ADR 0035](adr/0035-observability.md))
+- A pilot-readiness assessment computed from test results and checked by CI (implemented,
+  [ADR 0038](adr/0038-pilot-readiness-assessment.md); see [pilot readiness](pilot-readiness.md))
+- The QA team pilot itself (pending)
 
 ## Architecture V2 track
 
@@ -87,6 +95,10 @@ repositories are checked out with single-use credential leases (ADR 0031).
 Runs are recoverable: checkpoints are durable, leases are kept alive by heartbeats, and another
 runtime continues an abandoned run (ADR 0032). Artifacts are stored durably with enforced
 retention (ADR 0033), and organization model keys come from the secret broker (ADR 0034).
+
+Every run is one trace across the three processes, with metrics for each dependency
+(ADR 0035). Failure drills prove what happens when each component stops at a bad moment; a
+write whose outcome is unknown is blocked until an administrator reconciles it (ADR 0036).
 
 ## Milestone 6 — Agent factory
 

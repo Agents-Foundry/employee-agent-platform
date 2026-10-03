@@ -37,6 +37,7 @@ import {
 } from '../../../../packages/contracts/src/runtime/v1/schemas.js';
 import { RUNTIME_PROTOCOL_V1 } from '../../../../packages/contracts/src/runtime/v1/protocol.js';
 import { constraintKind, type PgStore, type Row } from '../db/pg-store.js';
+import type { Telemetry } from '../../../../packages/telemetry/src/index.js';
 
 export class ExecutionError extends Error {
   constructor(
@@ -111,6 +112,7 @@ export interface ExecutionServiceOptions {
     runId: string,
     artifact: ArtifactRegistration,
   ) => Promise<void>;
+  telemetry?: Telemetry;
   /** Append an agent message to a conversation (caller's transaction). */
   conversationMessage?: (
     organizationId: string,
@@ -198,6 +200,7 @@ export class ExecutionService {
         input.employeeId,
         { task: input.task, runtimeProfile },
       );
+      this.db.afterCommit(() => this.options.telemetry?.count('af_runs_created_total'));
       return this.runRow(input.organizationId, runId);
     });
   }
@@ -1044,8 +1047,32 @@ export class ExecutionService {
       scope.runId,
       scope.organizationId,
     );
-    if (run.status !== to && (to === 'COMPLETED' || to === 'FAILED' || to === 'CANCELLED'))
+    if (run.status !== to && (to === 'COMPLETED' || to === 'FAILED' || to === 'CANCELLED')) {
       await this.options.onRunStopped?.(scope.organizationId, scope.runId, to);
+      const { telemetry } = this.options;
+      const startTimeMs = Date.parse(run.createdAt);
+      const endTimeMs = Date.parse(timestamp);
+      // The run is the root of its trace: every other span of the run hangs under this one.
+      this.db.afterCommit(() => {
+        telemetry?.count('af_runs_finished_total', { status: to, reason: reason ?? 'none' });
+        telemetry?.observe('af_run_duration_ms', endTimeMs - startTimeMs, { status: to });
+        telemetry?.span({
+          runId: scope.runId,
+          name: 'agent.run',
+          subject: 'run',
+          id: scope.runId,
+          startTimeMs,
+          endTimeMs,
+          status: to === 'COMPLETED' ? 'OK' : 'ERROR',
+          attributes: {
+            'af.organization.id': scope.organizationId,
+            'af.thread.id': run.threadId,
+            'af.status': to,
+            ...(reason ? { 'af.reason': reason } : {}),
+          },
+        });
+      });
+    }
   }
 
   private async transitionStep(

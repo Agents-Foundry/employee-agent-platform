@@ -75,6 +75,39 @@ export type ArtifactSummary = Omit<Artifact, 'storageReference'> & { content?: A
 /** Largest artifact a runtime can upload through the signed transport. */
 export const MAX_ARTIFACT_UPLOAD_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Largest artifact an execution runtime can upload directly to the artifact store (ADR 0037):
+ * browser traces and screenshots do not fit the base64 transport.
+ */
+export const MAX_DIRECT_ARTIFACT_BYTES = 128 * 1024 * 1024;
+
+/** What may be uploaded directly. Anything else goes through the signed transport or not at all. */
+export const directUploadMediaTypes = [
+  'application/zip',
+  'application/json',
+  'application/x-ndjson',
+  'image/png',
+  'image/jpeg',
+  'text/plain',
+  'video/webm',
+] as const;
+
+/**
+ * Permission to upload one artifact's bytes straight to the artifact store (ADR 0037). It is
+ * for one object key, one size, one SHA-256 and one media type, and lasts minutes. It contains
+ * a signature, never a store credential.
+ *
+ * `STORE`: send `PUT url` with exactly `headers`. `CONTROL_PLANE`: the store cannot authorize
+ * uploads itself, so `url` is a control-plane path the runtime sends a signed `PUT` to.
+ */
+export interface ArtifactUploadAuthorization {
+  artifactId: string;
+  target: 'STORE' | 'CONTROL_PLANE';
+  url: string;
+  headers: Record<string, string>;
+  expiresAt: string;
+}
+
 /** What a runtime declares about the bytes it uploads; the control plane verifies all of it. */
 export interface ArtifactUploadDescriptor {
   id: string;

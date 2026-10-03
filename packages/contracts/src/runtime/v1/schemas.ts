@@ -3,6 +3,9 @@
 import { z } from 'zod';
 import {
   MAX_ARTIFACT_UPLOAD_BYTES,
+  MAX_DIRECT_ARTIFACT_BYTES,
+  directUploadMediaTypes,
+  type ArtifactUploadAuthorization,
   artifactRetentionPolicies,
   artifactStorageReferencePattern,
   artifactTypes,
@@ -781,6 +784,32 @@ export const artifactUploadDescriptorSchema = z
   })
   .strict() satisfies z.ZodType<ArtifactUploadDescriptor>;
 
+/** A descriptor for a direct upload: a larger size limit and a closed list of media types. */
+export const directArtifactDescriptorSchema = artifactUploadDescriptorSchema
+  .extend({
+    mediaType: z.enum(directUploadMediaTypes),
+    sizeBytes: z.number().int().min(1).max(MAX_DIRECT_ARTIFACT_BYTES),
+  })
+  .strict();
+
+const uploadAuthorizationSchema = z
+  .object({
+    artifactId: uuid,
+    target: z.enum(['STORE', 'CONTROL_PLANE']),
+    url: z.string().min(1).max(2000),
+    headers: z.record(z.string().max(100), z.string().max(4000)),
+    expiresAt: z.iso.datetime(),
+  })
+  .strict();
+
+/** Runtime-side validation of a direct-upload permission. */
+export function parseArtifactUploadAuthorization(input: unknown): ArtifactUploadAuthorization {
+  const parsed = uploadAuthorizationSchema.safeParse(input);
+  if (!parsed.success)
+    throw new RuntimeProtocolError('RUNTIME_RESPONSE_INVALID', issues(parsed.error));
+  return parsed.data;
+}
+
 /** Base64 of at most `MAX_ARTIFACT_UPLOAD_BYTES` bytes. */
 export const artifactContentSchema = z
   .string()
@@ -810,7 +839,7 @@ const artifactUploadSchema = z
     artifactId: uuid,
     storageReference: z.string().max(600).regex(artifactStorageReferencePattern),
     checksum: z.object({ algorithm: z.literal('sha256'), value: digest }).strict(),
-    sizeBytes: z.number().int().min(0).max(MAX_ARTIFACT_UPLOAD_BYTES),
+    sizeBytes: z.number().int().min(0).max(MAX_DIRECT_ARTIFACT_BYTES),
   })
   .strict();
 
