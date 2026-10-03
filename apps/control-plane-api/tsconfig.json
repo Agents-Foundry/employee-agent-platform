@@ -17,6 +17,7 @@
     "../../packages/policy-engine/src/**/*.ts",
     "../../packages/catalog/src/**/*.ts",
     "../../packages/telemetry/src/**/*.ts",
-    "../../packages/readiness/src/**/*.ts"
+    "../../packages/readiness/src/**/*.ts",
+    "../../packages/operations/src/**/*.ts"
   ]
 }
