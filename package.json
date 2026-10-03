@@ -32,6 +32,7 @@
     "eval:quality": "npm run eval:quality --workspace @agents-foundry/control-plane-api",
     "readiness": "npm run readiness --workspace @agents-foundry/control-plane-api",
     "ops:render": "npm run ops:render --workspace @agents-foundry/control-plane-api",
+    "pilot:validate": "npm run pilot:validate --workspace @agents-foundry/control-plane-api --",
     "check": "npm run build && npm run test && npm run readiness"
   },
   "private": true,

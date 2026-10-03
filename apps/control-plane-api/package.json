@@ -12,6 +12,7 @@
     "db": "tsx --env-file-if-exists=../../.env src/db/cli.ts",
     "readiness": "tsx ../../packages/readiness/src/cli.ts",
     "ops:render": "tsx ../../packages/operations/src/render-cli.ts",
+    "pilot:validate": "tsx --env-file-if-exists=../../.env ../../packages/operations/src/validate-cli.ts",
     "test:evals": "vitest run test/evaluations.spec.ts test/quality-evaluations.spec.ts",
     "eval:quality": "vitest run --config vitest.quality.config.ts",
     "eval:quality:trend": "tsx test/evaluations/trend-cli.ts"
