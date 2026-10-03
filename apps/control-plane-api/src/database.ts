@@ -246,6 +246,19 @@ export class ControlPlaneDatabase {
         ];
       }),
     );
+    telemetry.gauge('af_action_reconciliations_open', () =>
+      db.platform(async () => {
+        const counts = new Map(
+          ['CONNECTOR_OUTCOME_UNKNOWN', 'DISPATCH_INTERRUPTED'].map((reason) => [reason, 0]),
+        );
+        for (const row of await db.all<{ reason: string; count: number }>(
+          `SELECT reason, count(*)::int AS count FROM agent_action_reconciliations
+           WHERE state='REQUIRED' GROUP BY reason`,
+        ))
+          counts.set(row.reason, Number(row.count));
+        return [...counts].map(([reason, value]) => ({ labels: { reason }, value }));
+      }),
+    );
     this.genericRuntimeEnabled =
       options.genericRuntime ?? process.env['GENERIC_AGENT_RUNTIME_ENABLED'] === 'true';
     this.qaGenericRuntimeEnabled =
