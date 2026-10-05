@@ -68,3 +68,29 @@ export interface GovernedActionSummary {
 
 /** Approval states for governed actions; `EXPIRED` approvals can never be executed. */
 export type ActionApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+
+/** Why a governed write's outcome is unknown (ADR 0036). */
+export type ActionReconciliationReason = 'CONNECTOR_OUTCOME_UNKNOWN' | 'DISPATCH_INTERRUPTED';
+
+/**
+ * A governed write whose outcome nobody knows, as shown to organization administrators
+ * (ADR 0036, ADR 0039). It carries the control plane's own one-line summary of the request,
+ * with anything that looks like a credential removed, never the request's payload.
+ */
+export interface ActionReconciliation {
+  requestId: string;
+  runId: string;
+  threadId: string;
+  stepId: string | null;
+  action: string;
+  /** What the write was aimed at, for example an issue-tracker project or a repository. */
+  target: { type: string; id: string } | null;
+  /** The summary an approver saw, redacted. Null when none can be written safely. */
+  summary: string | null;
+  reason: ActionReconciliationReason;
+  state: 'REQUIRED' | 'APPLIED' | 'NOT_APPLIED';
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  note?: string;
+}

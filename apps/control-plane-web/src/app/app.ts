@@ -7,6 +7,7 @@ import { OrganizationAdmin } from './organization-admin';
 import { AgentAdmin } from './agent-admin';
 import { AgentInstallations } from './agent-installations';
 import { ActionGovernance } from './action-governance';
+import { ActionReconciliations } from './action-reconciliations';
 import { ModelSpending } from './model-spending';
 import { AlertWebhooks } from './alert-webhooks';
 import { ModelQuality } from './model-quality';
@@ -30,6 +31,7 @@ import type {
     AgentAdmin,
     AgentInstallations,
     ActionGovernance,
+    ActionReconciliations,
     ModelSpending,
     AlertWebhooks,
     ModelQuality,

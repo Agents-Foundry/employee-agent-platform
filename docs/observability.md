@@ -54,4 +54,27 @@ Set on each process (control plane, agent runtime, execution runtime):
 | `af_database_retries_total{reason="connection"}`                     | The database is dropping connections                               |
 | `af_telemetry_dropped_total`                                         | Telemetry is being lost (collector down, or a caller sent content) |
 
-No dashboards or alert rules are shipped.
+## Dashboards and alerts
+
+Dashboards and alert rules are defined once, against the metric catalog, in
+`packages/operations` ([ADR 0039](adr/0039-pilot-operations.md)), and rendered into
+`operations/`:
+
+| File                     | For                                                                  |
+| ------------------------ | -------------------------------------------------------------------- |
+| `operations.json`        | Any backend: the provider-neutral panels and alerts, with thresholds |
+| `prometheus-rules.yaml`  | Prometheus-compatible alerting (Prometheus, Mimir, Thanos, Cortex)   |
+| `grafana-dashboard.json` | A Grafana dashboard over the same queries                            |
+
+The thresholds in those files are recommendations. A deployment sets its own in a JSON file
+(start from `operations/alert-thresholds.example.json`) and renders again:
+
+```bash
+npm run ops:render -- --thresholds /etc/agents-foundry/alert-thresholds.json --out ./rendered
+```
+
+A deployment may change an alert's `threshold`, `for` and `severity`, or set `enabled: false`;
+it cannot change what an alert measures. An unknown alert or setting stops the render. Queries
+use catalog metrics and labels only, and never a label that could carry an identity, a
+location or content. Each alert names the section of the
+[pilot runbook](pilot-runbook.md) to follow.

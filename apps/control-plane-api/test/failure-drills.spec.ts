@@ -1095,4 +1095,68 @@ describe('failure drills', () => {
       ),
     ).toEqual([]);
   }, 120_000);
+  it('12c. shows administrators the unknown write without its payload, and blocks it until they resolve it', async () => {
+    jiraAnswers = async () => {
+      throw new TypeError('fetch failed');
+    };
+    const leaked = `ghp_${'A1b2C3d4'.repeat(5)}`;
+    const input = { ...draft, summary: `Login rejects token=${leaked}` };
+    const first = await startRun();
+    const a = runtime('a', inOrder([{ name: 'issue-tracker', input }], 'Unconfirmed.'));
+    await work(a.host);
+    await approve(first.id);
+    await work(a.host);
+    expect(jira).toHaveLength(1);
+
+    const listing = await call('get', '/api/organization/action-reconciliations', admin).expect(
+      200,
+    );
+    const [item] = listing.body;
+    expect(item).toMatchObject({
+      runId: first.id,
+      threadId: first.threadId,
+      action: 'jira.issue.create',
+      target: { type: 'issue-tracker.project', id: 'QA' },
+      reason: 'CONNECTOR_OUTCOME_UNKNOWN',
+      state: 'REQUIRED',
+    });
+    expect(item.stepId).toEqual(expect.any(String));
+    expect(item.summary).toBe('Create Jira bug in QA: Login rejects [redacted]');
+    // The request is described, never carried: no description, digest, payload or credential.
+    const shown = JSON.stringify(listing.body);
+    for (const absent of [leaked, draft.description, 'Steps:', JIRA_TOKEN, 'secret://'])
+      expect(shown).not.toContain(absent);
+    expect(Object.keys(item)).not.toEqual(
+      expect.arrayContaining(['parameters', 'payloadDigest', 'payload_digest']),
+    );
+    await call('get', '/api/organization/action-reconciliations', employee).expect(403);
+    expect(await metric('af_action_reconciliations_open')).toBe(1);
+
+    // Unresolved, the same write is refused from another run and thread, every time.
+    jiraAnswers = async () => Response.json({ id: '10003', key: 'QA-44' }, { status: 201 });
+    for (const name of ['b', 'a'] as const) {
+      const blocked = await startRun();
+      const host = runtime(name, inOrder([{ name: 'issue-tracker', input }], 'Refused.')).host;
+      await work(host);
+      expect(await toolFailures(blocked.id)).toEqual(['ACTION_DENIED']);
+      expect((await detail(blocked.id)).approvals).toEqual([]);
+    }
+    expect(jira).toHaveLength(1);
+
+    // Resolved as applied, once, and only then may the action be decided again.
+    const path = `/api/organization/action-reconciliations/${item.requestId}/resolution`;
+    expect(
+      (await call('post', path, admin, { resolution: 'APPLIED', note: 'QA-43 exists' }).expect(200))
+        .body,
+    ).toMatchObject({ state: 'APPLIED', resolvedBy: admin.id, note: 'QA-43 exists' });
+    await call('post', path, admin, { resolution: 'NOT_APPLIED' }).expect(409);
+    expect(await metric('af_action_reconciliations_open')).toBe(0);
+    const after = await startRun();
+    const c = runtime('b', inOrder([{ name: 'issue-tracker', input }], 'Filed.'));
+    await work(c.host);
+    expect((await detail(after.id)).approvals.map((approval) => approval.status)).toEqual([
+      'PENDING',
+    ]);
+    await assertNoSecrets();
+  }, 120_000);
 });

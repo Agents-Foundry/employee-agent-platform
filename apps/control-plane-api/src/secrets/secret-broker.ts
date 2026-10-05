@@ -192,12 +192,15 @@ export class VaultSecretProvider implements SecretProvider {
  * The configured provider: Vault when `SECRET_PROVIDER=vault`, otherwise the development
  * file store. An unknown provider name refuses to start.
  */
-export function secretProviderFromEnvironment(development: SecretResolver): SecretProvider {
-  const kind = process.env['SECRET_PROVIDER'] ?? 'development';
+export function secretProviderFromEnvironment(
+  development: SecretResolver,
+  env: NodeJS.ProcessEnv = process.env,
+): SecretProvider {
+  const kind = env['SECRET_PROVIDER'] ?? 'development';
   if (kind === 'development') return new DevelopmentSecretProvider(development);
   if (kind !== 'vault') throw new Error('SECRET_PROVIDER_UNKNOWN');
   const required = (name: string) => {
-    const value = process.env[name]?.trim();
+    const value = env[name]?.trim();
     if (!value) throw new Error(`${name}_REQUIRED`);
     return value;
   };
@@ -205,8 +208,8 @@ export function secretProviderFromEnvironment(development: SecretResolver): Secr
   return new VaultSecretProvider({
     address: required('VAULT_ADDR'),
     mount: required('VAULT_KV_MOUNT'),
-    ...(process.env['VAULT_KV_PREFIX'] ? { prefix: process.env['VAULT_KV_PREFIX'] } : {}),
-    ...(process.env['VAULT_NAMESPACE'] ? { namespace: process.env['VAULT_NAMESPACE'] } : {}),
+    ...(env['VAULT_KV_PREFIX'] ? { prefix: env['VAULT_KV_PREFIX'] } : {}),
+    ...(env['VAULT_NAMESPACE'] ? { namespace: env['VAULT_NAMESPACE'] } : {}),
     // Read on each use so a sidecar can rotate the token without a restart.
     token: () => readFileSync(tokenPath, 'utf8').trim(),
   });

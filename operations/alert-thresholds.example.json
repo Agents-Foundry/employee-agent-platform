@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "alerts": {
+    "runs-failing": { "threshold": 3, "for": "10m" },
+    "queue-backlog": { "threshold": 5 },
+    "model-cost-burn": { "threshold": 20000000, "severity": "warning" },
+    "egress-denials-high": { "enabled": false }
+  }
+}

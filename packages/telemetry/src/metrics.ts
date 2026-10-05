@@ -109,6 +109,11 @@ export const METRICS = define({
     help: 'Actions whose outcome needs, or was given, a manual reconciliation.',
     labels: ['action', 'event'],
   },
+  af_action_reconciliations_open: {
+    type: 'gauge',
+    help: 'Writes with an unknown outcome waiting for an administrator.',
+    labels: ['reason'],
+  },
   af_approvals_total: { type: 'counter', help: 'Approvals decided.', labels: ['action', 'status'] },
   af_approval_wait_ms: {
     type: 'histogram',

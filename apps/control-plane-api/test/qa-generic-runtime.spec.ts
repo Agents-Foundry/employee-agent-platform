@@ -370,6 +370,34 @@ describe('QA on the generic runtime (Phase F)', () => {
         expect.objectContaining({ type: 'test_report', name: 'playwright-report.json' }),
       ]);
       expect(jira.map((call) => call.method)).toEqual(['GET', 'POST']);
+      // What the run asked for and what came of it, without any parameters.
+      const actions = (
+        await demoRequest(app).get(`/api/execution/v1/runs/${runId}/actions`).expect(200)
+      ).body as RunActionSummary[];
+      expect(
+        actions.map(({ action, operationKind, credentialed, outcome }) => ({
+          action,
+          operationKind,
+          credentialed,
+          outcome,
+        })),
+      ).toEqual([
+        { action: 'jira.read', operationKind: null, credentialed: false, outcome: 'SUCCEEDED' },
+        expect.objectContaining({ operationKind: 'git.checkout', outcome: 'SUCCEEDED' }),
+        {
+          action: 'qa.execute_playwright',
+          operationKind: 'playwright.run',
+          credentialed: false,
+          outcome: 'SUCCEEDED',
+        },
+        {
+          action: 'jira.issue.create',
+          operationKind: null,
+          credentialed: false,
+          outcome: 'SUCCEEDED',
+        },
+      ]);
+      expect(JSON.stringify(actions)).not.toContain('Checkout total');
       expect(jira[0]!.url).toBe(
         'https://demo.atlassian.net/rest/api/3/issue/QA-7?fields=summary,status,issuetype,description',
       );
