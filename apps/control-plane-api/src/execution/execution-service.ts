@@ -11,6 +11,7 @@ import type {
   AnySignedAgentManifest,
   ArtifactSummary,
   ManifestReference,
+  RunActionSummary,
   RunApprovalSummary,
   RunStep,
   RunStepKind,
@@ -775,6 +776,69 @@ export class ExecutionService {
         })),
         artifacts: artifacts.map((row) => this.mapArtifact(row)),
       };
+    });
+  }
+
+  /**
+   * The governed actions a run asked for and what came of them (ADR 0039), for the run's
+   * owner or an administrator. Parameters are never included.
+   */
+  listActions(actor: Actor, runId: string): Promise<RunActionSummary[]> {
+    return this.db.tenant(actor.organizationId, async () => {
+      const run = await this.readableRun(actor, runId, true);
+      const rows = await this.db.all(
+        `SELECT q.id, q.action, q.tool_id, q.step_id, q.decision, q.reason, q.created_at,
+          g.operation_kind, g.signed_grant, e.status AS execution_status, e.error_code,
+          s.status AS step_status
+         FROM agent_action_requests q
+         LEFT JOIN agent_execution_grants g ON g.request_id=q.id AND g.organization_id=q.organization_id
+         LEFT JOIN agent_action_executions e ON e.request_id=q.id AND e.organization_id=q.organization_id
+         LEFT JOIN agent_run_steps s ON s.id=q.step_id AND s.organization_id=q.organization_id
+         WHERE q.run_id=? AND q.organization_id=? ORDER BY q.seq`,
+        run.id,
+        actor.organizationId,
+      );
+      return rows.map((row): RunActionSummary => {
+        const decision = String(row['decision']) as RunActionSummary['decision'];
+        const execution = row['execution_status'] ? String(row['execution_status']) : null;
+        const step = row['step_status'] ? String(row['step_status']) : null;
+        const outcome: RunActionSummary['outcome'] =
+          decision === 'DENIED'
+            ? 'DENIED'
+            : execution === 'SUCCEEDED' || (!execution && step === 'COMPLETED')
+              ? 'SUCCEEDED'
+              : execution === 'FAILED' || (!execution && step === 'FAILED')
+                ? 'FAILED'
+                : execution === 'DISPATCHING'
+                  ? 'IN_PROGRESS'
+                  : 'PENDING';
+        let credentialed = false;
+        try {
+          const grant = (
+            typeof row['signed_grant'] === 'string'
+              ? JSON.parse(row['signed_grant'])
+              : row['signed_grant']
+          ) as { payload?: { credential?: unknown } } | null;
+          credentialed = Boolean(grant?.payload?.credential);
+        } catch {
+          credentialed = false;
+        }
+        return {
+          requestId: String(row['id']),
+          action: String(row['action']),
+          toolId: String(row['tool_id']),
+          stepId: String(row['step_id']),
+          decision,
+          reason: String(row['reason']),
+          operationKind: row['operation_kind']
+            ? (String(row['operation_kind']) as RunActionSummary['operationKind'])
+            : null,
+          credentialed,
+          outcome,
+          errorCode: row['error_code'] ? String(row['error_code']) : null,
+          createdAt: String(row['created_at']),
+        };
+      });
     });
   }
 

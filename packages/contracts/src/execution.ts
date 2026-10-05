@@ -341,6 +341,27 @@ export interface AgentRunDetail {
   artifacts: ArtifactSummary[];
 }
 
+/**
+ * One governed action a run asked for, as its owner or an administrator sees it (ADR 0039):
+ * what was decided and what came of it. Never the request's parameters.
+ */
+export interface RunActionSummary {
+  requestId: string;
+  action: string;
+  toolId: string;
+  stepId: string;
+  decision: 'ALLOWED' | 'DENIED' | 'APPROVAL_REQUIRED';
+  /** The decision's reason code, for example `ACTION_RECONCILIATION_REQUIRED`. */
+  reason: string;
+  /** For execution-runtime actions, the operation the grant authorized. */
+  operationKind: ExecutionOperation['kind'] | null;
+  /** A checkout the control plane authenticated with a brokered credential (ADR 0031). */
+  credentialed: boolean;
+  outcome: 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'DENIED';
+  errorCode: string | null;
+  createdAt: Iso8601;
+}
+
 export interface AgentEventPage {
   items: AgentEvent[];
   nextAfterSequence: number;
