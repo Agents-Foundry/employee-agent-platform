@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ExecutionOperation } from '@agents-foundry/contracts';
+import type { ExecutionOperation, RunActionSummary } from '@agents-foundry/contracts';
 import { createDemoApp as createApp, demoRequest } from './helpers.js';
 import { ControlPlaneDatabase } from '../src/database.js';
 import { MemorySecretStore } from '../src/actions/secrets.js';
@@ -388,7 +388,7 @@ describe('QA on the generic runtime (Phase F)', () => {
           action: 'qa.execute_playwright',
           operationKind: 'playwright.run',
           credentialed: false,
-          outcome: 'SUCCEEDED',
+          outcome: 'FAILED',
         },
         {
           action: 'jira.issue.create',
