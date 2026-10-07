@@ -22,19 +22,39 @@ To add a capability or change a proof, edit the assessment file. A proof is a te
 the exact title of a test in it; a test in the control-plane suite fails if the assessment
 names a test that does not exist.
 
+## Code proofs and operational proofs
+
+CI proves the code. It cannot prove the pilot's environment, so six capabilities also name a
+**live proof** that only a run against the deployed pilot can establish
+([ADR 0039](adr/0039-pilot-operations.md)):
+
+| Live proof          | Established by           | What it shows                                                    |
+| ------------------- | ------------------------ | ---------------------------------------------------------------- |
+| `vault-live`        | `npm run pilot:validate` | Vault resolves the health-check secret and the pilot's model key |
+| `object-store-live` | `npm run pilot:validate` | The pilot bucket stores, returns and deletes an object           |
+| `telemetry-live`    | `npm run pilot:validate` | The pilot's collector accepts a trace                            |
+| `sandbox-live`      | `npm run pilot:smoke`    | Dependencies install, tests and Playwright run in the sandbox    |
+| `private-scm-live`  | `npm run pilot:smoke`    | A private repository is checked out with a brokered credential   |
+| `real-model-live`   | `npm run pilot:smoke`    | A run completes with the pilot's real model                      |
+
+Both commands write their report to `.readiness/operational/`; `npm run readiness` reads it
+(or `--operational <directory>`). A live proof counts only when the report names the commit
+being assessed and is at most seven days old. Until then the capability is `AMBER`, never
+`GREEN`, however complete the configuration looks; a failed live proof is `RED`. A limitation
+such as `vault-not-live` is closed only by its live proof having passed.
+
+The report says separately whether code proofs pass (`codeProofsPassed`) and whether every
+operational proof passed (`operationalProofsPassed`). `readyForControlledPilot` needs both.
+In CI the operational proofs have not run, so CI reports "code proofs pass, not ready".
+
 ## Before a pilot
 
-The assessment proves what the tests exercise. Each accepted limitation in the report has a
-`beforePilot` step. In short:
+Follow the [pilot runbook](pilot-runbook.md). In short:
 
-1. Run an upload, a direct upload, a retrieval and a retention pass against the pilot's
-   object store, and resolve a secret through the pilot's Vault.
-2. Point the three processes at the pilot's collector and confirm one run's trace arrives
-   whole; create the alerts in [observability](observability.md).
-3. Use organization-managed model credentials; employee-held keys are refused.
-4. Run execution runtimes with the container provider and the egress proxy, on hosts
-   dedicated to the pilot organization.
-5. Give administrators the runbook for approvals, reconciliation
-   ([failure handling](failure-handling.md)) and artifact download, which have APIs and no
-   screens yet.
-6. Run the model-quality workflow for the pilot's model and review its scores.
+1. Deploy, then run `npm run pilot:validate` on the control-plane host and on each execution
+   host, and `npm run pilot:smoke` from the `Pilot smoke` workflow.
+2. Copy both reports into `.readiness/operational/` and run `npm run readiness` for the
+   deployed commit. Start only if it says "Ready for a controlled pilot".
+3. Load `operations/` into the monitoring system, with the deployment's thresholds.
+4. Use organization-managed model credentials; employee-held keys are refused.
+5. Run the model-quality workflow for the pilot's model and review its scores.

@@ -59,3 +59,4 @@ Thumbs.db
 
 # Pilot-readiness test results and report (ADR 0038)
 /.readiness/
+*.stackdump

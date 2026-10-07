@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "What must be proven before the first controlled organization pilot (ADR 0038). Statuses are not written here: scripts/pilot-readiness.mjs computes them from the test results of the commit being assessed. A capability is GREEN only when every proof ran and passed and no open limitation is linked to it.",
+  "description": "What must be proven before the first controlled organization pilot (ADR 0038, ADR 0039). Statuses are not written here: npm run readiness computes them from the test results of the commit being assessed (code proofs) and from what pilot:validate and pilot:smoke recorded against the deployed pilot for that commit (live proofs). A capability is GREEN only when every proof ran and passed, every live proof it names passed, and no open limitation is linked to it. A pilot is ready only when code proofs and every live proof pass.",
   "capabilities": [
     {
       "id": "tenant-isolation",
@@ -72,7 +72,6 @@
       "id": "policy-approval",
       "title": "Policy and approval controls",
       "minimum": "AMBER",
-      "limitations": ["reconciliation-api-only"],
       "proofs": [
         {
           "file": "apps/control-plane-api/test/action-gateway.spec.ts",
@@ -97,6 +96,14 @@
         {
           "file": "apps/control-plane-api/test/failure-drills.spec.ts",
           "test": "12. stops for reconciliation when a connector times out after the remote system may have accepted (manual reconciliation)"
+        },
+        {
+          "file": "apps/control-plane-api/test/failure-drills.spec.ts",
+          "test": "12c. shows administrators the unknown write without its payload, and blocks it until they resolve it"
+        },
+        {
+          "file": "apps/control-plane-api/test/action-reconciliations.spec.ts",
+          "test": "removes anything shaped like a credential from what administrators are shown"
         }
       ]
     },
@@ -168,13 +175,18 @@
         {
           "file": "apps/control-plane-api/test/failure-drills.spec.ts",
           "test": "8. fails closed when the secret store is unavailable (fail closed, then safe retry)"
+        },
+        {
+          "file": "apps/control-plane-api/test/pilot-validate.spec.ts",
+          "test": "passes a correctly configured pilot environment, changes nothing and prints no secret"
         }
-      ]
+      ],
+      "liveProofs": ["vault-live"]
     },
     {
       "id": "private-repositories",
       "title": "Private repositories",
-      "minimum": "GREEN",
+      "minimum": "AMBER",
       "proofs": [
         {
           "file": "apps/control-plane-api/test/private-checkout-e2e.spec.ts",
@@ -200,7 +212,8 @@
           "file": "apps/execution-runtime/test/private-checkout.spec.ts",
           "test": "cleans up after a crash: partial checkout removed, lease ended, grant closed"
         }
-      ]
+      ],
+      "liveProofs": ["private-scm-live"]
     },
     {
       "id": "execution-sandboxing",
@@ -235,6 +248,10 @@
         {
           "file": "apps/execution-runtime/test/failure-drills.spec.ts",
           "test": "11b. never starts the sandbox when its private network cannot be created, or no proxy is configured"
+        },
+        {
+          "file": "apps/control-plane-api/test/pilot-smoke.spec.ts",
+          "test": "approves only writes aimed at the disposable resources"
         }
       ],
       "operationalProofs": [
@@ -250,7 +267,8 @@
           "file": "apps/execution-runtime/test/playwright-egress.spec.ts",
           "test": "runs real Chromium against the allowed QA host and nothing else"
         }
-      ]
+      ],
+      "liveProofs": ["sandbox-live"]
     },
     {
       "id": "recovery",
@@ -378,13 +396,14 @@
           "file": "apps/control-plane-api/test/failure-drills.spec.ts",
           "test": "9. keeps the run going when the artifact store is unavailable, and stores again when it returns (safe retry)"
         }
-      ]
+      ],
+      "liveProofs": ["object-store-live"]
     },
     {
       "id": "observability",
       "title": "Observability",
       "minimum": "AMBER",
-      "limitations": ["telemetry-not-live", "no-dashboards"],
+      "limitations": ["telemetry-not-live"],
       "proofs": [
         {
           "file": "apps/control-plane-api/test/observability.spec.ts",
@@ -417,8 +436,25 @@
         {
           "file": "apps/execution-runtime/test/failure-drills.spec.ts",
           "test": "serves metrics only to a caller with the operator token"
+        },
+        {
+          "file": "apps/control-plane-api/test/operations.spec.ts",
+          "test": "surfaces every signal a pilot operator needs, from catalog metrics only"
+        },
+        {
+          "file": "apps/control-plane-api/test/operations.spec.ts",
+          "test": "refuses definitions that reach outside the catalog or for identifying labels"
+        },
+        {
+          "file": "apps/control-plane-api/test/operations.spec.ts",
+          "test": "lets a deployment tune thresholds, hold times and severity, but never the query"
+        },
+        {
+          "file": "apps/control-plane-api/test/operations.spec.ts",
+          "test": "ships exactly what the definitions render with the recommended thresholds"
         }
-      ]
+      ],
+      "liveProofs": ["telemetry-live"]
     },
     {
       "id": "evaluation-health",
@@ -453,6 +489,10 @@
         {
           "file": "apps/control-plane-api/test/frontend-engineer.spec.ts",
           "test": "names no role outside the catalog, except the documented legacy QA compatibility"
+        },
+        {
+          "file": "apps/control-plane-api/test/pilot-smoke.spec.ts",
+          "test": "proves the whole path and the live proofs it reached, with no secret in the report"
         }
       ],
       "proofSuites": [
@@ -461,7 +501,8 @@
           "describe": "role governance evaluations",
           "minimumTests": 10
         }
-      ]
+      ],
+      "liveProofs": ["real-model-live"]
     }
   ],
   "limitations": [
@@ -469,13 +510,15 @@
       "id": "object-store-not-live",
       "severity": "ACCEPTED",
       "summary": "The S3-compatible adapter is proven against the AWS signing example and a simulated bucket that checks signatures, not against a live S3, GCS or MinIO service.",
-      "beforePilot": "Run an upload, direct upload, retrieval and retention pass against the pilot bucket."
+      "beforePilot": "Run npm run pilot:validate and npm run pilot:smoke against the pilot (object-store-live).",
+      "resolvedBy": "object-store-live"
     },
     {
       "id": "vault-not-live",
       "severity": "ACCEPTED",
       "summary": "The Vault provider is proven against a simulated KV v2 API, not against a live Vault.",
-      "beforePilot": "Resolve one connector secret and one model key through the pilot Vault."
+      "beforePilot": "Run npm run pilot:validate against the pilot (vault-live).",
+      "resolvedBy": "vault-live"
     },
     {
       "id": "employee-byok-unavailable",
@@ -511,25 +554,14 @@
       "id": "artifact-download-api-only",
       "severity": "ACCEPTED",
       "summary": "Artifact download, model credentials and source-control connections have APIs but no screens in the web or desktop applications.",
-      "beforePilot": "Give pilot administrators the API runbook."
-    },
-    {
-      "id": "reconciliation-api-only",
-      "severity": "ACCEPTED",
-      "summary": "Writes with an unknown outcome are reconciled by an administrator through the API; there is no screen and no notification beyond the metric and audit event.",
-      "beforePilot": "Alert on af_action_reconciliations_total{event=\"required\"} and document the runbook."
+      "beforePilot": "Give pilot administrators docs/pilot-runbook.md."
     },
     {
       "id": "telemetry-not-live",
       "severity": "ACCEPTED",
       "summary": "The OTLP exporter and the Prometheus endpoints are proven in tests, not against a live collector or scraper.",
-      "beforePilot": "Point the pilot deployment at its collector and confirm one run's trace arrives whole."
-    },
-    {
-      "id": "no-dashboards",
-      "severity": "ACCEPTED",
-      "summary": "No dashboards or alert rules are shipped; the metrics catalog is the input for them.",
-      "beforePilot": "Create alerts for run failures, lease expiry, budget denials, store and secret failures, and reconciliations."
+      "beforePilot": "Run npm run pilot:validate against the pilot collector (telemetry-live), and load operations/ into the monitoring system.",
+      "resolvedBy": "telemetry-live"
     },
     {
       "id": "model-quality-not-in-ci",
@@ -548,6 +580,38 @@
       "severity": "INFORMATIONAL",
       "summary": "There is no Skill Runtime: skills are catalog data that shape the prompt and name the tools; they do not execute.",
       "beforePilot": "None for the engineering roles shipped."
+    }
+  ],
+  "liveProofs": [
+    {
+      "id": "vault-live",
+      "title": "The pilot's Vault resolves the health-check secret, the model key and the connector secret",
+      "producedBy": "pilot:validate"
+    },
+    {
+      "id": "object-store-live",
+      "title": "The pilot's object store stores, returns and deletes objects, and serves evidence intact",
+      "producedBy": "pilot:validate"
+    },
+    {
+      "id": "telemetry-live",
+      "title": "The pilot's OTLP collector accepts traces",
+      "producedBy": "pilot:validate"
+    },
+    {
+      "id": "sandbox-live",
+      "title": "Dependencies install, tests and Playwright run in the pilot's sandbox",
+      "producedBy": "pilot:smoke"
+    },
+    {
+      "id": "private-scm-live",
+      "title": "A private repository is checked out with a brokered credential on the pilot",
+      "producedBy": "pilot:smoke"
+    },
+    {
+      "id": "real-model-live",
+      "title": "A run completes on the pilot with a real model",
+      "producedBy": "pilot:smoke"
     }
   ]
 }

@@ -118,8 +118,8 @@ plane and database.
 
 - An unknown outcome stops further writes of that action in the thread until a person acts.
   That is deliberate: the alternative is a duplicate.
-- Reconciliation has an API and no screen. An operator should alert on
-  `af_action_reconciliations_total{event="required"}`.
+- Reconciliation had an API and no screen; ADR 0039 adds the screen and the
+  `reconciliation-required` alert.
 - A provider that offers idempotency keys could turn drill 12 into a safe retry. Jira's issue
   API does not; the connector contract can add this per provider later.
 - Recovery after a lost runtime still waits for the lease to expire, up to ten minutes.

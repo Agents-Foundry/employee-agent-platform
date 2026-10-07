@@ -1,0 +1,65 @@
+name: Pilot smoke
+
+# ADR 0039: one QA run on the deployed pilot stack, against dedicated, disposable resources.
+# It is started by hand only, never by a pull request, and runs in the protected `pilot`
+# environment, whose reviewers approve each run and which alone holds the credentials.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Commit deployed to the pilot (defaults to this workflow's commit)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # Only from the default branch: the code that drives the run is reviewed code.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: pilot
+    timeout-minutes: 75
+    env:
+      PILOT_SMOKE: 'true'
+      PILOT_SMOKE_RESOURCES_DISPOSABLE: ${{ vars.PILOT_SMOKE_RESOURCES_DISPOSABLE }}
+      PILOT_ENVIRONMENT: pilot
+      PILOT_RELEASE_COMMIT: ${{ inputs.release || github.sha }}
+      PILOT_BASE_URL: ${{ vars.PILOT_BASE_URL }}
+      PILOT_SMOKE_ORIGIN: ${{ vars.PILOT_SMOKE_ORIGIN }}
+      PILOT_SMOKE_ORGANIZATION_ID: ${{ vars.PILOT_SMOKE_ORGANIZATION_ID }}
+      PILOT_SMOKE_AGENT_ID: ${{ vars.PILOT_SMOKE_AGENT_ID }}
+      PILOT_SMOKE_STORY_KEY: ${{ vars.PILOT_SMOKE_STORY_KEY }}
+      PILOT_SMOKE_TARGET_URL: ${{ vars.PILOT_SMOKE_TARGET_URL }}
+      PILOT_SMOKE_JIRA_PROJECT: ${{ vars.PILOT_SMOKE_JIRA_PROJECT }}
+      PILOT_SMOKE_REPOSITORY: ${{ vars.PILOT_SMOKE_REPOSITORY }}
+      PILOT_SMOKE_EMPLOYEE_CREDENTIALS_PATH: ${{ runner.temp }}/smoke-employee.json
+      PILOT_SMOKE_ADMIN_CREDENTIALS_PATH: ${{ runner.temp }}/smoke-admin.json
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Write the test accounts' credentials to files
+        env:
+          EMPLOYEE: ${{ secrets.PILOT_SMOKE_EMPLOYEE_CREDENTIALS }}
+          ADMIN: ${{ secrets.PILOT_SMOKE_ADMIN_CREDENTIALS }}
+        run: |
+          umask 077
+          printf '%s' "$EMPLOYEE" > "$PILOT_SMOKE_EMPLOYEE_CREDENTIALS_PATH"
+          printf '%s' "$ADMIN" > "$PILOT_SMOKE_ADMIN_CREDENTIALS_PATH"
+      - run: npm run pilot:smoke
+      - name: Keep the smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-smoke-report
+          path: .readiness/operational/pilot-smoke.json
+          if-no-files-found: ignore

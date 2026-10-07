@@ -388,6 +388,7 @@ describe('QA on the generic runtime (Phase F)', () => {
           action: 'qa.execute_playwright',
           operationKind: 'playwright.run',
           credentialed: false,
+          // The browser checks ran and one failed: the step reports the failure.
           outcome: 'FAILED',
         },
         {
