@@ -10,6 +10,8 @@ runbook's evidence. The commands below print none.
 
 ## Validating a deployment
 
+Set up the environment first with the [pilot environment setup checklist](pilot-environment-setup.md).
+
 After every deployment, before anyone uses it:
 
 ```bash
