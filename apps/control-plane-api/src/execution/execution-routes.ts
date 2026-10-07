@@ -71,9 +71,7 @@ export function configureExecutionRoutes(
     res.json(await service.getRun(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')));
   });
   router.get('/runs/:id/actions', async (req, res) => {
-    res.json(
-      await service.listActions(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')),
-    );
+    res.json(await service.listActions(res.locals['actor'], id(req.params['id'], 'RUN_NOT_FOUND')));
   });
   router.get('/runs/:id/events', async (req, res) => {
     const query = eventQuery.parse(req.query);
