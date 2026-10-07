@@ -38,8 +38,6 @@ jobs:
       PILOT_SMOKE_TARGET_URL: ${{ vars.PILOT_SMOKE_TARGET_URL }}
       PILOT_SMOKE_JIRA_PROJECT: ${{ vars.PILOT_SMOKE_JIRA_PROJECT }}
       PILOT_SMOKE_REPOSITORY: ${{ vars.PILOT_SMOKE_REPOSITORY }}
-      PILOT_SMOKE_EMPLOYEE_CREDENTIALS_PATH: ${{ runner.temp }}/smoke-employee.json
-      PILOT_SMOKE_ADMIN_CREDENTIALS_PATH: ${{ runner.temp }}/smoke-admin.json
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -51,10 +49,13 @@ jobs:
         env:
           EMPLOYEE: ${{ secrets.PILOT_SMOKE_EMPLOYEE_CREDENTIALS }}
           ADMIN: ${{ secrets.PILOT_SMOKE_ADMIN_CREDENTIALS }}
+        # The runner context is not available to job-level env, so the paths are set here.
         run: |
           umask 077
-          printf '%s' "$EMPLOYEE" > "$PILOT_SMOKE_EMPLOYEE_CREDENTIALS_PATH"
-          printf '%s' "$ADMIN" > "$PILOT_SMOKE_ADMIN_CREDENTIALS_PATH"
+          printf '%s' "$EMPLOYEE" > "$RUNNER_TEMP/smoke-employee.json"
+          printf '%s' "$ADMIN" > "$RUNNER_TEMP/smoke-admin.json"
+          echo "PILOT_SMOKE_EMPLOYEE_CREDENTIALS_PATH=$RUNNER_TEMP/smoke-employee.json" >> "$GITHUB_ENV"
+          echo "PILOT_SMOKE_ADMIN_CREDENTIALS_PATH=$RUNNER_TEMP/smoke-admin.json" >> "$GITHUB_ENV"
       - run: npm run pilot:smoke
       - name: Keep the smoke report
         if: always()

@@ -336,3 +336,37 @@ describe('pilot smoke', () => {
     expect(Object.values(report.proofs).every((proof) => proof !== 'passed')).toBe(true);
   });
 });
+
+describe('pilot smoke workflow', () => {
+  const workflow = readFileSync(
+    join(import.meta.dirname, '..', '..', '..', '.github', 'workflows', 'pilot-smoke.yml'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
+  const section = (start: RegExp, end: RegExp) => {
+    const from = workflow.search(start);
+    const rest = workflow.slice(from);
+    const body = rest.indexOf('\n') + 1;
+    const length = rest.slice(body).search(end);
+    return length < 0 ? rest : rest.slice(0, body + length);
+  };
+
+  it('starts only by hand, never on a push or a pull request', () => {
+    const triggers = section(/^on:$/m, /^\S/m);
+    expect(triggers).toMatch(/^ {2}workflow_dispatch:/m);
+    expect([...triggers.matchAll(/^ {2}(\w+):/gm)].map((match) => match[1])).toEqual([
+      'workflow_dispatch',
+    ]);
+    expect(workflow).toContain(
+      "if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+    );
+    expect(workflow).toMatch(/^ {4}environment: pilot$/m);
+  });
+
+  it('uses only contexts GitHub allows in job-level env, so the file parses', () => {
+    const jobEnv = section(/^ {4}env:$/m, /^ {4}\S/m);
+    const contexts = [...jobEnv.matchAll(/\$\{\{\s*(\w+)/g)].map((match) => match[1]);
+    expect(contexts.length).toBeGreaterThan(0);
+    for (const context of contexts)
+      expect(['github', 'vars', 'inputs', 'secrets']).toContain(context);
+  });
+});
