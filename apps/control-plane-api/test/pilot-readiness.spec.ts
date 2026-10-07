@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assess,
+  operationalRecord,
   outcomesFromVitest,
   type Assessment,
   type TestOutcome,
@@ -198,6 +199,110 @@ describe('pilot readiness (ADR 0038)', () => {
     );
   });
 
+  describe('live proofs (ADR 0039)', () => {
+    const withLive: Assessment = {
+      ...sample,
+      capabilities: [
+        sample.capabilities[0]!,
+        { ...sample.capabilities[1]!, liveProofs: ['sandbox-live'] },
+        sample.capabilities[2]!,
+      ],
+      limitations: [
+        { ...sample.limitations[0]!, resolvedBy: 'sandbox-live' },
+        sample.limitations[1]!,
+      ],
+      liveProofs: [
+        { id: 'sandbox-live', title: 'Sandbox on the pilot', producedBy: 'pilot:smoke' },
+      ],
+    };
+    const now = new Date('2026-10-07T12:00:00.000Z');
+    const record = (status: 'passed' | 'failed' | 'not-run', extra: object = {}) => ({
+      kind: 'pilot-smoke' as const,
+      generatedAt: '2026-10-07T10:00:00.000Z',
+      commit: 'abc',
+      environment: 'pilot',
+      proofs: { 'sandbox-live': status },
+      ...extra,
+    });
+    const run = (operational: ReturnType<typeof record>[]) =>
+      assess(withLive, allPassing, { commit: 'abc', now, operational });
+
+    it('is never green, nor ready, until the proof ran against the pilot', () => {
+      const report = run([]);
+      expect(report.capabilities[1]).toMatchObject({ status: 'AMBER', meetsMinimum: true });
+      expect(report.capabilities[1]!.reasons).toContain(
+        'Live proof not established: sandbox-live (run pilot:smoke against the pilot)',
+      );
+      expect(report).toMatchObject({
+        codeProofsPassed: true,
+        operationalProofsPassed: false,
+        readyForControlledPilot: false,
+        problems: [],
+      });
+      // Not running it, or running it without proving it, is the same.
+      expect(run([record('not-run')]).liveProofs[0]!.status).toBe('not-run');
+    });
+
+    it('turns green and closes the limitation it resolves only when it passed', () => {
+      const report = run([record('passed')]);
+      expect(report.capabilities[1]).toMatchObject({ status: 'GREEN', limitations: [] });
+      expect(report.liveProofs[0]).toMatchObject({
+        status: 'passed',
+        evidence: { kind: 'pilot-smoke', environment: 'pilot' },
+      });
+      expect(report).toMatchObject({
+        operationalProofsPassed: true,
+        readyForControlledPilot: true,
+      });
+    });
+
+    it('is red when it failed, and the newest record for this commit decides', () => {
+      const failed = run([record('failed')]);
+      expect(failed.capabilities[1]!.status).toBe('RED');
+      expect(failed).toMatchObject({ codeProofsPassed: true, readyForControlledPilot: false });
+      const later = run([
+        record('failed'),
+        record('passed', { generatedAt: '2026-10-07T11:00:00.000Z' }),
+      ]);
+      expect(later.liveProofs[0]!.status).toBe('passed');
+    });
+
+    it('ignores records of another commit, stale records and malformed ones', () => {
+      for (const stale of [
+        record('passed', { commit: 'other' }),
+        record('passed', { commit: null }),
+        record('passed', { generatedAt: '2026-09-20T10:00:00.000Z' }),
+        record('passed', { generatedAt: '2026-10-08T10:00:00.000Z' }),
+      ]) {
+        const report = run([stale]);
+        expect(report.liveProofs[0]!.status).toBe('not-run');
+        expect(report.readyForControlledPilot).toBe(false);
+      }
+      expect(run([record('passed', { commit: 'other' })]).liveProofs[0]!.reason).toContain(
+        'another commit or is older than 7 days',
+      );
+      expect(operationalRecord({ kind: 'pilot-smoke', generatedAt: 'x', proofs: {} })).toBeNull();
+      expect(
+        operationalRecord({ kind: 'other', generatedAt: now.toISOString(), proofs: {} }),
+      ).toBeNull();
+      expect(
+        operationalRecord({
+          kind: 'pilot-validate',
+          generatedAt: now.toISOString(),
+          commit: 'abc',
+          environment: 'pilot',
+          proofs: { 'vault-live': 'passed', forged: 'GREEN' },
+        }),
+      ).toMatchObject({ proofs: { 'vault-live': 'passed' } });
+      expect(
+        assess(
+          { ...withLive, limitations: [{ ...sample.limitations[0]!, resolvedBy: 'nowhere' }] },
+          allPassing,
+        ).problems,
+      ).toContain('host-checkout is resolved by an unknown live proof: nowhere');
+    });
+  });
+
   describe('the shipped assessment', () => {
     it('covers every area a pilot depends on', () => {
       expect(shipped.capabilities.map((capability) => capability.id)).toEqual([
@@ -224,6 +329,24 @@ describe('pilot readiness (ADR 0038)', () => {
       // A capability that carries an accepted limitation cannot be required to be green.
       for (const capability of shipped.capabilities)
         if (capability.limitations?.length) expect(capability.minimum, capability.id).toBe('AMBER');
+      // ADR 0039: the live environment is proven by running against it, for these six.
+      expect(shipped.liveProofs?.map((proof) => proof.id)).toEqual([
+        'vault-live',
+        'object-store-live',
+        'telemetry-live',
+        'sandbox-live',
+        'private-scm-live',
+        'real-model-live',
+      ]);
+      const live = new Set(shipped.liveProofs!.map((proof) => proof.id));
+      const named = shipped.capabilities.flatMap((capability) => capability.liveProofs ?? []);
+      expect(new Set(named)).toEqual(live);
+      // A build cannot run them, so a capability that needs one cannot be required to be green.
+      for (const capability of shipped.capabilities)
+        if (capability.liveProofs?.length) expect(capability.minimum, capability.id).toBe('AMBER');
+      for (const limitation of shipped.limitations)
+        if (limitation.resolvedBy)
+          expect(live.has(limitation.resolvedBy), limitation.id).toBe(true);
     });
 
     it('names only tests that exist, so a renamed or deleted proof is noticed at once', () => {
