@@ -186,6 +186,19 @@ describe('operator dashboards and alerts', () => {
       expect(() => parseThresholds(raw), why).toThrow(why);
   });
 
+  it('sends every alert to a runbook section that exists', () => {
+    const runbook = readFileSync(join(root, 'docs', 'pilot-runbook.md'), 'utf8');
+    const anchors = new Set(
+      [...runbook.matchAll(/^## (.+)$/gm)].map((match) =>
+        match[1]!
+          .toLowerCase()
+          .replace(/[^a-z0-9 -]/g, '')
+          .replace(/ /g, '-'),
+      ),
+    );
+    for (const alert of ALERTS) expect(anchors, alert.id).toContain(alert.runbook);
+  });
+
   it('ships exactly what the definitions render with the recommended thresholds', () => {
     const shipped = (name: string) => readFileSync(join(root, 'operations', name), 'utf8');
     const alerts = resolveAlerts();

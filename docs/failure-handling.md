@@ -32,6 +32,11 @@ may or may not have applied it. The platform does not guess and does not send it
   thread, and for that exact payload anywhere in the organization;
 - an administrator checks the external system and records what they found.
 
+Administrators do this in the admin web app under **Writes to reconcile**
+([ADR 0039](adr/0039-pilot-operations.md)), which shows each write's target and the request's
+summary, never its payload, and records the outcome once after a confirmation. The same API
+is available:
+
 ```bash
 # What is waiting (organization administrators, password mode)
 GET  /api/organization/action-reconciliations
