@@ -33,3 +33,20 @@
 For each issue attach accountable owner, reviewer, exact source SHA and deployed host configuration, dated command output, positive and negative test artifacts, defect dispositions and explicit signoff. The live readiness system requires six deployment-bound proofs, each no more than seven days old. Never prefill human approvals.
 
 Do not close gates solely because this file, an issue, or a CI workflow exists.
+
+## AF-REL-01 live proof collection checklist (not yet executed)
+
+Use the **same immutable deployed commit** and environment for every proof. Do not paste secrets, tokens, unredacted traces, or customer data into issues or PRs.
+
+| Proof identifier | Minimum evidence to preserve | Current result |
+|---|---|---|
+| `vault-live` | Authorized secret lease/use, denied or revoked access, redacted host report | NOT RUN |
+| `object-store-live` | Artifact write/read and denied cross-scope access, redacted host report | NOT RUN |
+| `telemetry-live` | Trace/metric emission and verified collection path, redacted host report | NOT RUN |
+| `sandbox-live` | Isolated execution plus denied boundary/egress attempt, redacted host report | NOT RUN |
+| `private-scm-live` | Authorized private checkout and rejected unauthorized scope, redacted host report | NOT RUN |
+| `real-model-live` | Approved model request and enforced budget/denial path, redacted host report | NOT RUN |
+
+**Execution order:** (1) capture release SHA, host identity and UTC timestamp; (2) run the documented control-plane and execution-host validators, including negative paths; (3) run the protected Pilot smoke workflow and preserve its artifact; (4) verify all six proof identifiers against the same deployed SHA; (5) run `npm run readiness` on that SHA and preserve the full redacted output; (6) obtain independent review and explicit acceptance. The three readiness flags `codeProofsPassed`, `operationalProofsPassed` and `readyForControlledPilot` must all be true before claiming AF-REL-01 passed.
+
+**Evidence freshness:** Each live proof must be no more than seven days old at the time of acceptance. If the deployed SHA changes, or a proof expires, re-run the affected evidence rather than reusing stale CI artifacts. A green infrastructure PR check demonstrates wrapper behavior only; it is not any of the six live proofs.
