@@ -282,7 +282,6 @@ describe('pilot validation', () => {
         'object-store.round-trip',
         'telemetry.otlp',
         'signing.manifest-key',
-        'signing.execution-verifies',
         'sandbox.images',
         'sandbox.egress-proxy',
         'model.credential',
@@ -302,6 +301,22 @@ describe('pilot validation', () => {
     });
     expect(summarize(report)).toContain('Validation FAILED. No customer data was changed.');
     expect(JSON.stringify(report)).not.toContain(MODEL_KEY);
+  }, 60_000);
+
+  it('rejects a malformed pinned execution-host verification key without a private signing key', async () => {
+    const env = {
+      ...environment(),
+      MANIFEST_SIGNING_KEY_PATH: join(directory, 'missing-private-key.pem'),
+      EXECUTION_GRANT_VERIFICATION_KEY: 'not-a-valid-public-key',
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+    expect(report.proofs).toEqual({
+      'vault-live': 'not-run',
+      'object-store-live': 'not-run',
+      'telemetry-live': 'not-run',
+    });
   }, 60_000);
 
   it('runs only the checks in scope and claims no proof it did not run', async () => {
