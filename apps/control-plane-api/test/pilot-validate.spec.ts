@@ -283,6 +283,7 @@ describe('pilot validation', () => {
         'object-store.round-trip',
         'telemetry.otlp',
         'signing.manifest-key',
+        'signing.execution-verifies',
         'sandbox.images',
         'sandbox.egress-proxy',
         'model.credential',
