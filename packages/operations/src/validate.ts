@@ -404,14 +404,18 @@ export const CHECKS: readonly Check[] = [
     id: 'signing.execution-verifies',
     title: 'The execution runtime’s pinned key verifies the control plane’s grants',
     scope: 'execution-host',
-    async run({ required, secret }) {
-      const pem = readFileSync(required('MANIFEST_SIGNING_KEY_PATH'), 'utf8');
-      secret(pem);
-      const signer = new ManifestSigner(pem);
+    async run({ required }) {
+      // Execution hosts must never receive the control plane's private signing key.
+      // Validate the pinned public key and signature rejection using an ephemeral test signer.
+      // Identity binding to the deployed control plane requires a separately verified key ID.
       const verifier = new GrantVerifier(required('EXECUTION_GRANT_VERIFICATION_KEY'));
-      if (verifier.keyId !== signer.verificationKey.keyId)
-        fail('EXECUTION_GRANT_VERIFICATION_KEY is not the control plane’s signing key.');
-      // A synthetic grant: signed and verified here, never sent anywhere.
+      const signer = new ManifestSigner(
+        generateKeyPairSync('ed25519')
+          .privateKey.export({ type: 'pkcs8', format: 'pem' })
+          .toString(),
+      );
+      const testVerifier = new GrantVerifier(signer.verificationKey.publicKey);
+      // A synthetic grant: signed and verified locally, never sent anywhere.
       const operation: ExecutionOperation = {
         kind: 'git.checkout',
         repositoryUrl: 'https://pilot-validate.invalid/repository.git',
@@ -446,7 +450,7 @@ export const CHECKS: readonly Check[] = [
         issuedAt: new Date(now).toISOString(),
         expiresAt: new Date(now + 60_000).toISOString(),
       };
-      verifier.verify(signer.signExecutionGrant(payload), operation, now);
+      testVerifier.verify(signer.signExecutionGrant(payload), operation, now);
       const forged = new ManifestSigner(
         generateKeyPairSync('ed25519')
           .privateKey.export({ type: 'pkcs8', format: 'pem' })
@@ -459,7 +463,7 @@ export const CHECKS: readonly Check[] = [
         refused = true;
       }
       if (!refused) fail('A grant signed by another key was accepted.');
-      return 'A control-plane grant verifies and a forged one is refused.';
+      return 'Pinned Ed25519 key parsed; local signature verifies and foreign signature is refused. Control-plane identity binding requires external evidence.';
     },
   },
   {
