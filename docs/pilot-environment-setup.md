@@ -75,6 +75,7 @@ Rules that apply throughout:
       (`MANIFEST_SIGNING_KEY_PATH`) [signing.manifest-key].
 - [ ] Its public key configured on every execution host (`EXECUTION_GRANT_VERIFICATION_KEY`)
       [signing.execution-verifies].
+- [ ] Record the control plane's Ed25519 signing key ID (SHA-256 of the SPKI DER public key) through the approved deployment process and configure `PILOT_CONTROL_PLANE_SIGNING_KEY_ID` on each execution host. Verify the recorded value independently against the control-plane key; do not copy the private key to execution hosts. The validator checks the configured identity match, not the provenance of the recorded value.
 - [ ] A workload key pair per agent runtime and per execution runtime; their public keys and
       the organizations they serve in the identities file (`AGENT_RUNTIME_IDENTITIES_PATH`),
       including the pilot organization [runtimes.identities].
