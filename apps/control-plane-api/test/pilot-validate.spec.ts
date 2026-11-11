@@ -154,6 +154,7 @@ describe('pilot validation', () => {
     AGENT_RUNTIME_IDENTITIES_PATH: join(directory, 'identities.json'),
     MANIFEST_SIGNING_KEY_PATH: join(directory, 'signing.pem'),
     EXECUTION_GRANT_VERIFICATION_KEY: signer.verificationKey.publicKeySpki,
+    PILOT_CONTROL_PLANE_SIGNING_KEY_ID: signer.verificationKey.keyId,
     EXECUTION_RUNTIME_URL: execution.url,
     EXECUTION_PROVIDER: 'container',
     EXECUTION_SANDBOX_IMAGE: 'agents-foundry/sandbox:pilot',
@@ -317,6 +318,24 @@ describe('pilot validation', () => {
       'object-store-live': 'not-run',
       'telemetry-live': 'not-run',
     });
+  }, 60_000);
+
+  it('rejects a mismatched expected control-plane signing key without requiring its private key', async () => {
+    const env = {
+      ...environment(),
+      MANIFEST_SIGNING_KEY_PATH: join(directory, 'missing-private-key.pem'),
+      PILOT_CONTROL_PLANE_SIGNING_KEY_ID: '0'.repeat(64),
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+  }, 60_000);
+
+  it('rejects a missing expected control-plane signing key ID', async () => {
+    const env = environment();
+    delete env.PILOT_CONTROL_PLANE_SIGNING_KEY_ID;
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
   }, 60_000);
 
   it('runs only the checks in scope and claims no proof it did not run', async () => {
