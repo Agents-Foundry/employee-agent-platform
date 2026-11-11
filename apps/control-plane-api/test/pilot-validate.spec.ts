@@ -333,7 +333,7 @@ describe('pilot validation', () => {
 
   it('rejects a missing expected control-plane signing key ID', async () => {
     const env = environment();
-    delete env.PILOT_CONTROL_PLANE_SIGNING_KEY_ID;
+    delete env['PILOT_CONTROL_PLANE_SIGNING_KEY_ID'];
     const report = await validatePilot(dependencies(env), ['execution-host']);
     expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
   }, 60_000);
