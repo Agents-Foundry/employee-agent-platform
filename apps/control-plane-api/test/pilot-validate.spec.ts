@@ -355,6 +355,9 @@ describe('pilot validation', () => {
       'telemetry-live': 'not-run',
     });
     expect(report.passed).toBe(true);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.title).toBe(
+      'The execution host validates its pinned public key and local signature checks',
+    );
   }, 60_000);
 
   it('removes any secret value that reaches a report, and counts it', () => {
