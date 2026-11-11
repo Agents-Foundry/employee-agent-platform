@@ -402,7 +402,7 @@ export const CHECKS: readonly Check[] = [
   },
   {
     id: 'signing.execution-verifies',
-    title: 'The execution runtime’s pinned key verifies the control plane’s grants',
+    title: 'The execution host validates its pinned public key and local signature checks',
     scope: 'execution-host',
     async run({ required }) {
       // Execution hosts must never receive the control plane's private signing key.
