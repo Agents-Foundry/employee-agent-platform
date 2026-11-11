@@ -409,6 +409,11 @@ export const CHECKS: readonly Check[] = [
       // Validate the pinned public key and signature rejection using an ephemeral test signer.
       // Identity binding to the deployed control plane requires a separately verified key ID.
       const verifier = new GrantVerifier(required('EXECUTION_GRANT_VERIFICATION_KEY'));
+      // Bind the pinned public key to the independently recorded control-plane key ID.
+      // The expected ID must be obtained through the approved deployment process.
+      const expectedKeyId = required('PILOT_CONTROL_PLANE_SIGNING_KEY_ID');
+      if (!/^[0-9a-f]{64}$/.test(expectedKeyId) || verifier.keyId !== expectedKeyId)
+        fail('Pinned execution key does not match the expected control-plane signing key ID.');
       const signer = new ManifestSigner(
         generateKeyPairSync('ed25519')
           .privateKey.export({ type: 'pkcs8', format: 'pem' })
@@ -463,7 +468,7 @@ export const CHECKS: readonly Check[] = [
         refused = true;
       }
       if (!refused) fail('A grant signed by another key was accepted.');
-      return 'Pinned Ed25519 key parsed; local signature verifies and foreign signature is refused. Control-plane identity binding requires external evidence.';
+      return 'Pinned Ed25519 key parsed; local signature verifies and foreign signature is refused. Pinned key matches configured control-plane key ID; provenance of that ID requires external evidence.';
     },
   },
   {
