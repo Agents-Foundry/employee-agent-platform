@@ -414,7 +414,7 @@ export const CHECKS: readonly Check[] = [
           .privateKey.export({ type: 'pkcs8', format: 'pem' })
           .toString(),
       );
-      const testVerifier = new GrantVerifier(signer.verificationKey.publicKey);
+      const testVerifier = new GrantVerifier(signer.verificationKey.publicKeySpki);
       // A synthetic grant: signed and verified locally, never sent anywhere.
       const operation: ExecutionOperation = {
         kind: 'git.checkout',
