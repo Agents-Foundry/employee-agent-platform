@@ -332,6 +332,16 @@ describe('pilot validation', () => {
     expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
   }, 60_000);
 
+  it('rejects a malformed expected control-plane signing key ID', async () => {
+    const env = {
+      ...environment(),
+      PILOT_CONTROL_PLANE_SIGNING_KEY_ID: 'not-a-sha256-key-id',
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+  }, 60_000);
+
   it('rejects a missing expected control-plane signing key ID', async () => {
     const env = environment();
     delete env['PILOT_CONTROL_PLANE_SIGNING_KEY_ID'];
