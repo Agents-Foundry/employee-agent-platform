@@ -563,7 +563,7 @@ export const CHECKS: readonly Check[] = [
       if (row!['status'] !== 'ACTIVE') fail(`The ${provider} credential is disabled.`);
       if (env['SECRET_PROVIDER'] !== 'vault') fail('SECRET_PROVIDER is not vault.');
       const reference = row!['secret_ref'];
-      if (typeof reference !== 'string' || !/^secret:\/\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(reference))
+      if (typeof reference !== 'string' || !/^secret:\/\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(reference) || reference.slice('secret://'.length).split('/').some((segment) => segment === '.' || segment === '..' || segment === ''))
         fail('The model credential has an invalid secret reference.');
       const value = await deps
         .secretProvider(env)
