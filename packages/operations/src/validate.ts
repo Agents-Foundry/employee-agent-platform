@@ -567,7 +567,7 @@ export const CHECKS: readonly Check[] = [
         fail('The model credential has an invalid secret reference.');
       const value = await deps
         .secretProvider(env)
-        .resolve(organizationId(), reference.slice('secret://'.length));
+        .resolve(organizationId(), String(reference).slice('secret://'.length));
       secret(value);
       if (!value) fail(`${reference} does not resolve.`);
       return `Active ${provider} credential ${reference} resolves; its value is not shown.`;
