@@ -154,6 +154,7 @@ describe('pilot validation', () => {
     AGENT_RUNTIME_IDENTITIES_PATH: join(directory, 'identities.json'),
     MANIFEST_SIGNING_KEY_PATH: join(directory, 'signing.pem'),
     EXECUTION_GRANT_VERIFICATION_KEY: signer.verificationKey.publicKeySpki,
+    PILOT_CONTROL_PLANE_SIGNING_KEY_ID: signer.verificationKey.keyId,
     EXECUTION_RUNTIME_URL: execution.url,
     EXECUTION_PROVIDER: 'container',
     EXECUTION_SANDBOX_IMAGE: 'agents-foundry/sandbox:pilot',
@@ -304,6 +305,83 @@ describe('pilot validation', () => {
     expect(JSON.stringify(report)).not.toContain(MODEL_KEY);
   }, 60_000);
 
+  it('fails closed on malformed model secret references before resolving any secret', async () => {
+    for (const reference of ['model-key', 'prefix://model-key', 'secret://', 'secret://../model-key', 'secret://models/../model-key', 'secret://models/./model-key', 'secret://models//model-key', 'secret://model-key/']) {
+      let resolved = false;
+      const env = environment();
+      const base = dependencies(env);
+      const report = await validatePilot({
+        ...base,
+        query: async (url, sql, params) =>
+          sql.includes('SELECT secret_ref, status FROM organization_model_credentials')
+            ? [{ secret_ref: reference, status: 'ACTIVE' }]
+            : base.query(url, sql, params),
+        secretProvider: (providerEnv) => {
+          const provider = base.secretProvider(providerEnv);
+          return {
+            id: 'vault',
+            resolve: async (org, name) => {
+              if (name !== 'pilot-healthcheck') resolved = true;
+              return provider.resolve(org, name);
+            },
+          };
+        },
+      }, ['control-plane']);
+      expect(report.passed).toBe(false);
+      expect(report.checks.find((check) => check.id === 'model.credential')).toMatchObject({
+        status: 'failed',
+        detail: 'The model credential has an invalid secret reference.',
+      });
+      expect(resolved).toBe(false);
+      expect(JSON.stringify(report)).not.toContain(MODEL_KEY);
+    }
+  }, 60_000);
+
+  it('rejects a malformed pinned execution-host verification key without a private signing key', async () => {
+    const env = {
+      ...environment(),
+      MANIFEST_SIGNING_KEY_PATH: join(directory, 'missing-private-key.pem'),
+      EXECUTION_GRANT_VERIFICATION_KEY: 'not-a-valid-public-key',
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+    expect(report.proofs).toEqual({
+      'vault-live': 'not-run',
+      'object-store-live': 'not-run',
+      'telemetry-live': 'not-run',
+    });
+  }, 60_000);
+
+  it('rejects a mismatched expected control-plane signing key without requiring its private key', async () => {
+    const env = {
+      ...environment(),
+      MANIFEST_SIGNING_KEY_PATH: join(directory, 'missing-private-key.pem'),
+      PILOT_CONTROL_PLANE_SIGNING_KEY_ID: '0'.repeat(64),
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+  }, 60_000);
+
+  it('rejects a malformed expected control-plane signing key ID', async () => {
+    const env = {
+      ...environment(),
+      PILOT_CONTROL_PLANE_SIGNING_KEY_ID: 'not-a-sha256-key-id',
+    };
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+  }, 60_000);
+
+  it('rejects a missing expected control-plane signing key ID', async () => {
+    const env = environment();
+    delete env['PILOT_CONTROL_PLANE_SIGNING_KEY_ID'];
+    const report = await validatePilot(dependencies(env), ['execution-host']);
+    expect(report.passed).toBe(false);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.status).toBe('failed');
+  }, 60_000);
+
   it('runs only the checks in scope and claims no proof it did not run', async () => {
     const report = await validatePilot(dependencies(environment()), ['execution-host']);
     expect(
@@ -320,6 +398,17 @@ describe('pilot validation', () => {
       'telemetry-live': 'not-run',
     });
     expect(report.passed).toBe(true);
+    expect(report.checks.find((check) => check.id === 'signing.execution-verifies')?.title).toBe(
+      'The execution host validates its pinned public key and local signature checks',
+    );
+  }, 60_000);
+
+  it('does not report success when no validation scope executes', async () => {
+    const report = await validatePilot(dependencies(environment()), []);
+    expect(report.passed).toBe(false);
+    expect(report.checks.every((check) => check.status === 'skipped')).toBe(true);
+    expect(Object.values(report.proofs).every((proof) => proof === 'not-run')).toBe(true);
+    expect(summarize(report)).toContain('Validation FAILED.');
   }, 60_000);
 
   it('removes any secret value that reaches a report, and counts it', () => {
