@@ -306,7 +306,7 @@ describe('pilot validation', () => {
   }, 60_000);
 
   it('fails closed on malformed model secret references before resolving any secret', async () => {
-    for (const reference of ['model-key', 'prefix://model-key', 'secret://', 'secret://../model-key']) {
+    for (const reference of ['model-key', 'prefix://model-key', 'secret://', 'secret://../model-key', 'secret://models/../model-key', 'secret://models/./model-key', 'secret://models//model-key', 'secret://model-key/']) {
       let resolved = false;
       const env = environment();
       const base = dependencies(env);
