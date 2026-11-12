@@ -316,13 +316,16 @@ describe('pilot validation', () => {
           sql.includes('SELECT secret_ref, status FROM organization_model_credentials')
             ? [{ secret_ref: reference, status: 'ACTIVE' }]
             : base.query(url, sql, params),
-        secretProvider: () => ({
-          id: 'vault',
-          resolve: async () => {
-            resolved = true;
-            return MODEL_KEY;
-          },
-        }),
+        secretProvider: (providerEnv) => {
+          const provider = base.secretProvider(providerEnv);
+          return {
+            id: 'vault',
+            resolve: async (org, name) => {
+              if (name !== 'pilot-healthcheck') resolved = true;
+              return provider.resolve(org, name);
+            },
+          };
+        },
       }, ['control-plane']);
       expect(report.passed).toBe(false);
       expect(report.checks.find((check) => check.id === 'model.credential')).toMatchObject({
