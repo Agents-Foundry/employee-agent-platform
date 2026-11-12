@@ -305,6 +305,35 @@ describe('pilot validation', () => {
     expect(JSON.stringify(report)).not.toContain(MODEL_KEY);
   }, 60_000);
 
+  it('fails closed on malformed model secret references before resolving any secret', async () => {
+    for (const reference of ['model-key', 'prefix://model-key', 'secret://', 'secret://../model-key']) {
+      let resolved = false;
+      const env = environment();
+      const base = dependencies(env);
+      const report = await validatePilot({
+        ...base,
+        query: async (url, sql, params) =>
+          sql.includes('SELECT secret_ref, status FROM organization_model_credentials')
+            ? [{ secret_ref: reference, status: 'ACTIVE' }]
+            : base.query(url, sql, params),
+        secretProvider: () => ({
+          id: 'vault',
+          resolve: async () => {
+            resolved = true;
+            return MODEL_KEY;
+          },
+        }),
+      }, ['control-plane']);
+      expect(report.passed).toBe(false);
+      expect(report.checks.find((check) => check.id === 'model.credential')).toMatchObject({
+        status: 'failed',
+        detail: 'The model credential has an invalid secret reference.',
+      });
+      expect(resolved).toBe(false);
+      expect(JSON.stringify(report)).not.toContain(MODEL_KEY);
+    }
+  }, 60_000);
+
   it('rejects a malformed pinned execution-host verification key without a private signing key', async () => {
     const env = {
       ...environment(),
