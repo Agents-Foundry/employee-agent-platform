@@ -747,7 +747,7 @@ export async function validatePilot(
     scopes: [...scopes],
     checks,
     proofs,
-    passed: checks.every((check) => check.status !== 'failed'),
+    passed: checks.some((check) => check.status === 'passed') && checks.every((check) => check.status !== 'failed'),
     redactions: 0,
   };
   return scrub(report, secrets);
