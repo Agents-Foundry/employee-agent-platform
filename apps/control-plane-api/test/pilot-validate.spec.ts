@@ -371,6 +371,14 @@ describe('pilot validation', () => {
     );
   }, 60_000);
 
+  it('does not report success when no validation scope executes', async () => {
+    const report = await validatePilot(dependencies(environment()), []);
+    expect(report.passed).toBe(false);
+    expect(report.checks.every((check) => check.status === 'skipped')).toBe(true);
+    expect(Object.values(report.proofs).every((proof) => proof === 'not-run')).toBe(true);
+    expect(summarize(report)).toContain('Validation FAILED.');
+  }, 60_000);
+
   it('removes any secret value that reaches a report, and counts it', () => {
     const leaked = scrub({ redactions: 0, detail: `token ${MODEL_KEY} and "${MODEL_KEY}"` }, [
       MODEL_KEY,
